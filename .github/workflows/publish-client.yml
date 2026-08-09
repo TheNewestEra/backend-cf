@@ -1,17 +1,24 @@
 name: Publish Angular client (reusable)
 
-# Called once per service, independently of (and in parallel with) that
-# service's own deploy job — see deploy.yml. Nothing here is hand-written
-# or committed:
+# Called once per service that's deploying this run, independently of (and
+# in parallel with) that service's own deploy job — see deploy.yml. Nothing
+# here is hand-written or committed:
 #
 #   1. boot the service locally with `wrangler dev` (real workerd runtime,
 #      D1/R2/queues/DOs simulated locally — no live deployment involved)
 #      and pull its OpenAPI spec straight off `GET /openapi.json`
-#   2. feed that spec to openapi-generator-cli's `typescript-angular`
-#      generator, which produces a full ng-packagr-buildable Angular
-#      library (services, models, an injection token for the base URL, ...)
-#   3. build it with ng-packagr
-#   4. publish it to npmjs.com (the `thenewestera` org) under a dist-tag
+#   2. compare that spec against the one embedded in the last package
+#      published under this environment's dist-tag — if nothing changed,
+#      stop here. This is what keeps "deployed but spec unchanged" runs
+#      from cutting a pointless new npm version.
+#   3. otherwise, feed the spec to openapi-generator-cli's
+#      `typescript-angular` generator, which produces a full
+#      ng-packagr-buildable Angular library (services, models, an
+#      injection token for the base URL, ...)
+#   4. build it with ng-packagr, embed the spec itself as openapi.json in
+#      the published package (so step 2 has something to diff against next
+#      time, and so consumers can see exactly what generated their client)
+#   5. publish it to npmjs.com (the `thenewestera` org) under a dist-tag
 #      matching the environment, so the separate Angular frontend installs
 #      `@thenewestera/<service>-ng@dev` / `@staging` / `latest` per
 #      environment
@@ -113,35 +120,68 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve dist-tag
+        id: tag
+        run: |
+          case "${{ inputs.environment }}" in
+            dev) echo "tag=dev" >> "$GITHUB_OUTPUT" ;;
+            staging) echo "tag=staging" >> "$GITHUB_OUTPUT" ;;
+            production) echo "tag=latest" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unknown environment '${{ inputs.environment }}'"; exit 1 ;;
+          esac
+
+      # Compares the freshly-fetched spec against the openapi.json embedded
+      # in whatever's currently published under this dist-tag (see the
+      # "Embed the OpenAPI spec" step below for how it gets there). No
+      # prior publish, or a prior publish with no embedded spec (e.g. one
+      # published before this check existed) both count as "changed", so
+      # this fails open rather than silently going stale.
+      - name: Check whether the OpenAPI spec changed
+        id: spec-diff
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          prev_version=$(npm view "${{ inputs.package_name }}" "dist-tags.$tag" 2>/dev/null || true)
+          echo "prev_version=$prev_version" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$prev_version" ]; then
+            echo "No prior ${{ inputs.package_name }}@$tag publish found — publishing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          npm pack "${{ inputs.package_name }}@$prev_version" --silent --pack-destination "$RUNNER_TEMP" >/dev/null
+          tarball=$(ls "$RUNNER_TEMP"/*.tgz | head -n1)
+          tar -xzf "$tarball" -C "$RUNNER_TEMP" package/openapi.json 2>/dev/null || true
+          rm -f "$tarball"
+
+          if [ ! -f "$RUNNER_TEMP/package/openapi.json" ]; then
+            echo "${{ inputs.package_name }}@$prev_version has no embedded openapi.json — publishing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif diff -q <(jq -S . "$RUNNER_TEMP/package/openapi.json") <(jq -S . spec.json) >/dev/null; then
+            echo "OpenAPI spec unchanged since ${{ inputs.package_name }}@$prev_version — skipping publish."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "OpenAPI spec changed since ${{ inputs.package_name }}@$prev_version — publishing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # One version line, three dist-tags: `dev` is a rolling prerelease
       # (every run gets a fresh, always-increasing build number, no need to
       # look anything up); `staging`/`production` are real semver bumps off
-      # whatever that channel last published, so consumers pinned to
+      # whatever that channel last published (reusing the prev_version the
+      # spec-diff step already looked up), so consumers pinned to
       # `@staging`/`latest` see an ordinary version history.
-      - name: Resolve version + dist-tag
+      - name: Resolve version to publish
         id: version
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+        if: steps.spec-diff.outputs.changed == 'true'
         run: |
           case "${{ inputs.environment }}" in
             dev)
-              tag=dev
               version="0.0.0-dev.${{ github.run_number }}"
               ;;
-            staging)
-              tag=staging
-              current=$(npm view "${{ inputs.package_name }}" dist-tags.staging 2>/dev/null || true)
+            staging|production)
               version=$(node -e "
-                const c = '$current'.trim();
-                const [maj, min, pat] = (c || '1.0.0').split('.').map(Number);
-                console.log(\`\${maj}.\${min}.\${(pat || 0) + (c ? 1 : 0)}\`);
-              ")
-              ;;
-            production)
-              tag=latest
-              current=$(npm view "${{ inputs.package_name }}" dist-tags.latest 2>/dev/null || true)
-              version=$(node -e "
-                const c = '$current'.trim();
+                const c = '${{ steps.spec-diff.outputs.prev_version }}'.trim();
                 const [maj, min, pat] = (c || '1.0.0').split('.').map(Number);
                 console.log(\`\${maj}.\${min}.\${(pat || 0) + (c ? 1 : 0)}\`);
               ")
@@ -149,11 +189,11 @@ jobs:
             *)
               echo "::error::unknown environment '${{ inputs.environment }}'"; exit 1 ;;
           esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Publishing ${{ inputs.package_name }}@$version to dist-tag '$tag'"
+          echo "Publishing ${{ inputs.package_name }}@$version to dist-tag '${{ steps.tag.outputs.tag }}'"
 
       - name: Generate Angular client from OpenAPI spec
+        if: steps.spec-diff.outputs.changed == 'true'
         run: |
           npx --yes @openapitools/openapi-generator-cli@latest generate \
             -i spec.json \
@@ -162,13 +202,34 @@ jobs:
             --additional-properties="npmName=${{ inputs.package_name }},npmVersion=${{ steps.version.outputs.version }},ngVersion=${{ env.NG_VERSION }},providedInRoot=true,stringEnums=true,supportsES6=true"
 
       - name: Build (ng-packagr)
+        if: steps.spec-diff.outputs.changed == 'true'
         working-directory: clients/${{ inputs.service }}
         run: |
           npm install
           npm run build
 
+      # Embeds the exact spec that generated this client into the published
+      # tarball, so the "Check whether the OpenAPI spec changed" step above
+      # has something to diff against on the next run. Forces it into
+      # ng-packagr's `files` allowlist (if one was generated) since npm
+      # otherwise drops anything not explicitly listed there.
+      - name: Embed the OpenAPI spec that generated this client
+        if: steps.spec-diff.outputs.changed == 'true'
+        working-directory: clients/${{ inputs.service }}
+        run: |
+          cp "$GITHUB_WORKSPACE/spec.json" dist/openapi.json
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('dist/package.json', 'utf8'));
+            if (Array.isArray(pkg.files) && !pkg.files.includes('openapi.json')) {
+              pkg.files.push('openapi.json');
+              fs.writeFileSync('dist/package.json', JSON.stringify(pkg, null, 2));
+            }
+          "
+
       - name: Publish to npm
+        if: steps.spec-diff.outputs.changed == 'true'
         working-directory: clients/${{ inputs.service }}/dist
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
-        run: npm publish --tag ${{ steps.version.outputs.tag }} --access public
+        run: npm publish --tag ${{ steps.tag.outputs.tag }} --access public
