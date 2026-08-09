@@ -1,5 +1,6 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
+import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {browseRoutes} from "./catalog.controller";
 import {
@@ -12,6 +13,7 @@ import {
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
+app.use("*", corsMiddleware);
 app.route("/", browseRoutes);
 
 app.doc("/openapi.json", {

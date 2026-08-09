@@ -1,5 +1,6 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
+import {corsMiddleware} from "@game-worker/shared/cors";
 import {friendsRoutes} from "./friends.controller";
 import {UserDO} from "./notifications.model";
 
@@ -7,6 +8,7 @@ export {UserDO};
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
+app.use("*", corsMiddleware);
 app.route("/", friendsRoutes);
 
 app.doc("/openapi.json", {
