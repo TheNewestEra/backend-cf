@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./common.schema": "./src/common.schema.ts",
+    "./cookie": "./src/cookie.ts",
     "./cors": "./src/cors.ts",
     "./http-exceptions": "./src/http-exceptions.ts",
     "./db": "./src/db.ts",

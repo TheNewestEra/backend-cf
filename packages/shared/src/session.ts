@@ -4,44 +4,51 @@
 // else, `currentUser()` used to query D1 directly; now that accounts is
 // its own Worker, that lookup is a service-binding/RPC call instead — see
 // each service's `auth.middleware.ts`, which just plugs its `ACCOUNTS`
-// binding into the functions below. The cookie itself stays local to
-// whichever Worker is handling the request, since that's the one writing
-// the response.
+// binding into the functions below. Only `accounts` ever sets/clears the
+// cookie itself (on login/register/logout); everywhere else just reads it
+// — see ./cookie for why it's scoped to be visible across every service's
+// subdomain rather than staying local to whichever Worker set it.
+//
+// `cookieDomain` is threaded through as a plain argument (rather than read
+// off `c.env` in here) so this file stays agnostic of any particular
+// service's `Env` shape — each caller pulls its own `c.env.COOKIE_DOMAIN`
+// var (see apps/*/wrangler.jsonc) and passes it in.
 
 import type {Context} from "hono";
 import {deleteCookie, getCookie, setCookie} from "hono/cookie";
+import {SESSION_COOKIE, sessionCookieDeleteOpts, sessionCookieOpts} from "./cookie";
 import type {AccountRecord, AccountsSessionRpc} from "./rpc-types";
-
-const SESSION_COOKIE = "session";
-const COOKIE_OPTS = {
-    path: "/",
-    httpOnly: true,
-    secure: true,
-    sameSite: "Lax",
-    maxAge: 60 * 60 * 24 * 30,
-} as const;
 
 /** Accounts are optional everywhere except the friends/invites API, so this
  * returns `null` rather than rejecting when there's no session. */
-export async function currentUserVia(c: Context, accounts: AccountsSessionRpc): Promise<AccountRecord | null> {
+export async function currentUserVia(
+    c: Context,
+    accounts: AccountsSessionRpc,
+    cookieDomain: string,
+): Promise<AccountRecord | null> {
     const token = getCookie(c, SESSION_COOKIE);
     if (!token) return null;
 
     const user = await accounts.getUserBySession(token);
     if (!user) {
-        deleteCookie(c, SESSION_COOKIE, {path: "/"});
+        deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts(cookieDomain));
         return null;
     }
     return user;
 }
 
-export async function logInVia(c: Context, accounts: AccountsSessionRpc, userId: string): Promise<void> {
+export async function logInVia(
+    c: Context,
+    accounts: AccountsSessionRpc,
+    userId: string,
+    cookieDomain: string,
+): Promise<void> {
     const token = await accounts.createSession(userId);
-    setCookie(c, SESSION_COOKIE, token, COOKIE_OPTS);
+    setCookie(c, SESSION_COOKIE, token, sessionCookieOpts(cookieDomain));
 }
 
-export async function logOutVia(c: Context, accounts: AccountsSessionRpc): Promise<void> {
+export async function logOutVia(c: Context, accounts: AccountsSessionRpc, cookieDomain: string): Promise<void> {
     const token = getCookie(c, SESSION_COOKIE);
     if (token) await accounts.deleteSession(token);
-    deleteCookie(c, SESSION_COOKIE, {path: "/"});
+    deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts(cookieDomain));
 }
