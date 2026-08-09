@@ -1,0 +1,221 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "game-puzzle-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-05-25",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	},
+	// Unnamed/top-level config == "dev" (deployed as `game-puzzle-worker`, no
+	// --env flag needed). NOTE: the producer/consumer queue names below
+	// ("puzzle-generation-dev" vs "puzzle-generation") are a pre-existing
+	// mismatch carried forward as-is — out of scope for this change. The
+	// staging/production envs below use matching names, so this mismatch is
+	// not repeated there.
+	// Workers AI: an image model renders one theme-less (or themed) puzzle
+	// image per puzzle.
+	"ai": {
+		"binding": "AI"
+	},
+	// Shared with `guess` — puzzle source images live at
+	// `puzzles/<puzzleId>/source.png` (see puzzle.constants.ts).
+	"r2_buckets": [
+		{
+			"binding": "IMAGES",
+			"bucket_name": "game-guess-images"
+		}
+	],
+	// No D1 binding here on purpose — this service has no tables of its own.
+	// Catalog status and score recording go through the BROWSE/LEADERBOARD
+	// RPC bindings below instead of a direct database binding.
+	"services": [
+		{
+			"binding": "ACCOUNTS",
+			"service": "game-accounts-worker",
+			"entrypoint": "AccountsService"
+		},
+		{
+			"binding": "BROWSE",
+			"service": "game-browse-worker",
+			"entrypoint": "CatalogService"
+		},
+		{
+			"binding": "LEADERBOARD",
+			"service": "game-leaderboard-worker",
+			"entrypoint": "LeaderboardService"
+		}
+	],
+	// One DO instance per puzzle (getByName(puzzleId)). Owns its own SQLite
+	// state and pushes live progress over a hibernatable WebSocket; a DO
+	// alarm enforces the lobby auto-start and play countdown server-side.
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "PUZZLE_DO",
+				"class_name": "PuzzleDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"PuzzleDO"
+			]
+		}
+	],
+	// POST /puzzles enqueues a generation job; the queue consumer (same
+	// Worker) does the actual AI work off the request path.
+	"queues": {
+		"producers": [
+			{
+				"queue": "puzzle-generation-dev",
+				"binding": "PUZZLE_QUEUE"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "puzzle-generation",
+				"max_batch_size": 1,
+				"max_batch_timeout": 5,
+				"max_retries": 3,
+				"dead_letter_queue": "puzzle-generation-dlq"
+			}
+		]
+	},
+	// See apps/accounts/wrangler.jsonc for why binding arrays are fully
+	// re-declared per named environment rather than inherited. Each named
+	// env's service bindings target the sibling Workers deployed to the
+	// *same* environment; queues/R2 bucket are separate physical resources
+	// per env so staging/prod generation traffic never touches dev data.
+	"env": {
+		"staging": {
+			"name": "game-puzzle-worker-staging",
+			"ai": {
+				"binding": "AI"
+			},
+			"r2_buckets": [
+				{
+					"binding": "IMAGES",
+					"bucket_name": "game-guess-images-staging"
+				}
+			],
+			"services": [
+				{
+					"binding": "ACCOUNTS",
+					"service": "game-accounts-worker-staging",
+					"entrypoint": "AccountsService"
+				},
+				{
+					"binding": "BROWSE",
+					"service": "game-browse-worker-staging",
+					"entrypoint": "CatalogService"
+				},
+				{
+					"binding": "LEADERBOARD",
+					"service": "game-leaderboard-worker-staging",
+					"entrypoint": "LeaderboardService"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "PUZZLE_DO",
+						"class_name": "PuzzleDO"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"PuzzleDO"
+					]
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"queue": "puzzle-generation-staging",
+						"binding": "PUZZLE_QUEUE"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "puzzle-generation-staging",
+						"max_batch_size": 1,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "puzzle-generation-dlq-staging"
+					}
+				]
+			}
+		},
+		"production": {
+			"name": "game-puzzle-worker-prod",
+			"ai": {
+				"binding": "AI"
+			},
+			"r2_buckets": [
+				{
+					"binding": "IMAGES",
+					"bucket_name": "game-guess-images-prod"
+				}
+			],
+			"services": [
+				{
+					"binding": "ACCOUNTS",
+					"service": "game-accounts-worker-prod",
+					"entrypoint": "AccountsService"
+				},
+				{
+					"binding": "BROWSE",
+					"service": "game-browse-worker-prod",
+					"entrypoint": "CatalogService"
+				},
+				{
+					"binding": "LEADERBOARD",
+					"service": "game-leaderboard-worker-prod",
+					"entrypoint": "LeaderboardService"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "PUZZLE_DO",
+						"class_name": "PuzzleDO"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"PuzzleDO"
+					]
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"queue": "puzzle-generation-prod",
+						"binding": "PUZZLE_QUEUE"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "puzzle-generation-prod",
+						"max_batch_size": 1,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "puzzle-generation-dlq-prod"
+					}
+				]
+			}
+		}
+	}
+}

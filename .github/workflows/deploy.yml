@@ -1,0 +1,364 @@
+name: Deploy Workers
+
+# Six independently-deployable Workers live under apps/*, sharing
+# packages/shared. Each deploys via the reusable ./deploy-service.yml
+# workflow (checkout/setup-node/npm ci/wrangler deploy), so this file only
+# has to say *which* service, *which* directory, and *which* environment —
+# no repeated boilerplate per service.
+#
+# Two ways to trigger:
+#   - push to master: always targets "dev", and only the services whose
+#     apps/<service>/** (or packages/shared/**) actually changed get
+#     deployed — see the `changes`/`resolve` jobs below.
+#   - workflow_dispatch: you pick the target environment (dev/staging/
+#     production) and tick exactly the services you want deployed. This
+#     bypasses change-detection entirely — an unticked box just doesn't
+#     deploy, regardless of what changed.
+#
+# D1 migrations (one shared physical database per environment, applied via
+# apps/accounts's wrangler.jsonc since every D1-bound service in that
+# environment points at the same database) run once per triggered run,
+# ahead of any D1-bound service's deploy, whenever at least one of
+# accounts/browse/leaderboard/friends is going out.
+#
+# Each service going out also gets its Angular client package (re)published
+# via the reusable ./publish-client.yml workflow — generated from that
+# service's own OpenAPI spec (pulled from a local `wrangler dev` boot, not
+# the live deployment), built with ng-packagr, and published to GitHub
+# Packages under a dist-tag matching the environment (dev/staging/latest).
+# It runs in parallel with, not after, the matching deploy-* job — see the
+# publish-*-client jobs below.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [dev, staging, production]
+        default: dev
+      deploy_accounts:
+        description: "Deploy accounts"
+        type: boolean
+        default: false
+      deploy_browse:
+        description: "Deploy browse"
+        type: boolean
+        default: false
+      deploy_leaderboard:
+        description: "Deploy leaderboard"
+        type: boolean
+        default: false
+      deploy_friends:
+        description: "Deploy friends"
+        type: boolean
+        default: false
+      deploy_guess:
+        description: "Deploy guess"
+        type: boolean
+        default: false
+      deploy_puzzle:
+        description: "Deploy puzzle"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ github.ref }}-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+# packages: write is for publish-client.yml (Angular client packages, see
+# the publish-*-client jobs below) publishing to GitHub Packages.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  # Only meaningful for the push trigger — workflow_dispatch ignores this
+  # entirely in favor of the explicit checkboxes (see `resolve` below).
+  changes:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      accounts: ${{ steps.filter.outputs.accounts }}
+      browse: ${{ steps.filter.outputs.browse }}
+      leaderboard: ${{ steps.filter.outputs.leaderboard }}
+      friends: ${{ steps.filter.outputs.friends }}
+      guess: ${{ steps.filter.outputs.guess }}
+      puzzle: ${{ steps.filter.outputs.puzzle }}
+      shared: ${{ steps.filter.outputs.shared }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            accounts:
+              - 'apps/accounts/**'
+            browse:
+              - 'apps/browse/**'
+            leaderboard:
+              - 'apps/leaderboard/**'
+            friends:
+              - 'apps/friends/**'
+            guess:
+              - 'apps/guess/**'
+            puzzle:
+              - 'apps/puzzle/**'
+            shared:
+              - 'packages/shared/**'
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck --workspaces --if-present
+
+  # Collapses the two trigger types into one consistent set of outputs:
+  # which environment, and which services are actually going out this run.
+  resolve:
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      deploy_accounts: ${{ steps.resolve.outputs.deploy_accounts }}
+      deploy_browse: ${{ steps.resolve.outputs.deploy_browse }}
+      deploy_leaderboard: ${{ steps.resolve.outputs.deploy_leaderboard }}
+      deploy_friends: ${{ steps.resolve.outputs.deploy_friends }}
+      deploy_guess: ${{ steps.resolve.outputs.deploy_guess }}
+      deploy_puzzle: ${{ steps.resolve.outputs.deploy_puzzle }}
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      IN_ENVIRONMENT: ${{ inputs.environment }}
+      IN_ACCOUNTS: ${{ inputs.deploy_accounts }}
+      IN_BROWSE: ${{ inputs.deploy_browse }}
+      IN_LEADERBOARD: ${{ inputs.deploy_leaderboard }}
+      IN_FRIENDS: ${{ inputs.deploy_friends }}
+      IN_GUESS: ${{ inputs.deploy_guess }}
+      IN_PUZZLE: ${{ inputs.deploy_puzzle }}
+      CHANGED_ACCOUNTS: ${{ needs.changes.outputs.accounts }}
+      CHANGED_BROWSE: ${{ needs.changes.outputs.browse }}
+      CHANGED_LEADERBOARD: ${{ needs.changes.outputs.leaderboard }}
+      CHANGED_FRIENDS: ${{ needs.changes.outputs.friends }}
+      CHANGED_GUESS: ${{ needs.changes.outputs.guess }}
+      CHANGED_PUZZLE: ${{ needs.changes.outputs.puzzle }}
+      CHANGED_SHARED: ${{ needs.changes.outputs.shared }}
+    steps:
+      - id: resolve
+        run: |
+          want() {
+            # deploy if this service's own path changed, or the shared
+            # package changed (every service depends on it)
+            if [ "$1" = "true" ] || [ "$CHANGED_SHARED" = "true" ]; then
+              echo true
+            else
+              echo false
+            fi
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — using the environment/checkboxes from the dispatch form, no change-detection."
+            echo "environment=$IN_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+            echo "deploy_accounts=$IN_ACCOUNTS" >> "$GITHUB_OUTPUT"
+            echo "deploy_browse=$IN_BROWSE" >> "$GITHUB_OUTPUT"
+            echo "deploy_leaderboard=$IN_LEADERBOARD" >> "$GITHUB_OUTPUT"
+            echo "deploy_friends=$IN_FRIENDS" >> "$GITHUB_OUTPUT"
+            echo "deploy_guess=$IN_GUESS" >> "$GITHUB_OUTPUT"
+            echo "deploy_puzzle=$IN_PUZZLE" >> "$GITHUB_OUTPUT"
+          else
+            echo "Push to master — deploying dev, gated by which apps/* (or packages/shared) changed."
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
+            echo "deploy_accounts=$(want "$CHANGED_ACCOUNTS")" >> "$GITHUB_OUTPUT"
+            echo "deploy_browse=$(want "$CHANGED_BROWSE")" >> "$GITHUB_OUTPUT"
+            echo "deploy_leaderboard=$(want "$CHANGED_LEADERBOARD")" >> "$GITHUB_OUTPUT"
+            echo "deploy_friends=$(want "$CHANGED_FRIENDS")" >> "$GITHUB_OUTPUT"
+            echo "deploy_guess=$(want "$CHANGED_GUESS")" >> "$GITHUB_OUTPUT"
+            echo "deploy_puzzle=$(want "$CHANGED_PUZZLE")" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Idempotent — safe to run whenever a D1-bound service is going out,
+  # rather than trying to path-filter it correctly. Applied via
+  # apps/accounts's wrangler.jsonc, which points migrations_dir at the
+  # repo-root migrations/ folder; every D1-bound service in a given
+  # environment points at that same physical database.
+  migrations:
+    needs: [typecheck, resolve]
+    if: |
+      needs.resolve.outputs.deploy_accounts == 'true' ||
+      needs.resolve.outputs.deploy_browse == 'true' ||
+      needs.resolve.outputs.deploy_leaderboard == 'true' ||
+      needs.resolve.outputs.deploy_friends == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - id: target
+        run: |
+          case "${{ needs.resolve.outputs.environment }}" in
+            staging)
+              echo "db=game-worker-catalog-staging" >> "$GITHUB_OUTPUT"
+              echo "envflag=--env staging" >> "$GITHUB_OUTPUT"
+              ;;
+            production)
+              echo "db=game-worker-catalog-prod" >> "$GITHUB_OUTPUT"
+              echo "envflag=--env production" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "db=game-worker-catalog" >> "$GITHUB_OUTPUT"
+              echo 'envflag=--env=""' >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+      - name: Apply D1 migrations
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/accounts
+          command: d1 migrations apply ${{ steps.target.outputs.db }} --remote ${{ steps.target.outputs.envflag }}
+
+  deploy-accounts:
+    needs: [resolve, typecheck, migrations]
+    if: needs.resolve.outputs.deploy_accounts == 'true'
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: accounts
+      working_directory: apps/accounts
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  deploy-browse:
+    needs: [resolve, typecheck, migrations]
+    if: needs.resolve.outputs.deploy_browse == 'true'
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: browse
+      working_directory: apps/browse
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  deploy-leaderboard:
+    needs: [resolve, typecheck, migrations]
+    if: needs.resolve.outputs.deploy_leaderboard == 'true'
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: leaderboard
+      working_directory: apps/leaderboard
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  deploy-friends:
+    needs: [resolve, typecheck, migrations]
+    if: needs.resolve.outputs.deploy_friends == 'true'
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: friends
+      working_directory: apps/friends
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  # guess/puzzle have no D1 binding of their own (see their wrangler.jsonc),
+  # so they don't need to wait on the migrations job.
+  deploy-guess:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_guess == 'true'
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: guess
+      working_directory: apps/guess
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  deploy-puzzle:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_puzzle == 'true'
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: puzzle
+      working_directory: apps/puzzle
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  # Publishes each service's Angular client package (see publish-client.yml)
+  # in parallel with — not after — that service's own deploy-* job: the
+  # spec is pulled from a local `wrangler dev` boot, not the live
+  # deployment, so there's nothing to wait on. Gated by the same
+  # deploy_<service> flag as the matching deploy-* job, so a client only
+  # gets (re)published when its service actually changed.
+  publish-accounts-client:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_accounts == 'true'
+    uses: ./.github/workflows/publish-client.yml
+    with:
+      service: accounts
+      working_directory: apps/accounts
+      package_name: "@thenewestera/accounts-ng"
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  publish-browse-client:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_browse == 'true'
+    uses: ./.github/workflows/publish-client.yml
+    with:
+      service: browse
+      working_directory: apps/browse
+      package_name: "@thenewestera/browse-ng"
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  publish-leaderboard-client:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_leaderboard == 'true'
+    uses: ./.github/workflows/publish-client.yml
+    with:
+      service: leaderboard
+      working_directory: apps/leaderboard
+      package_name: "@thenewestera/leaderboard-ng"
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  publish-friends-client:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_friends == 'true'
+    uses: ./.github/workflows/publish-client.yml
+    with:
+      service: friends
+      working_directory: apps/friends
+      package_name: "@thenewestera/friends-ng"
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  publish-guess-client:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_guess == 'true'
+    uses: ./.github/workflows/publish-client.yml
+    with:
+      service: guess
+      working_directory: apps/guess
+      package_name: "@thenewestera/guess-ng"
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  publish-puzzle-client:
+    needs: [resolve, typecheck]
+    if: needs.resolve.outputs.deploy_puzzle == 'true'
+    uses: ./.github/workflows/publish-client.yml
+    with:
+      service: puzzle
+      working_directory: apps/puzzle
+      package_name: "@thenewestera/puzzle-ng"
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit

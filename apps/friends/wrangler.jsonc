@@ -1,0 +1,143 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "game-friends-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-05-25",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	},
+	// Owns `friend_requests`, `friendships`, `friend_groups`,
+	// `friend_group_members`, `game_invites`. Also reads (never writes)
+	// `users` directly for display-name joins, same pragmatic pattern as
+	// `leaderboard` — see friends.service.ts.
+	// Unnamed/top-level config == "dev" (deployed as `game-friends-worker`,
+	// no --env flag needed).
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "game-worker-catalog",
+			"database_id": "cd1e3d8e-eec2-4020-91b6-7adf07247d06",
+			"migrations_dir": "../../migrations"
+		}
+	],
+	"services": [
+		{
+			"binding": "ACCOUNTS",
+			"service": "game-accounts-worker",
+			"entrypoint": "AccountsService"
+		},
+		{
+			"binding": "PUZZLE",
+			"service": "game-puzzle-worker",
+			"entrypoint": "PuzzleService"
+		}
+	],
+	// One DO instance per user (getByName(userId)) — a pure WebSocket
+	// delivery channel for game invites, no storage of its own (see
+	// notifications.model.ts).
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "USER_DO",
+				"class_name": "UserDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"UserDO"
+			]
+		}
+	],
+	// See apps/accounts/wrangler.jsonc for why binding arrays are fully
+	// re-declared per named environment rather than inherited. Each named
+	// env's service bindings target the sibling Workers deployed to the
+	// *same* environment. DO migrations start fresh per env (a `-staging`/
+	// `-prod` script has no prior DO history of its own).
+	"env": {
+		"staging": {
+			"name": "game-friends-worker-staging",
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "game-worker-catalog-staging",
+					"database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
+					"migrations_dir": "../../migrations"
+				}
+			],
+			"services": [
+				{
+					"binding": "ACCOUNTS",
+					"service": "game-accounts-worker-staging",
+					"entrypoint": "AccountsService"
+				},
+				{
+					"binding": "PUZZLE",
+					"service": "game-puzzle-worker-staging",
+					"entrypoint": "PuzzleService"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "USER_DO",
+						"class_name": "UserDO"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"UserDO"
+					]
+				}
+			]
+		},
+		"production": {
+			"name": "game-friends-worker-prod",
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "game-worker-catalog-prod",
+					"database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
+					"migrations_dir": "../../migrations"
+				}
+			],
+			"services": [
+				{
+					"binding": "ACCOUNTS",
+					"service": "game-accounts-worker-prod",
+					"entrypoint": "AccountsService"
+				},
+				{
+					"binding": "PUZZLE",
+					"service": "game-puzzle-worker-prod",
+					"entrypoint": "PuzzleService"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "USER_DO",
+						"class_name": "UserDO"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"UserDO"
+					]
+				}
+			]
+		}
+	}
+}

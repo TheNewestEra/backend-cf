@@ -1,0 +1,33 @@
+# Dependencies
+node_modules
+
+# Wrangler local state/dev storage (root and per-app)
+.wrangler
+
+# Secrets — never commit
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# Angular client packages — regenerated at publish time by
+# .github/workflows/publish-client.yml, never committed. See the README's
+# "Angular client packages" section to regenerate one locally.
+/clients/
+
+# Editors/IDEs
+.idea
+.vscode
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Build/test artifacts
+*.log
+*.tsbuildinfo
+dist/
+coverage/
+
+# npm pack output
+*.tgz

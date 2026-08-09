@@ -1,0 +1,19 @@
+{
+  "name": "@game-worker/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./common.schema": "./src/common.schema.ts",
+    "./http-exceptions": "./src/http-exceptions.ts",
+    "./db": "./src/db.ts",
+    "./ai": "./src/ai.ts",
+    "./session": "./src/session.ts",
+    "./rpc-types": "./src/rpc-types.ts"
+  },
+  "dependencies": {
+    "@hono/zod-openapi": "^1.5.2",
+    "hono": "^4.13.1",
+    "zod": "^4.4.3"
+  }
+}

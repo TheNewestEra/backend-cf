@@ -1,0 +1,61 @@
+name: Deploy one service (reusable)
+
+# Called once per service that needs deploying (see deploy.yml). Holds the
+# checkout/setup-node/npm ci/wrangler-deploy steps that used to be repeated
+# verbatim six times in deploy.yml — every service's call site is now just
+# three `with:` lines.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Service name, for job naming/logs only (e.g. 'accounts')."
+        required: true
+        type: string
+      working_directory:
+        description: "Path to the app's wrangler.jsonc, e.g. 'apps/accounts'."
+        required: true
+        type: string
+      environment:
+        description: "dev | staging | production. 'dev' deploys the unnamed/top-level config (no --env flag); staging/production deploy that named environment block."
+        required: true
+        type: string
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.service }} / ${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      # "dev" is the unnamed/top-level wrangler.jsonc config; staging/
+      # production are named environment blocks. Now that named
+      # environments exist, wrangler wants --env explicitly even for the
+      # top-level config (--env="" selects it) or it prints a warning.
+      - id: envflag
+        run: |
+          if [ "${{ inputs.environment }}" = "dev" ]; then
+            echo 'flag=--env=""' >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=--env ${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: ${{ inputs.working_directory }}
+          command: deploy ${{ steps.envflag.outputs.flag }}

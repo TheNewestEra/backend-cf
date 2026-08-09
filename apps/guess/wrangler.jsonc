@@ -1,0 +1,222 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "game-guess-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-05-25",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	},
+	// Unnamed/top-level config == "dev" (deployed as `game-guess-worker`, no
+	// --env flag needed). NOTE: the producer/consumer queue names below
+	// ("game-generation-dev" vs "game-generation") are a pre-existing
+	// mismatch carried forward as-is — out of scope for this change. The
+	// staging/production envs below use matching names, so this mismatch is
+	// not repeated there.
+	// Workers AI: a text model generates 5 round prompts, an image model
+	// renders each into a picture.
+	"ai": {
+		"binding": "AI"
+	},
+	// Shared with `puzzle` — round images live at `games/<gameId>/<index>.png`
+	// (see guess.constants.ts).
+	"r2_buckets": [
+		{
+			"binding": "IMAGES",
+			"bucket_name": "game-guess-images"
+		}
+	],
+	// No D1 binding here on purpose — this service has no tables of its own.
+	// Catalog status and score recording go through the BROWSE/LEADERBOARD
+	// RPC bindings below instead of a direct database binding.
+	"services": [
+		{
+			"binding": "ACCOUNTS",
+			"service": "game-accounts-worker",
+			"entrypoint": "AccountsService"
+		},
+		{
+			"binding": "BROWSE",
+			"service": "game-browse-worker",
+			"entrypoint": "CatalogService"
+		},
+		{
+			"binding": "LEADERBOARD",
+			"service": "game-leaderboard-worker",
+			"entrypoint": "LeaderboardService"
+		}
+	],
+	// One DO instance per game (getByName(gameId)). Owns the game's durable
+	// state (prompts, round/image status, guesses) and pushes live progress
+	// to every connected WebSocket as the queue consumer calls its RPC
+	// methods.
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "GAME_DO",
+				"class_name": "GameDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"GameDO"
+			]
+		}
+	],
+	// POST /games enqueues a generation job; the queue consumer (same
+	// Worker) does the actual AI work off the request path.
+	"queues": {
+		"producers": [
+			{
+				"queue": "game-generation-dev",
+				"binding": "GAME_QUEUE"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "game-generation",
+				"max_batch_size": 1,
+				"max_batch_timeout": 5,
+				"max_retries": 3,
+				"dead_letter_queue": "game-generation-dlq"
+			}
+		]
+	},
+	// See apps/accounts/wrangler.jsonc for why binding arrays are fully
+	// re-declared per named environment rather than inherited. Each named
+	// env's service bindings target the sibling Workers deployed to the
+	// *same* environment; queues/R2 bucket are separate physical resources
+	// per env so staging/prod generation traffic never touches dev data.
+	"env": {
+		"staging": {
+			"name": "game-guess-worker-staging",
+			"ai": {
+				"binding": "AI"
+			},
+			"r2_buckets": [
+				{
+					"binding": "IMAGES",
+					"bucket_name": "game-guess-images-staging"
+				}
+			],
+			"services": [
+				{
+					"binding": "ACCOUNTS",
+					"service": "game-accounts-worker-staging",
+					"entrypoint": "AccountsService"
+				},
+				{
+					"binding": "BROWSE",
+					"service": "game-browse-worker-staging",
+					"entrypoint": "CatalogService"
+				},
+				{
+					"binding": "LEADERBOARD",
+					"service": "game-leaderboard-worker-staging",
+					"entrypoint": "LeaderboardService"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "GAME_DO",
+						"class_name": "GameDO"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"GameDO"
+					]
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"queue": "game-generation-staging",
+						"binding": "GAME_QUEUE"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "game-generation-staging",
+						"max_batch_size": 1,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "game-generation-dlq-staging"
+					}
+				]
+			}
+		},
+		"production": {
+			"name": "game-guess-worker-prod",
+			"ai": {
+				"binding": "AI"
+			},
+			"r2_buckets": [
+				{
+					"binding": "IMAGES",
+					"bucket_name": "game-guess-images-prod"
+				}
+			],
+			"services": [
+				{
+					"binding": "ACCOUNTS",
+					"service": "game-accounts-worker-prod",
+					"entrypoint": "AccountsService"
+				},
+				{
+					"binding": "BROWSE",
+					"service": "game-browse-worker-prod",
+					"entrypoint": "CatalogService"
+				},
+				{
+					"binding": "LEADERBOARD",
+					"service": "game-leaderboard-worker-prod",
+					"entrypoint": "LeaderboardService"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "GAME_DO",
+						"class_name": "GameDO"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"GameDO"
+					]
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"queue": "game-generation-prod",
+						"binding": "GAME_QUEUE"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "game-generation-prod",
+						"max_batch_size": 1,
+						"max_batch_timeout": 5,
+						"max_retries": 3,
+						"dead_letter_queue": "game-generation-dlq-prod"
+					}
+				]
+			}
+		}
+	}
+}
