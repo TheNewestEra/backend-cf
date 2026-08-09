@@ -109,6 +109,67 @@ export async function topScores(db: Database, query: LeaderboardQuery): Promise<
   return results.map((row, i) => ({ rank: i + 1, userId: row.user_id, username: row.username, score: row.total_score }));
 }
 
+export const FRIENDS_PAGE_SIZE = 10;
+
+/** IDs of `userId`'s friends (not including `userId` itself) — a direct
+ * read against the `friendships` table owned by the `friends` Worker, the
+ * same pragmatic cross-app read this file already does against `users`. */
+async function friendIds(db: Database, userId: string): Promise<string[]> {
+  const { results } = await db
+    .prepare("SELECT friend_id FROM friendships WHERE user_id = ?")
+    .bind(userId)
+    .all<{ friend_id: string }>();
+  return results.map((r) => r.friend_id);
+}
+
+export interface FriendLeaderboardPage {
+  entries: LeaderboardEntry[];
+  hasMore: boolean;
+}
+
+/** Leaderboard scoped to `userId` and their friends, 10 to a page —
+ * ranked the same way as `topScores` (summed score in the window, highest
+ * first) but restricted to that group instead of everyone. `page` is
+ * 1-indexed; `rank` reflects standing within the friend group and keeps
+ * counting up across pages rather than restarting at 1 each time.
+ * Fetches one row past the page boundary instead of a separate COUNT(*)
+ * to learn whether another page exists. */
+export async function friendScores(
+  db: Database,
+  userId: string,
+  query: LeaderboardQuery,
+  page: number,
+): Promise<FriendLeaderboardPage> {
+  const ids = [userId, ...(await friendIds(db, userId))];
+  const { conditions, binds } = filtersFor(query);
+  const idPlaceholders = ids.map(() => "?").join(", ");
+  const where = [`e.user_id IN (${idPlaceholders})`, ...conditions].join(" AND ");
+  const offset = (page - 1) * FRIENDS_PAGE_SIZE;
+
+  const { results } = await db
+    .prepare(
+      `SELECT e.user_id AS user_id, u.username AS username, SUM(e.score) AS total_score
+       FROM leaderboard_entries e
+       JOIN users u ON u.id = e.user_id
+       WHERE ${where}
+       GROUP BY e.user_id
+       ORDER BY total_score DESC
+       LIMIT ? OFFSET ?`,
+    )
+    .bind(...ids, ...binds, FRIENDS_PAGE_SIZE + 1, offset)
+    .all<TotalRow>();
+
+  const hasMore = results.length > FRIENDS_PAGE_SIZE;
+  const entries = results.slice(0, FRIENDS_PAGE_SIZE).map((row, i) => ({
+    rank: offset + i + 1,
+    userId: row.user_id,
+    username: row.username,
+    score: row.total_score,
+  }));
+
+  return { entries, hasMore };
+}
+
 export interface MyScore {
   userId: string;
   username: string;

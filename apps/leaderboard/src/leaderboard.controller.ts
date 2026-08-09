@@ -1,7 +1,13 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import { ErrorSchema } from "@game-worker/shared/common.schema";
 import { currentUser } from "./auth.middleware";
-import { LeaderboardEntrySchema, LeaderboardPeriodSchema, MyLeaderboardScoreSchema } from "./leaderboard.schema";
-import { type LeaderboardQuery, myScore, topScores } from "./leaderboard.service";
+import {
+  LeaderboardEntrySchema,
+  LeaderboardPeriodSchema,
+  LeaderboardScopeSchema,
+  MyLeaderboardScoreSchema,
+} from "./leaderboard.schema";
+import { type LeaderboardQuery, friendScores, myScore, topScores } from "./leaderboard.service";
 
 export const leaderboardRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -16,11 +22,20 @@ leaderboardRoutes.openapi(
       "Guess the Prompt awards a time-weighted score per correct guess; " +
       "Piece Puzzle awards one time-weighted score per solve. `me` is null " +
       "when there's no session; its `rank` is null when the user has no " +
-      "score in the selected window.",
+      "score in the selected window. `scope=friends` restricts `entries` to " +
+      "the signed-in user and their friends, 10 per page, and requires " +
+      "being logged in.",
     request: {
       query: z.object({
         kind: z.enum(["guess", "puzzle"]).optional().openapi({ description: "Filter to one game type" }),
         period: LeaderboardPeriodSchema.optional().openapi({ description: "Defaults to all-time" }),
+        scope: LeaderboardScopeSchema.optional().openapi({ description: "Defaults to global" }),
+        page: z.coerce
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .openapi({ description: "1-indexed; only meaningful for scope=friends, which returns 10 entries per page" }),
       }),
     },
     responses: {
@@ -31,24 +46,38 @@ leaderboardRoutes.openapi(
             schema: z.object({
               entries: z.array(LeaderboardEntrySchema),
               me: MyLeaderboardScoreSchema.nullable(),
+              page: z.number().openapi({ description: "Always 1 for scope=global" }),
+              hasMore: z.boolean().openapi({ description: "Whether a further page exists; always false for scope=global" }),
             }),
           },
         },
       },
+      401: {
+        description: "scope=friends requires being logged in",
+        content: { "application/json": { schema: ErrorSchema } },
+      },
     },
   }),
   async (c) => {
-    const { kind, period } = c.req.valid("query");
+    const { kind, period, scope, page } = c.req.valid("query");
     const query: LeaderboardQuery = { kind: kind ?? null, period: period ?? "all" };
     const user = await currentUser(c);
 
+    if (scope === "friends" && !user) {
+      return c.json({ error: "log in to see the friends leaderboard" }, 401);
+    }
+
+    const pageNum = page ?? 1;
+
     // Independent reads — the current user's standing doesn't depend on
-    // the top-10 list or vice versa — so fetch them concurrently.
-    const [entries, me] = await Promise.all([
-      topScores(c.env.DB, query),
+    // the entries list or vice versa — so fetch them concurrently.
+    const [{ entries, hasMore }, me] = await Promise.all([
+      scope === "friends" && user
+        ? friendScores(c.env.DB, user.id, query, pageNum)
+        : topScores(c.env.DB, query).then((entries) => ({ entries, hasMore: false })),
       user ? myScore(c.env.DB, user.id, query) : Promise.resolve(null),
     ]);
 
-    return c.json({ entries, me }, 200);
+    return c.json({ entries, me, page: scope === "friends" ? pageNum : 1, hasMore }, 200);
   },
 );
