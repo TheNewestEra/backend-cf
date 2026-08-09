@@ -249,9 +249,22 @@ jobs:
       environment: ${{ needs.resolve.outputs.environment }}
     secrets: inherit
 
+  # Depends on deploy-accounts because it holds a `services` binding to
+  # ACCOUNTS (see apps/leaderboard/wrangler.jsonc) — Cloudflare rejects a
+  # deploy whose service binding target doesn't exist yet. `always()` plus
+  # the explicit result checks below are required because deploy-accounts
+  # is only *sometimes* part of a given run (unticked/unchanged services
+  # are "skipped", not "success") — without this, GitHub Actions' default
+  # "skip me if any needed job didn't succeed" behavior would also skip
+  # this job whenever accounts itself isn't being redeployed.
   deploy-leaderboard:
-    needs: [resolve, typecheck, migrations]
-    if: needs.resolve.outputs.deploy_leaderboard == 'true'
+    needs: [resolve, typecheck, migrations, deploy-accounts]
+    if: |
+      always() &&
+      needs.resolve.outputs.deploy_leaderboard == 'true' &&
+      needs.typecheck.result == 'success' &&
+      needs.migrations.result == 'success' &&
+      (needs.deploy-accounts.result == 'success' || needs.deploy-accounts.result == 'skipped')
     uses: ./.github/workflows/deploy-service.yml
     with:
       service: leaderboard
@@ -259,21 +272,19 @@ jobs:
       environment: ${{ needs.resolve.outputs.environment }}
     secrets: inherit
 
-  deploy-friends:
-    needs: [resolve, typecheck, migrations]
-    if: needs.resolve.outputs.deploy_friends == 'true'
-    uses: ./.github/workflows/deploy-service.yml
-    with:
-      service: friends
-      working_directory: apps/friends
-      environment: ${{ needs.resolve.outputs.environment }}
-    secrets: inherit
-
   # guess/puzzle have no D1 binding of their own (see their wrangler.jsonc),
-  # so they don't need to wait on the migrations job.
+  # so they don't need to wait on the migrations job — but they do each
+  # hold `services` bindings to ACCOUNTS/BROWSE/LEADERBOARD (see the
+  # deploy-leaderboard comment above for why the always()/result dance).
   deploy-guess:
-    needs: [resolve, typecheck]
-    if: needs.resolve.outputs.deploy_guess == 'true'
+    needs: [resolve, typecheck, deploy-accounts, deploy-browse, deploy-leaderboard]
+    if: |
+      always() &&
+      needs.resolve.outputs.deploy_guess == 'true' &&
+      needs.typecheck.result == 'success' &&
+      (needs.deploy-accounts.result == 'success' || needs.deploy-accounts.result == 'skipped') &&
+      (needs.deploy-browse.result == 'success' || needs.deploy-browse.result == 'skipped') &&
+      (needs.deploy-leaderboard.result == 'success' || needs.deploy-leaderboard.result == 'skipped')
     uses: ./.github/workflows/deploy-service.yml
     with:
       service: guess
@@ -282,12 +293,39 @@ jobs:
     secrets: inherit
 
   deploy-puzzle:
-    needs: [resolve, typecheck]
-    if: needs.resolve.outputs.deploy_puzzle == 'true'
+    needs: [resolve, typecheck, deploy-accounts, deploy-browse, deploy-leaderboard]
+    if: |
+      always() &&
+      needs.resolve.outputs.deploy_puzzle == 'true' &&
+      needs.typecheck.result == 'success' &&
+      (needs.deploy-accounts.result == 'success' || needs.deploy-accounts.result == 'skipped') &&
+      (needs.deploy-browse.result == 'success' || needs.deploy-browse.result == 'skipped') &&
+      (needs.deploy-leaderboard.result == 'success' || needs.deploy-leaderboard.result == 'skipped')
     uses: ./.github/workflows/deploy-service.yml
     with:
       service: puzzle
       working_directory: apps/puzzle
+      environment: ${{ needs.resolve.outputs.environment }}
+    secrets: inherit
+
+  # Holds `services` bindings to ACCOUNTS and PUZZLE (see
+  # apps/friends/wrangler.jsonc) — deliberately placed after deploy-puzzle
+  # in this file so both of its dependencies read top-to-bottom, though
+  # job order doesn't actually matter to GitHub Actions (the DAG comes
+  # from `needs:`, not file position).
+  deploy-friends:
+    needs: [resolve, typecheck, migrations, deploy-accounts, deploy-puzzle]
+    if: |
+      always() &&
+      needs.resolve.outputs.deploy_friends == 'true' &&
+      needs.typecheck.result == 'success' &&
+      needs.migrations.result == 'success' &&
+      (needs.deploy-accounts.result == 'success' || needs.deploy-accounts.result == 'skipped') &&
+      (needs.deploy-puzzle.result == 'success' || needs.deploy-puzzle.result == 'skipped')
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      service: friends
+      working_directory: apps/friends
       environment: ${{ needs.resolve.outputs.environment }}
     secrets: inherit
 
