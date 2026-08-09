@@ -25,7 +25,10 @@ function directSessionRpc(db: Database): AccountsSessionRpc {
 }
 
 export const currentUser = (c: Context<{ Bindings: Env }>) =>
-    currentUserVia(c, directSessionRpc(c.env.DB), c.env.COOKIE_DOMAIN);
+    currentUserVia(c, directSessionRpc(c.env.DB));
+
 export const logIn = (c: Context<{ Bindings: Env }>, userId: string) =>
-    logInVia(c, directSessionRpc(c.env.DB), userId, c.env.COOKIE_DOMAIN);
-export const logOut = (c: Context<{ Bindings: Env }>) => logOutVia(c, directSessionRpc(c.env.DB), c.env.COOKIE_DOMAIN);
+    logInVia(c, directSessionRpc(c.env.DB), userId);
+
+export const logOut = (c: Context<{ Bindings: Env }>) =>
+    logOutVia(c, directSessionRpc(c.env.DB));

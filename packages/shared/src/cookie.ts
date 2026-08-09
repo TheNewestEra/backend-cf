@@ -9,10 +9,12 @@
 
 export const SESSION_COOKIE = "session";
 
-export function sessionCookieOpts(domain: string) {
+const COOKIE_DOMAIN = ".ryanb.co.za"
+
+export function sessionCookieOpts() {
     return {
         path: "/",
-        domain,
+        COOKIE_DOMAIN,
         httpOnly: true,
         secure: true,
         sameSite: "Lax",
@@ -23,6 +25,4 @@ export function sessionCookieOpts(domain: string) {
 // deleteCookie must be called with the same path+domain used to set the
 // cookie, or it clears a different (non-existent) host-only cookie and
 // leaves the real one behind.
-export function sessionCookieDeleteOpts(domain: string) {
-    return {path: "/", domain} as const;
-}
+export const sessionCookieDeleteOpts = () => ({path: "/", COOKIE_DOMAIN} as const);

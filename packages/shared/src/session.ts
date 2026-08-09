@@ -23,15 +23,14 @@ import type {AccountRecord, AccountsSessionRpc} from "./rpc-types";
  * returns `null` rather than rejecting when there's no session. */
 export async function currentUserVia(
     c: Context,
-    accounts: AccountsSessionRpc,
-    cookieDomain: string,
+    accounts: AccountsSessionRpc
 ): Promise<AccountRecord | null> {
     const token = getCookie(c, SESSION_COOKIE);
     if (!token) return null;
 
     const user = await accounts.getUserBySession(token);
     if (!user) {
-        deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts(cookieDomain));
+        deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts());
         return null;
     }
     return user;
@@ -41,14 +40,13 @@ export async function logInVia(
     c: Context,
     accounts: AccountsSessionRpc,
     userId: string,
-    cookieDomain: string,
 ): Promise<void> {
     const token = await accounts.createSession(userId);
-    setCookie(c, SESSION_COOKIE, token, sessionCookieOpts(cookieDomain));
+    setCookie(c, SESSION_COOKIE, token, sessionCookieOpts());
 }
 
-export async function logOutVia(c: Context, accounts: AccountsSessionRpc, cookieDomain: string): Promise<void> {
+export async function logOutVia(c: Context, accounts: AccountsSessionRpc): Promise<void> {
     const token = getCookie(c, SESSION_COOKIE);
     if (token) await accounts.deleteSession(token);
-    deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts(cookieDomain));
+    deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts());
 }
