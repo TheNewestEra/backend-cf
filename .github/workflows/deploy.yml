@@ -21,10 +21,10 @@ name: Deploy Workers
 # Each service going out also gets its Angular client package (re)published
 # via the reusable ./publish-client.yml workflow — generated from that
 # service's own OpenAPI spec (pulled from a local `wrangler dev` boot, not
-# the live deployment), built with ng-packagr, and published to GitHub
-# Packages under a dist-tag matching the environment (dev/staging/latest).
-# It runs in parallel with, not after, the matching deploy-* job — see the
-# publish-*-client jobs below.
+# the live deployment), built with ng-packagr, and published to npmjs.com
+# (the `thenewestera` org) under a dist-tag matching the environment
+# (dev/staging/latest). It runs in parallel with, not after, the matching
+# deploy-* job — see the publish-*-client jobs below.
 on:
   push:
     branches: [main]
@@ -64,11 +64,8 @@ concurrency:
   group: deploy-${{ github.ref }}-${{ github.event.inputs.environment || 'dev' }}
   cancel-in-progress: false
 
-# packages: write is for publish-client.yml (Angular client packages, see
-# the publish-*-client jobs below) publishing to GitHub Packages.
 permissions:
   contents: read
-  packages: write
 
 env:
   NODE_VERSION: "22"
