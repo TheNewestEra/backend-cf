@@ -34,7 +34,7 @@ name: Deploy Workers
 # publish-*-client jobs below.
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
     inputs:
       environment:
