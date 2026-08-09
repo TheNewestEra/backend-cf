@@ -15,6 +15,10 @@ name: Deploy Workers
 #     bypasses change-detection entirely — an unticked box just doesn't
 #     deploy, regardless of what changed.
 #
+# On the push path, put "[deploy all]" anywhere in the commit message to
+# bypass path-filtering for that push and deploy every service to dev
+# regardless of what actually changed — see `FORCE_ALL` in `resolve` below.
+#
 # D1 migrations (one shared physical database per environment, applied via
 # apps/accounts's wrangler.jsonc since every D1-bound service in that
 # environment points at the same database) run once per triggered run,
@@ -152,13 +156,21 @@ jobs:
       CHANGED_GUESS: ${{ needs.changes.outputs.guess }}
       CHANGED_PUZZLE: ${{ needs.changes.outputs.puzzle }}
       CHANGED_SHARED: ${{ needs.changes.outputs.shared }}
+      # Bypass for the push trigger's path-filter gating: put "[deploy all]"
+      # anywhere in the commit message (e.g. after an infra-only change
+      # that path-filtering can't see, like a wrangler.jsonc-independent
+      # account-level tweak) to deploy every service on that push,
+      # regardless of what actually changed. workflow_dispatch already
+      # bypasses change-detection entirely via its checkboxes, so this only
+      # affects the push path.
+      FORCE_ALL: ${{ contains(github.event.head_commit.message, '[deploy all]') }}
     steps:
       - id: resolve
         run: |
           want() {
-            # deploy if this service's own path changed, or the shared
-            # package changed (every service depends on it)
-            if [ "$1" = "true" ] || [ "$CHANGED_SHARED" = "true" ]; then
+            # deploy if forced, this service's own path changed, or the
+            # shared package changed (every service depends on it)
+            if [ "$FORCE_ALL" = "true" ] || [ "$1" = "true" ] || [ "$CHANGED_SHARED" = "true" ]; then
               echo true
             else
               echo false
@@ -175,7 +187,11 @@ jobs:
             echo "deploy_guess=$IN_GUESS" >> "$GITHUB_OUTPUT"
             echo "deploy_puzzle=$IN_PUZZLE" >> "$GITHUB_OUTPUT"
           else
-            echo "Push to master — deploying dev, gated by which apps/* (or packages/shared) changed."
+            if [ "$FORCE_ALL" = "true" ]; then
+              echo "Push to master — '[deploy all]' found in the commit message, bypassing change-detection: deploying every service."
+            else
+              echo "Push to master — deploying dev, gated by which apps/* (or packages/shared) changed."
+            fi
             echo "environment=dev" >> "$GITHUB_OUTPUT"
             echo "deploy_accounts=$(want "$CHANGED_ACCOUNTS")" >> "$GITHUB_OUTPUT"
             echo "deploy_browse=$(want "$CHANGED_BROWSE")" >> "$GITHUB_OUTPUT"
