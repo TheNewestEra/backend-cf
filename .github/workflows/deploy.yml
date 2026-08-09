@@ -7,13 +7,10 @@ name: Deploy Workers
 # no repeated boilerplate per service.
 #
 # Two ways to trigger:
-#   - push to master: always targets "dev", and only the services whose
-#     apps/<service>/** (or packages/shared/**) actually changed get
-#     deployed — see the `changes`/`resolve` jobs below.
+#   - push to master: always targets "dev" and always deploys every
+#     service — see `resolve` below.
 #   - workflow_dispatch: you pick the target environment (dev/staging/
-#     production) and tick exactly the services you want deployed. This
-#     bypasses change-detection entirely — an unticked box just doesn't
-#     deploy, regardless of what changed.
+#     production) and tick exactly the services you want deployed.
 #
 # D1 migrations (one shared physical database per environment, applied via
 # apps/accounts's wrangler.jsonc since every D1-bound service in that
@@ -77,40 +74,6 @@ env:
   NODE_VERSION: "22"
 
 jobs:
-  # Only meaningful for the push trigger — workflow_dispatch ignores this
-  # entirely in favor of the explicit checkboxes (see `resolve` below).
-  changes:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    outputs:
-      accounts: ${{ steps.filter.outputs.accounts }}
-      browse: ${{ steps.filter.outputs.browse }}
-      leaderboard: ${{ steps.filter.outputs.leaderboard }}
-      friends: ${{ steps.filter.outputs.friends }}
-      guess: ${{ steps.filter.outputs.guess }}
-      puzzle: ${{ steps.filter.outputs.puzzle }}
-      shared: ${{ steps.filter.outputs.shared }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            accounts:
-              - 'apps/accounts/**'
-            browse:
-              - 'apps/browse/**'
-            leaderboard:
-              - 'apps/leaderboard/**'
-            friends:
-              - 'apps/friends/**'
-            guess:
-              - 'apps/guess/**'
-            puzzle:
-              - 'apps/puzzle/**'
-            shared:
-              - 'packages/shared/**'
-
   typecheck:
     runs-on: ubuntu-latest
     steps:
@@ -123,10 +86,10 @@ jobs:
       - run: npm run typecheck --workspaces --if-present
 
   # Collapses the two trigger types into one consistent set of outputs:
-  # which environment, and which services are actually going out this run.
+  # which environment, and which services are going out this run. No
+  # change-detection — push always deploys all six; workflow_dispatch
+  # always defers to its own checkboxes.
   resolve:
-    needs: changes
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     outputs:
       environment: ${{ steps.resolve.outputs.environment }}
@@ -145,28 +108,11 @@ jobs:
       IN_FRIENDS: ${{ inputs.deploy_friends }}
       IN_GUESS: ${{ inputs.deploy_guess }}
       IN_PUZZLE: ${{ inputs.deploy_puzzle }}
-      CHANGED_ACCOUNTS: ${{ needs.changes.outputs.accounts }}
-      CHANGED_BROWSE: ${{ needs.changes.outputs.browse }}
-      CHANGED_LEADERBOARD: ${{ needs.changes.outputs.leaderboard }}
-      CHANGED_FRIENDS: ${{ needs.changes.outputs.friends }}
-      CHANGED_GUESS: ${{ needs.changes.outputs.guess }}
-      CHANGED_PUZZLE: ${{ needs.changes.outputs.puzzle }}
-      CHANGED_SHARED: ${{ needs.changes.outputs.shared }}
     steps:
       - id: resolve
         run: |
-          want() {
-            # deploy if this service's own path changed, or the shared
-            # package changed (every service depends on it)
-            if [ "$1" = "true" ] || [ "$CHANGED_SHARED" = "true" ]; then
-              echo true
-            else
-              echo false
-            fi
-          }
-
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "Manual dispatch — using the environment/checkboxes from the dispatch form, no change-detection."
+            echo "Manual dispatch — using the environment/checkboxes from the dispatch form."
             echo "environment=$IN_ENVIRONMENT" >> "$GITHUB_OUTPUT"
             echo "deploy_accounts=$IN_ACCOUNTS" >> "$GITHUB_OUTPUT"
             echo "deploy_browse=$IN_BROWSE" >> "$GITHUB_OUTPUT"
@@ -175,14 +121,14 @@ jobs:
             echo "deploy_guess=$IN_GUESS" >> "$GITHUB_OUTPUT"
             echo "deploy_puzzle=$IN_PUZZLE" >> "$GITHUB_OUTPUT"
           else
-            echo "Push to master — deploying dev, gated by which apps/* (or packages/shared) changed."
-            echo "environment=dev" >> "$GITHUB_OUTPUT"
-            echo "deploy_accounts=$(want "$CHANGED_ACCOUNTS")" >> "$GITHUB_OUTPUT"
-            echo "deploy_browse=$(want "$CHANGED_BROWSE")" >> "$GITHUB_OUTPUT"
-            echo "deploy_leaderboard=$(want "$CHANGED_LEADERBOARD")" >> "$GITHUB_OUTPUT"
-            echo "deploy_friends=$(want "$CHANGED_FRIENDS")" >> "$GITHUB_OUTPUT"
-            echo "deploy_guess=$(want "$CHANGED_GUESS")" >> "$GITHUB_OUTPUT"
-            echo "deploy_puzzle=$(want "$CHANGED_PUZZLE")" >> "$GITHUB_OUTPUT"
+            echo "Push to master — deploying every service to dev."
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "deploy_accounts=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_browse=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_leaderboard=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_friends=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_guess=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_puzzle=true" >> "$GITHUB_OUTPUT"
           fi
 
   # Idempotent — safe to run whenever a D1-bound service is going out,
