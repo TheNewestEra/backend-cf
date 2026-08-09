@@ -22,13 +22,13 @@ export type UserRecord = z.infer<typeof UserSchema>;
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days, matches the cookie maxAge
 
 export async function getUserById(db: Database, id: string): Promise<UserRecord | null> {
-    const row = await db.prepare("SELECT id, username FROM users WHERE id = ?").bind(id).first<UserRecord>();
+    const row = await db.prepare("SELECT id, username, color FROM users WHERE id = ?").bind(id).first<UserRecord>();
     return row ?? null;
 }
 
 export async function findUserByUsername(db: Database, username: string): Promise<UserRecord | null> {
     const row = await db
-        .prepare("SELECT id, username FROM users WHERE username_lower = ?")
+        .prepare("SELECT id, username, color FROM users WHERE username_lower = ?")
         .bind(username.trim().toLowerCase())
         .first<UserRecord>();
     return row ?? null;
@@ -50,6 +50,27 @@ function generateCode(): string {
     // Zero-padded 6-digit code, e.g. "004821".
     const [n] = crypto.getRandomValues(new Uint32Array(1));
     return ((n ?? 0) % 1_000_000).toString().padStart(6, "0");
+}
+
+/** Picks a random display color for a newly-registered user, e.g. "#4f9d69".
+ * Fixed saturation/lightness (not a fully random hex) so every generated
+ * color reads well as text/avatar fill against a light or dark background —
+ * only the hue varies. Stored at registration and never regenerated, so a
+ * user's color stays stable everywhere it's shown. */
+function generateColor(): string {
+    const [hueRoll] = crypto.getRandomValues(new Uint32Array(1));
+    const hue = (hueRoll ?? 0) % 360;
+    return hslToHex(hue, 65, 55);
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+    const sFrac = s / 100;
+    const lFrac = l / 100;
+    const k = (n: number) => (n + h / 30) % 12;
+    const a = sFrac * Math.min(lFrac, 1 - lFrac);
+    const f = (n: number) => lFrac - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const toHex = (n: number) => Math.round(f(n) * 255).toString(16).padStart(2, "0");
+    return `#${toHex(0)}${toHex(8)}${toHex(4)}`;
 }
 
 async function hashCode(code: string, salt: string): Promise<string> {
@@ -76,21 +97,23 @@ export async function createAccount(db: Database, rawUsername: string): Promise<
     const code = generateCode();
     const salt = crypto.randomUUID();
     const codeHash = await hashCode(code, salt);
+    const color = generateColor();
 
     await db
         .prepare(
-            `INSERT INTO users (id, username, username_lower, code_hash, code_salt, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO users (id, username, username_lower, code_hash, code_salt, color, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(id, username, username.toLowerCase(), codeHash, salt, Date.now())
+        .bind(id, username, username.toLowerCase(), codeHash, salt, color, Date.now())
         .run();
 
-    return {ok: true, user: {id, username}, code};
+    return {ok: true, user: {id, username, color}, code};
 }
 
 interface CredentialRow {
     id: string;
     username: string;
+    color: string;
     code_hash: string;
     code_salt: string;
 }
@@ -102,7 +125,7 @@ export async function verifyCode(db: Database, rawUsername: string, rawCode: str
     if (!username || !/^\d{6}$/.test(code)) return null;
 
     const row = await db
-        .prepare("SELECT id, username, code_hash, code_salt FROM users WHERE username_lower = ?")
+        .prepare("SELECT id, username, color, code_hash, code_salt FROM users WHERE username_lower = ?")
         .bind(username.toLowerCase())
         .first<CredentialRow>();
     if (!row) return null;
@@ -110,7 +133,7 @@ export async function verifyCode(db: Database, rawUsername: string, rawCode: str
     const candidateHash = await hashCode(code, row.code_salt);
     if (candidateHash !== row.code_hash) return null;
 
-    return {id: row.id, username: row.username};
+    return {id: row.id, username: row.username, color: row.color};
 }
 
 // --- sessions ------------------------------------------------------------
@@ -128,7 +151,7 @@ export async function createSession(db: Database, userId: string): Promise<strin
 export async function getUserBySession(db: Database, token: string): Promise<UserRecord | null> {
     const row = await db
         .prepare(
-            `SELECT u.id, u.username
+            `SELECT u.id, u.username, u.color
              FROM sessions s
                       JOIN users u ON u.id = s.user_id
              WHERE s.token = ?

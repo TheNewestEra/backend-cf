@@ -11,6 +11,7 @@ export const LeaderboardEntrySchema = z
     rank: z.number(),
     userId: z.string(),
     username: z.string(),
+    color: z.string(),
     score: z.number(),
   })
   .openapi("LeaderboardEntry");
@@ -22,6 +23,7 @@ export const MyLeaderboardScoreSchema = z
   .object({
     userId: z.string(),
     username: z.string(),
+    color: z.string(),
     score: z.number(),
     rank: z.number().nullable(),
   })

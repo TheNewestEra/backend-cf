@@ -383,7 +383,7 @@ friendsRoutes.openapi(
 
         await Promise.all(
             recipientIds.map(async (rid) => {
-                const invite = await createInvite(c.env.DB, user.id, user.username, kind, sessionId, rid);
+                const invite = await createInvite(c.env.DB, user.id, user.username, user.color, kind, sessionId, rid);
                 // D1 write above is what actually matters — a dropped push just means
                 // the recipient sees it on their next page load/reconnect instead of
                 // instantly, via GET /api/invites/pending.

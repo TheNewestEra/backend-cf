@@ -12,6 +12,7 @@ export async function createInvite(
     db: Database,
     inviterId: string,
     inviterUsername: string,
+    inviterColor: string,
     kind: InviteKind,
     sessionId: string,
     recipientId: string,
@@ -25,7 +26,7 @@ export async function createInvite(
         )
         .bind(id, kind, sessionId, inviterId, recipientId, createdAt)
         .run();
-    return {id, kind, sessionId, inviterUsername, createdAt};
+    return {id, kind, sessionId, inviterUsername, inviterColor, createdAt};
 }
 
 interface InviteRow {
@@ -33,13 +34,14 @@ interface InviteRow {
     kind: InviteKind;
     session_id: string;
     inviter_username: string;
+    inviter_color: string;
     created_at: number;
 }
 
 export async function listPendingInvites(db: Database, recipientId: string): Promise<InviteSummary[]> {
     const {results} = await db
         .prepare(
-            `SELECT gi.id, gi.kind, gi.session_id, u.username AS inviter_username, gi.created_at
+            `SELECT gi.id, gi.kind, gi.session_id, u.username AS inviter_username, u.color AS inviter_color, gi.created_at
              FROM game_invites gi
                       JOIN users u ON u.id = gi.inviter_id
              WHERE gi.recipient_id = ?
@@ -54,6 +56,7 @@ export async function listPendingInvites(db: Database, recipientId: string): Pro
         kind: r.kind,
         sessionId: r.session_id,
         inviterUsername: r.inviter_username,
+        inviterColor: r.inviter_color,
         createdAt: r.created_at,
     }));
 }

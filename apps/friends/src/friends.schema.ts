@@ -1,11 +1,11 @@
 import {z} from "@hono/zod-openapi";
 
 export const FriendSummarySchema = z
-    .object({id: z.string(), username: z.string()})
+    .object({id: z.string(), username: z.string(), color: z.string()})
     .openapi("FriendSummary");
 
 export const FriendRequestSummarySchema = z
-    .object({id: z.string(), username: z.string(), created_at: z.number()})
+    .object({id: z.string(), username: z.string(), color: z.string(), created_at: z.number()})
     .openapi("FriendRequestSummary");
 
 export const GroupSummarySchema = z
@@ -18,6 +18,7 @@ export const InviteSummarySchema = z
         kind: z.enum(["guess", "puzzle"]),
         sessionId: z.string(),
         inviterUsername: z.string(),
+        inviterColor: z.string(),
         createdAt: z.number(),
     })
     .openapi("InviteSummary");

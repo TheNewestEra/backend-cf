@@ -76,6 +76,7 @@ function filtersFor(query: LeaderboardQuery): { conditions: string[]; binds: unk
 interface TotalRow {
   user_id: string;
   username: string;
+  color: string;
   total_score: number;
 }
 
@@ -83,6 +84,7 @@ export interface LeaderboardEntry {
   rank: number;
   userId: string;
   username: string;
+  color: string;
   score: number;
 }
 
@@ -95,7 +97,7 @@ export async function topScores(db: Database, query: LeaderboardQuery): Promise<
 
   const { results } = await db
     .prepare(
-      `SELECT e.user_id AS user_id, u.username AS username, SUM(e.score) AS total_score
+      `SELECT e.user_id AS user_id, u.username AS username, u.color AS color, SUM(e.score) AS total_score
        FROM leaderboard_entries e
        JOIN users u ON u.id = e.user_id
        ${where}
@@ -106,7 +108,13 @@ export async function topScores(db: Database, query: LeaderboardQuery): Promise<
     .bind(...binds, TOP_N)
     .all<TotalRow>();
 
-  return results.map((row, i) => ({ rank: i + 1, userId: row.user_id, username: row.username, score: row.total_score }));
+  return results.map((row, i) => ({
+    rank: i + 1,
+    userId: row.user_id,
+    username: row.username,
+    color: row.color,
+    score: row.total_score,
+  }));
 }
 
 export const FRIENDS_PAGE_SIZE = 10;
@@ -148,7 +156,7 @@ export async function friendScores(
 
   const { results } = await db
     .prepare(
-      `SELECT e.user_id AS user_id, u.username AS username, SUM(e.score) AS total_score
+      `SELECT e.user_id AS user_id, u.username AS username, u.color AS color, SUM(e.score) AS total_score
        FROM leaderboard_entries e
        JOIN users u ON u.id = e.user_id
        WHERE ${where}
@@ -164,6 +172,7 @@ export async function friendScores(
     rank: offset + i + 1,
     userId: row.user_id,
     username: row.username,
+    color: row.color,
     score: row.total_score,
   }));
 
@@ -173,6 +182,7 @@ export async function friendScores(
 export interface MyScore {
   userId: string;
   username: string;
+  color: string;
   score: number;
   rank: number | null;
 }
@@ -183,7 +193,10 @@ export interface MyScore {
  * (nothing to rank them against). Returns null only if `userId` doesn't
  * resolve to an account at all. */
 export async function myScore(db: Database, userId: string, query: LeaderboardQuery): Promise<MyScore | null> {
-  const user = await db.prepare("SELECT username FROM users WHERE id = ?").bind(userId).first<{ username: string }>();
+  const user = await db
+    .prepare("SELECT username, color FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ username: string; color: string }>();
   if (!user) return null;
 
   const { conditions, binds } = filtersFor(query);
@@ -197,7 +210,7 @@ export async function myScore(db: Database, userId: string, query: LeaderboardQu
     .bind(...binds, userId)
     .first<{ total: number }>();
   const score = mine?.total ?? 0;
-  if (score === 0) return { userId, username: user.username, score: 0, rank: null };
+  if (score === 0) return { userId, username: user.username, color: user.color, score: 0, rank: null };
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const ranked = await db
@@ -213,5 +226,5 @@ export async function myScore(db: Database, userId: string, query: LeaderboardQu
     .bind(...binds, score)
     .first<{ rank: number }>();
 
-  return { userId, username: user.username, score, rank: ranked?.rank ?? 1 };
+  return { userId, username: user.username, color: user.color, score, rank: ranked?.rank ?? 1 };
 }

@@ -16,6 +16,7 @@
 export interface AccountRecord {
     id: string;
     username: string;
+    color: string;
 }
 
 /** Full RPC surface exposed by `apps/accounts`' `AccountsService`. */

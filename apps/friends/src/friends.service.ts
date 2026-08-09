@@ -20,11 +20,11 @@ type ActionResult = { ok: true } | { ok: false; error: string };
  * pragmatic pattern `leaderboard` uses for display-name joins. Kept local
  * rather than imported across the app boundary since apps/accounts is a
  * separately deployed Worker, not a shared package. */
-async function findUserByUsername(db: Database, username: string): Promise<{ id: string; username: string } | null> {
+async function findUserByUsername(db: Database, username: string): Promise<{ id: string; username: string; color: string } | null> {
     const row = await db
-        .prepare("SELECT id, username FROM users WHERE username_lower = ?")
+        .prepare("SELECT id, username, color FROM users WHERE username_lower = ?")
         .bind(username.trim().toLowerCase())
-        .first<{ id: string; username: string }>();
+        .first<{ id: string; username: string; color: string }>();
     return row ?? null;
 }
 
@@ -244,7 +244,7 @@ async function listGroups(db: Database, ownerId: string): Promise<GroupSummary[]
         groups.map(async (group) => {
             const {results: members} = await db
                 .prepare(
-                    `SELECT u.id, u.username
+                    `SELECT u.id, u.username, u.color
                      FROM friend_group_members m
                               JOIN users u ON u.id = m.friend_id
                      WHERE m.group_id = ?
@@ -263,7 +263,7 @@ export async function getFriendsPageData(db: Database, userId: string): Promise<
     const [friends, incoming, outgoing, groups] = await Promise.all([
         db
             .prepare(
-                `SELECT u.id, u.username
+                `SELECT u.id, u.username, u.color
                  FROM friendships f
                           JOIN users u ON u.id = f.friend_id
                  WHERE f.user_id = ?
@@ -273,7 +273,7 @@ export async function getFriendsPageData(db: Database, userId: string): Promise<
             .all<FriendSummary>(),
         db
             .prepare(
-                `SELECT r.id, u.username, r.created_at
+                `SELECT r.id, u.username, u.color, r.created_at
                  FROM friend_requests r
                           JOIN users u ON u.id = r.requester_id
                  WHERE r.recipient_id = ?
@@ -284,7 +284,7 @@ export async function getFriendsPageData(db: Database, userId: string): Promise<
             .all<FriendRequestSummary>(),
         db
             .prepare(
-                `SELECT r.id, u.username, r.created_at
+                `SELECT r.id, u.username, u.color, r.created_at
                  FROM friend_requests r
                           JOIN users u ON u.id = r.recipient_id
                  WHERE r.requester_id = ?
