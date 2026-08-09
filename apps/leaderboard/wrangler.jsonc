@@ -10,6 +10,14 @@
 		"enabled": true,
 		"head_sampling_rate": 1
 	},
+	// Custom Domain per environment — see apps/accounts/wrangler.jsonc for
+	// the naming scheme and the session-cookie caveat.
+	"routes": [
+		{
+			"pattern": "dev.api.leaderboard.ryanb.co.za",
+			"custom_domain": true
+		}
+	],
 	// Owns `leaderboard_entries` (see catalog.service.ts-style ownership
 	// comment) and also reads (never writes) `users` directly for display
 	// names — a pragmatic read against the shared physical database rather
@@ -40,6 +48,12 @@
 	"env": {
 		"staging": {
 			"name": "game-leaderboard-worker-staging",
+			"routes": [
+				{
+					"pattern": "staging.api.leaderboard.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",
@@ -58,6 +72,12 @@
 		},
 		"production": {
 			"name": "game-leaderboard-worker-prod",
+			"routes": [
+				{
+					"pattern": "api.leaderboard.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",

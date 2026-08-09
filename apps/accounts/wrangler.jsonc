@@ -10,6 +10,20 @@
 		"enabled": true,
 		"head_sampling_rate": 1
 	},
+	// Custom Domain, one whole subdomain per service per environment:
+	// dev.api.accounts.ryanb.co.za here, {env}.api.accounts.ryanb.co.za in
+	// each named env below, and the bare api.accounts.ryanb.co.za for
+	// production (no env prefix). `custom_domain: true` auto-provisions the
+	// DNS record + edge cert for this exact hostname against the account's
+	// ryanb.co.za zone — see the README's "Environments" section, including
+	// the session-cookie caveat that comes with each service keeping its
+	// own origin under this scheme.
+	"routes": [
+		{
+			"pattern": "dev.api.accounts.ryanb.co.za",
+			"custom_domain": true
+		}
+	],
 	// Owns `users` + `sessions` — the only Worker that ever writes either
 	// table. Every other service reaches these through the `AccountsService`
 	// RPC entrypoint (see src/index.ts) rather than binding this database
@@ -35,6 +49,12 @@
 	"env": {
 		"staging": {
 			"name": "game-accounts-worker-staging",
+			"routes": [
+				{
+					"pattern": "staging.api.accounts.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",
@@ -46,6 +66,12 @@
 		},
 		"production": {
 			"name": "game-accounts-worker-prod",
+			"routes": [
+				{
+					"pattern": "api.accounts.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",

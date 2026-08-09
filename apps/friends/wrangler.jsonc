@@ -10,6 +10,14 @@
 		"enabled": true,
 		"head_sampling_rate": 1
 	},
+	// Custom Domain per environment — see apps/accounts/wrangler.jsonc for
+	// the naming scheme and the session-cookie caveat.
+	"routes": [
+		{
+			"pattern": "dev.api.friends.ryanb.co.za",
+			"custom_domain": true
+		}
+	],
 	// Owns `friend_requests`, `friendships`, `friend_groups`,
 	// `friend_group_members`, `game_invites`. Also reads (never writes)
 	// `users` directly for display-name joins, same pragmatic pattern as
@@ -63,6 +71,12 @@
 	"env": {
 		"staging": {
 			"name": "game-friends-worker-staging",
+			"routes": [
+				{
+					"pattern": "staging.api.friends.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",
@@ -102,6 +116,12 @@
 		},
 		"production": {
 			"name": "game-friends-worker-prod",
+			"routes": [
+				{
+					"pattern": "api.friends.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",

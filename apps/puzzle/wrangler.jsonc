@@ -10,6 +10,14 @@
 		"enabled": true,
 		"head_sampling_rate": 1
 	},
+	// Custom Domain per environment — see apps/accounts/wrangler.jsonc for
+	// the naming scheme and the session-cookie caveat.
+	"routes": [
+		{
+			"pattern": "dev.api.puzzle.ryanb.co.za",
+			"custom_domain": true
+		}
+	],
 	// Unnamed/top-level config == "dev" (deployed as `game-puzzle-worker`, no
 	// --env flag needed). NOTE: the producer/consumer queue names below
 	// ("puzzle-generation-dev" vs "puzzle-generation") are a pre-existing
@@ -95,6 +103,12 @@
 	"env": {
 		"staging": {
 			"name": "game-puzzle-worker-staging",
+			"routes": [
+				{
+					"pattern": "staging.api.puzzle.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"ai": {
 				"binding": "AI"
 			},
@@ -157,6 +171,12 @@
 		},
 		"production": {
 			"name": "game-puzzle-worker-prod",
+			"routes": [
+				{
+					"pattern": "api.puzzle.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"ai": {
 				"binding": "AI"
 			},

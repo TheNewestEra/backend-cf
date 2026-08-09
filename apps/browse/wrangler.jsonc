@@ -10,6 +10,14 @@
 		"enabled": true,
 		"head_sampling_rate": 1
 	},
+	// Custom Domain per environment — see apps/accounts/wrangler.jsonc for
+	// the naming scheme and the session-cookie caveat.
+	"routes": [
+		{
+			"pattern": "dev.api.browse.ryanb.co.za",
+			"custom_domain": true
+		}
+	],
 	// Owns `catalog` + `ratings` — the cross-game index used by the browse
 	// page and post-session ratings. The `guess` and `puzzle` Workers write
 	// to it through the `CatalogService` RPC entrypoint (see src/index.ts)
@@ -30,6 +38,12 @@
 	"env": {
 		"staging": {
 			"name": "game-browse-worker-staging",
+			"routes": [
+				{
+					"pattern": "staging.api.browse.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",
@@ -41,6 +55,12 @@
 		},
 		"production": {
 			"name": "game-browse-worker-prod",
+			"routes": [
+				{
+					"pattern": "api.browse.ryanb.co.za",
+					"custom_domain": true
+				}
+			],
 			"d1_databases": [
 				{
 					"binding": "DB",
