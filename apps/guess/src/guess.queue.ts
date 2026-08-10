@@ -30,10 +30,18 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
         await stub.setStatus("ready");
         // Round 0 always exists when there are no failures, so it's a safe thumbnail.
         await env.BROWSE.markCatalogReady(gameId, imageKeyFor(gameId, 0));
+        // Distinct write from markCatalogReady — see updatePlayStatus's own
+        // doc comment. Guess the Prompt has no further transition after
+        // this: it's `active` (spectate-only, join() now rejects) for good.
+        // `.catch()`'d so a transient BROWSE hiccup never turns into a
+        // pointless retry of AI generation that already succeeded.
+        await env.BROWSE.updatePlayStatus(gameId, "active").catch((err) => {
+            console.error("failed to update catalog play status", gameId, err);
+        });
     } else {
         await stub.setStatus(
             "error",
-            `${failures} of ${ROUND_COUNT} images failed to generate. Use "Regenerate" to retry.`,
+            `${failures} of ${ROUND_COUNT} images failed to generate. Start a new game to try again.`,
         );
         await env.BROWSE.markCatalogError(gameId);
     }

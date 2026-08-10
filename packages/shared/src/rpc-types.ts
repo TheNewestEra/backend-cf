@@ -39,6 +39,10 @@ export interface CatalogRpc {
     markCatalogGenerating(id: string): Promise<void>;
     markCatalogReady(id: string, thumbnailKey: string): Promise<void>;
     markCatalogError(id: string): Promise<void>;
+    /** Distinct from the status above — see catalog.service.ts's
+     * `updatePlayStatus` for why a Piece Puzzle entering `ready` (has a
+     * thumbnail) doesn't necessarily mean `active` (started). */
+    updatePlayStatus(id: string, playStatus: "joinable" | "active" | "finished"): Promise<void>;
 }
 
 /** RPC surface exposed by `apps/leaderboard`'s `LeaderboardService`. */

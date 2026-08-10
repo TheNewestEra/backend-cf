@@ -208,7 +208,7 @@ export class PuzzleDO extends DurableObject<Env> {
     const row = this.requireRow();
     this.assertHost(row, hostToken);
     if (row.status !== "waiting") throw new Error("puzzle is not waiting to start");
-    await this.beginPlaying(row.grid_size, row.time_limit_ms);
+    await this.beginPlaying(row.id, row.grid_size, row.time_limit_ms);
   }
 
   // --- RPC: joining --------------------------------------------------------
@@ -323,6 +323,7 @@ export class PuzzleDO extends DurableObject<Env> {
       );
       await this.ctx.storage.deleteAlarm();
       this.broadcast({ type: "solved", board, score, solvedBy: player, remainingMs });
+      this.updateCatalogPlayStatus(row.id, "finished");
       if (userId) await this.env.LEADERBOARD.recordScore({ userId, kind: "puzzle", sessionId: row.id, score });
       return { status: "solved", board, solved: true, score };
     }
@@ -337,12 +338,13 @@ export class PuzzleDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const row = this.requireRow();
     if (row.status === "waiting") {
-      await this.beginPlaying(row.grid_size, row.time_limit_ms);
+      await this.beginPlaying(row.id, row.grid_size, row.time_limit_ms);
       return;
     }
     if (row.status === "playing") {
       this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'timeout', ended_at = ?, score = 0", Date.now());
       this.broadcast({ type: "timeout" });
+      this.updateCatalogPlayStatus(row.id, "finished");
     }
     // Any other status means the puzzle moved on (solved, regenerated, etc.)
     // before this stale alarm fired — nothing to do.
@@ -379,7 +381,7 @@ export class PuzzleDO extends DurableObject<Env> {
   // --- internals -----------------------------------------------------------
 
   /** Shared by the host's "start now" and the lobby alarm's auto-start. */
-  private async beginPlaying(gridSize: number, timeLimitMs: number): Promise<void> {
+  private async beginPlaying(puzzleId: string, gridSize: number, timeLimitMs: number): Promise<void> {
     const board = shuffledBoard(gridSize);
     const startedAt = Date.now();
     this.ctx.storage.sql.exec(
@@ -389,6 +391,23 @@ export class PuzzleDO extends DurableObject<Env> {
     );
     await this.ctx.storage.setAlarm(startedAt + timeLimitMs);
     this.broadcast({ type: "state", ...this.readPublicState() });
+    this.updateCatalogPlayStatus(puzzleId, "active");
+  }
+
+  /** Tells `browse` this instance's join window opened/closed (see
+   * catalog.service.ts's `updatePlayStatus`) — fire-and-forget-ish:
+   * awaited so it completes before this DO call returns, but its failure
+   * is only logged, never thrown, so a `browse` hiccup can't break a live
+   * puzzle move or the lobby's auto-start. `puzzleId` is `row.id`, not
+   * `this.ctx.id` — the latter is the DO's internal unique id, not the
+   * name it was routed by (`getByName(puzzleId)`), so it'd write the
+   * wrong catalog row. */
+  private updateCatalogPlayStatus(puzzleId: string, playStatus: "joinable" | "active" | "finished"): void {
+    this.ctx.waitUntil(
+      this.env.BROWSE.updatePlayStatus(puzzleId, playStatus).catch((err) => {
+        console.error("failed to update catalog play status", puzzleId, err);
+      }),
+    );
   }
 
   private assertHost(row: PuzzleRow, hostToken: string): void {

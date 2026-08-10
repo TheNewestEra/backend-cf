@@ -1,6 +1,6 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
-import {CatalogEntrySchema} from "./catalog.schema";
+import {CatalogEntrySchema, PlayStatusSchema} from "./catalog.schema";
 import {listCatalog, submitRating} from "./catalog.service";
 
 const DEFAULT_LIMIT = 24;
@@ -14,11 +14,19 @@ browseRoutes.openapi(
         method: "get",
         path: "/api/catalog",
         tags: ["Browse"],
-        summary: "List ready games/puzzles across all users",
+        summary: "List games/puzzles across all users",
+        description:
+            "Without `playStatus`, this is the plain browse gallery: only entries with a generated thumbnail " +
+            "(unchanged from before `playStatus` existed). Pass `playStatus=joinable` for open lobbies/still-" +
+            "generating games you can join as a player, or `playStatus=active` for started games/puzzles you " +
+            "can only spectate — both also include entries with no thumbnail yet.",
         request: {
             query: z.object({
                 kind: z.enum(["guess", "puzzle"]).optional().openapi({description: "Filter to one game type"}),
                 sort: z.enum(["recent", "rating"]).optional().openapi({description: "Defaults to recent"}),
+                playStatus: PlayStatusSchema.optional().openapi({
+                    description: "Filter to what's joinable, in progress, or finished right now",
+                }),
                 limit: z.coerce.number().optional().openapi({description: `1-${MAX_LIMIT}, defaults to ${DEFAULT_LIMIT}`}),
                 offset: z.coerce.number().optional(),
             }),
@@ -31,10 +39,11 @@ browseRoutes.openapi(
         },
     }),
     async (c) => {
-        const {kind, sort, limit, offset} = c.req.valid("query");
+        const {kind, sort, playStatus, limit, offset} = c.req.valid("query");
         const entries = await listCatalog(c.env.DB, {
             kind: kind ?? null,
             sort: sort ?? "recent",
+            playStatus: playStatus ?? null,
             limit: clamp(limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT),
             offset: Math.max(0, offset ?? 0),
         });

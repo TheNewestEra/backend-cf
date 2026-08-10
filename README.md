@@ -174,19 +174,44 @@ A Durable Object can't be listed or queried across instances, so "browse
 everyone's games" needs a real index — that's the one thing in this project
 backed by D1 rather than DO storage. The `catalog` table is a thin,
 denormalized mirror of each game/puzzle (id, kind, theme, thumbnail key,
-rating aggregate), kept in sync via `CatalogService`'s RPC methods, called
-by `guess` and `puzzle` at the same points their own queue consumers update
-their DOs: `insertCatalogEntry` at creation, then
-`markCatalogGenerating`/`markCatalogReady`/`markCatalogError` alongside.
-GameDO/PuzzleDO remain the sole source of truth for live gameplay — the
-catalog only ever reflects "is there a viewable thumbnail," not
-moves/scores/timers.
+rating aggregate, live play status), kept in sync via `CatalogService`'s
+RPC methods, called by `guess` and `puzzle`: `insertCatalogEntry` at
+creation, then `markCatalogGenerating`/`markCatalogReady`/`markCatalogError`
+from their queue consumers as generation progresses, and `updatePlayStatus`
+whenever a game/puzzle's own join window opens or closes. GameDO/PuzzleDO
+remain the sole source of truth for live gameplay — the catalog only ever
+mirrors a coarse `playStatus`, not moves/scores/timers.
 
-`GET /api/catalog` lists everything with `status = 'ready'`, filterable by
-kind and sortable by recency or average rating; `POST
-/api/catalog/:id/rate` records a 1-5 star rating (no auth — dedup is a
-soft, client-side `localStorage` flag, consistent with this project's
-trust level elsewhere).
+- **`playStatus`** (`joinable` | `active` | `finished`) tracks each entry's
+  live join/spectate window, independently of `status` (which only reflects
+  generation progress / thumbnail availability) — the two don't move in
+  lockstep: a Piece Puzzle becomes `ready` (has a thumbnail) the instant it
+  enters its waiting-room lobby, which is still `joinable`, not `active`.
+  `joinable` covers still-generating entries too (no thumbnail yet), since
+  Guess the Prompt's own join window is open right from creation, not just
+  once a lobby exists. `guess` calls `updatePlayStatus(id, "active")` the
+  moment its rounds are `ready`, from `processGuessGame` (`guess.queue.ts`)
+  right alongside `markCatalogReady` — and never anything after, since
+  Guess the Prompt has no terminal state. `puzzle` calls it from three
+  places inside `PuzzleDO` itself (not the queue consumer, since these are
+  live-gameplay transitions, not generation ones): `"active"` when
+  `beginPlaying()` runs (host "start now" or the lobby alarm), `"finished"`
+  on a solve (`swapTiles`) or a timeout (`alarm()`). Both games' calls are
+  `.catch()`'d (and, for `puzzle`, wrapped in `ctx.waitUntil()` since
+  they're fired from a DO method that doesn't otherwise await them) so a
+  `browse` hiccup can never break a live move, a lobby auto-start, or
+  (worse, for `guess`) trigger a spurious retry of AI generation that
+  already succeeded.
+- `GET /api/catalog` without `playStatus` is the plain browse gallery,
+  unchanged: everything with `status = 'ready'`, filterable by kind and
+  sortable by recency or average rating. Pass `playStatus=joinable` for
+  open lobbies/still-generating games you can join as a player, or
+  `playStatus=active` for started games/puzzles you can only spectate —
+  either widens the `status` gate to `!= 'error'` so not-yet-thumbnailed
+  entries show up too.
+- `POST /api/catalog/:id/rate` records a 1-5 star rating (no auth — dedup
+  is a soft, client-side `localStorage` flag, consistent with this
+  project's trust level elsewhere).
 
 ### Leaderboard (`apps/leaderboard`)
 

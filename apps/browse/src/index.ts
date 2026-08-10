@@ -9,6 +9,8 @@ import {
     markCatalogError,
     markCatalogGenerating,
     markCatalogReady,
+    type PlayStatus,
+    updatePlayStatus,
 } from "./catalog.service";
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
@@ -46,6 +48,10 @@ export class CatalogService extends WorkerEntrypoint<Env> {
 
     markCatalogError(id: string): Promise<void> {
         return markCatalogError(this.env.DB, id);
+    }
+
+    updatePlayStatus(id: string, playStatus: PlayStatus): Promise<void> {
+        return updatePlayStatus(this.env.DB, id, playStatus);
     }
 }
 
