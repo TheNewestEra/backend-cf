@@ -1,7 +1,7 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
 import {CatalogEntrySchema, PlayStatusSchema} from "./catalog.schema";
-import {listCatalog, submitRating} from "./catalog.service";
+import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
 
 const DEFAULT_LIMIT = 24;
 const MAX_LIMIT = 60;
@@ -88,6 +88,42 @@ browseRoutes.openapi(
         const result = await submitRating(c.env.DB, id, stars, rater?.trim().slice(0, MAX_RATER_LENGTH) || null);
         if (!result) return c.json({error: "not found"}, 404);
         return c.json(result, 200);
+    },
+);
+
+browseRoutes.openapi(
+    createRoute({
+        method: "get",
+        path: "/api/catalog/{id}/thumbnail",
+        tags: ["Browse"],
+        summary: "Get a catalog entry's thumbnail image",
+        description:
+            "Raw image bytes, not JSON — the same image a `CatalogEntry.thumbnailUrl` points at once the entry " +
+            "is `ready`. Served straight out of the `IMAGES` bucket `guess`/`puzzle` write to (this Worker only " +
+            "reads it), keyed off the `thumbnail_key` recorded via the `CatalogService` RPC. Immutable/long-" +
+            "cached once served, since an entry's thumbnail never changes in place.",
+        request: {params: z.object({id: z.string()})},
+        responses: {
+            200: {
+                description: "Thumbnail image",
+                content: {"image/png": {schema: z.string().openapi({format: "binary"})}},
+            },
+            404: {description: "No such catalog entry, or it hasn't generated a thumbnail yet"},
+        },
+    }),
+    async (c) => {
+        const {id} = c.req.valid("param");
+        const key = await getThumbnailKey(c.env.DB, id);
+        if (!key) return c.notFound();
+
+        const object = await c.env.IMAGES.get(key);
+        if (!object) return c.notFound();
+
+        const headers = new Headers();
+        object.writeHttpMetadata(headers);
+        headers.set("etag", object.httpEtag);
+        headers.set("Cache-Control", "public, max-age=31536000, immutable");
+        return new Response(object.body, {headers});
     },
 );
 

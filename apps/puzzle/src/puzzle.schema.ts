@@ -1,11 +1,15 @@
 import {z} from "@hono/zod-openapi";
 
+export const PuzzleStatusSchema = z
+    .enum(["queued", "generating", "waiting", "playing", "solved", "timeout", "error"])
+    .openapi("PuzzleStatus");
+
 export const PuzzlePublicSchema = z
     .object({
         id: z.string(),
         theme: z.string().nullable(),
         prompt: z.string().nullable(),
-        status: z.enum(["queued", "generating", "waiting", "playing", "solved", "timeout", "error"]),
+        status: PuzzleStatusSchema,
         error: z.string().optional(),
         gridSize: z.number(),
         board: z.array(z.number()),
@@ -22,7 +26,7 @@ export const PuzzlePublicSchema = z
 
 export const MoveResultSchema = z
     .object({
-        status: z.enum(["queued", "generating", "waiting", "playing", "solved", "timeout", "error"]),
+        status: PuzzleStatusSchema,
         board: z.array(z.number()),
         solved: z.boolean(),
         score: z.number().nullable(),

@@ -1,9 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "@hono/zod-openapi";
 import { LOBBY_COUNTDOWN_SECONDS, PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE } from "./puzzle.constants";
-import type { MoveResultSchema, PuzzlePublicSchema } from "./puzzle.schema";
+import type { MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema } from "./puzzle.schema";
 
-export type PuzzleStatus = z.infer<typeof PuzzlePublicSchema>["status"];
+export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
 export type PuzzlePublic = z.infer<typeof PuzzlePublicSchema>;
 export type MoveResult = z.infer<typeof MoveResultSchema>;
 

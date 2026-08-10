@@ -73,6 +73,15 @@ export async function markCatalogError(db: Database, id: string): Promise<void> 
     await db.prepare("UPDATE catalog SET status = 'error', updated_at = ? WHERE id = ?").bind(Date.now(), id).run();
 }
 
+/** The R2 key `guess`/`puzzle` recorded for this entry via `markCatalogReady`,
+ * for GET /api/catalog/{id}/thumbnail to serve straight out of the shared
+ * `IMAGES` bucket. Null for an unknown id or one that hasn't generated a
+ * thumbnail yet. */
+export async function getThumbnailKey(db: Database, id: string): Promise<string | null> {
+    const row = await db.prepare("SELECT thumbnail_key FROM catalog WHERE id = ?").bind(id).first<{ thumbnail_key: string | null }>();
+    return row?.thumbnail_key ?? null;
+}
+
 export interface ListCatalogOptions {
     kind: CatalogKind | null;
     sort: "recent" | "rating";
@@ -153,15 +162,14 @@ function toPublic(row: CatalogRow): CatalogEntry {
         id: row.id,
         kind: row.kind,
         theme: row.theme,
-        thumbnailUrl: row.thumbnail_key ? thumbnailUrlFor(row.kind, row.id) : null,
+        // Served by this same Worker (see GET /api/catalog/{id}/thumbnail)
+        // rather than pointing across to `guess`/`puzzle` — the browse page
+        // only ever has to talk to one origin for a page of results.
+        thumbnailUrl: row.thumbnail_key ? `/api/catalog/${row.id}/thumbnail` : null,
         playUrl: row.kind === "guess" ? `/games/${row.id}/play` : `/puzzles/${row.id}/play`,
         playStatus: row.play_status,
         averageRating: row.rating_count > 0 ? row.rating_sum / row.rating_count : null,
         ratingCount: row.rating_count,
         createdAt: row.created_at,
     };
-}
-
-function thumbnailUrlFor(kind: CatalogKind, id: string): string {
-    return kind === "guess" ? `/games/${id}/images/0` : `/puzzles/${id}/image`;
 }

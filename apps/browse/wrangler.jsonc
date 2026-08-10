@@ -33,6 +33,16 @@
 			"migrations_dir": "../../migrations"
 		}
 	],
+	// Same bucket `guess`/`puzzle` write their images to (see their
+	// wrangler.jsonc). Browse never writes here — it only reads back
+	// whatever `thumbnail_key` those services recorded via
+	// `markCatalogReady`, to serve GET /api/catalog/{id}/thumbnail.
+	"r2_buckets": [
+		{
+			"binding": "IMAGES",
+			"bucket_name": "game-guess-images"
+		}
+	],
 	// See apps/accounts/wrangler.jsonc for why binding arrays are fully
 	// re-declared per named environment rather than inherited.
 	"env": {
@@ -51,6 +61,12 @@
 					"database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
 					"migrations_dir": "../../migrations"
 				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "IMAGES",
+					"bucket_name": "game-guess-images-staging"
+				}
 			]
 		},
 		"production": {
@@ -67,6 +83,12 @@
 					"database_name": "game-worker-catalog-prod",
 					"database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
 					"migrations_dir": "../../migrations"
+				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "IMAGES",
+					"bucket_name": "game-guess-images-prod"
 				}
 			]
 		}
