@@ -233,6 +233,7 @@ export class PuzzleDO extends DurableObject<Env> {
          ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
         userId,
         playerName,
+        userId,
         Date.now(),
       );
       return { participantId: userId, token: null };
