@@ -20,9 +20,8 @@ app.doc("/openapi.json", {
         version: "1.0.0",
         description:
             "Piece Puzzle: one AI-generated image, sliding-tile gameplay over a Durable Object per puzzle. " +
-            "The WebSocket upgrade endpoint (`/puzzles/{id}/ws`) and the raw image endpoint " +
-            "(`/puzzles/{id}/image`) aren't representable in OpenAPI 3 and are omitted from this spec, though " +
-            "they're real, functioning routes.",
+            "The WebSocket upgrade endpoint (`/puzzles/{id}/ws`) isn't representable in OpenAPI 3 and is " +
+            "omitted from this spec, though it's a real, functioning route.",
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));

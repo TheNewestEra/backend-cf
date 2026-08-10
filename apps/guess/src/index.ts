@@ -20,9 +20,8 @@ app.doc("/openapi.json", {
         version: "1.0.0",
         description:
             "Guess the Prompt: 5 AI-generated image rounds per game, players guess the prompt behind each. The " +
-            "WebSocket upgrade endpoint (`/games/{id}/ws`) and the raw image endpoint " +
-            "(`/games/{id}/images/{index}`) aren't representable in OpenAPI 3 and are omitted from this spec, " +
-            "though they're real, functioning routes.",
+            "WebSocket upgrade endpoint (`/games/{id}/ws`) isn't representable in OpenAPI 3 and is omitted " +
+            "from this spec, though it's a real, functioning route.",
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));

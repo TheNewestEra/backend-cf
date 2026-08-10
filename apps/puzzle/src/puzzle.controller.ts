@@ -305,17 +305,37 @@ puzzleRoutes.openapi(
     },
 );
 
-// Not OpenAPI-documented: serves a raw image (binary body), not JSON.
-puzzleRoutes.get("/puzzles/:id/image", async (c) => {
-    const object = await c.env.IMAGES.get(puzzleImageKeyFor(c.req.param("id")));
-    if (!object) return c.notFound();
+puzzleRoutes.openapi(
+    createRoute({
+        method: "get",
+        path: "/puzzles/{id}/image",
+        tags: ["Piece Puzzle"],
+        summary: "Get the puzzle's source image",
+        description:
+            "Raw image bytes, not JSON — the full, unsliced source image; the board renders every tile from " +
+            "this same file via CSS background-position (see the README). Immutable/long-cached once served, " +
+            "since a puzzle's image never changes in place (regenerate/replay always target a different id).",
+        request: {params: z.object({id: z.string()})},
+        responses: {
+            200: {
+                description: "Puzzle source image",
+                content: {"image/png": {schema: z.string().openapi({format: "binary"})}},
+            },
+            404: {description: "No such puzzle, or the image hasn't generated yet"},
+        },
+    }),
+    async (c) => {
+        const {id} = c.req.valid("param");
+        const object = await c.env.IMAGES.get(puzzleImageKeyFor(id));
+        if (!object) return c.notFound();
 
-    const headers = new Headers();
-    object.writeHttpMetadata(headers);
-    headers.set("etag", object.httpEtag);
-    headers.set("Cache-Control", "public, max-age=31536000, immutable");
-    return new Response(object.body, {headers});
-});
+        const headers = new Headers();
+        object.writeHttpMetadata(headers);
+        headers.set("etag", object.httpEtag);
+        headers.set("Cache-Control", "public, max-age=31536000, immutable");
+        return new Response(object.body, {headers});
+    },
+);
 
 function clampGridSize(input: number | undefined): number {
     if (!Number.isInteger(input)) return DEFAULT_GRID_SIZE;

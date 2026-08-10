@@ -250,18 +250,45 @@ guessRoutes.openapi(
   },
 );
 
-// Not OpenAPI-documented: serves a raw image (binary body), not JSON.
-guessRoutes.get("/games/:id/images/:index", async (c) => {
-  const gameId = c.req.param("id");
-  const index = Number(c.req.param("index"));
-  if (!Number.isInteger(index) || index < 0 || index >= ROUND_COUNT) return c.notFound();
+guessRoutes.openapi(
+  createRoute({
+    method: "get",
+    path: "/games/{id}/images/{index}",
+    tags: ["Guess the Prompt"],
+    summary: "Get a round's generated image",
+    description:
+      "Raw image bytes, not JSON — the same image a round's public state points at once it's `ready`. " +
+      "Immutable/long-cached once served, since a round's image never changes after it's generated.",
+    request: {
+      params: z.object({
+        id: z.string(),
+        // Kept as a plain string (not z.coerce.number()) so an
+        // out-of-range/non-numeric index still 404s exactly like a
+        // missing image, rather than the validator's 400 — see the
+        // manual check below.
+        index: z.string().openapi({ description: `0-${ROUND_COUNT - 1}` }),
+      }),
+    },
+    responses: {
+      200: {
+        description: "Round image",
+        content: { "image/png": { schema: z.string().openapi({ format: "binary" }) } },
+      },
+      404: { description: "No such game/round, or the image hasn't generated yet" },
+    },
+  }),
+  async (c) => {
+    const { id: gameId, index: rawIndex } = c.req.valid("param");
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= ROUND_COUNT) return c.notFound();
 
-  const object = await c.env.IMAGES.get(imageKeyFor(gameId, index));
-  if (!object) return c.notFound();
+    const object = await c.env.IMAGES.get(imageKeyFor(gameId, index));
+    if (!object) return c.notFound();
 
-  const headers = new Headers();
-  object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  headers.set("Cache-Control", "public, max-age=31536000, immutable");
-  return new Response(object.body, { headers });
-});
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set("etag", object.httpEtag);
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    return new Response(object.body, { headers });
+  },
+);
