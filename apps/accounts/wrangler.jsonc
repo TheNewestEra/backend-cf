@@ -66,6 +66,28 @@
 		},
 		"production": {
 			"name": "game-accounts-worker-prod",
+			// Prod-only OTel export, layered on top of the inherited top-level
+			// `observability` block above (enabled/head_sampling_rate still
+			// apply to Cloudflare's own dashboard view). "k8s-logs" and "k8s"
+			// are dashboard-configured Workers Observability destinations
+			// (Destination Type "Logs" / "Traces") pointing at the OTLP
+			// endpoint of the collector running in the k8s cluster — see
+			// https://developers.cloudflare.com/workers/observability/exporting-opentelemetry-data/.
+			// Dev/staging deliberately keep plain Cloudflare-only logging.
+			"observability": {
+				"enabled": true,
+				"head_sampling_rate": 1,
+				"logs": {
+					"enabled": true,
+					"destinations": ["k8s-logs"],
+					"head_sampling_rate": 1
+				},
+				"traces": {
+					"enabled": true,
+					"destinations": ["k8s"],
+					"head_sampling_rate": 1
+				}
+			},
 			"routes": [
 				{
 					"pattern": "api.accounts.ryanb.co.za",

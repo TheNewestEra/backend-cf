@@ -71,6 +71,22 @@
 		},
 		"production": {
 			"name": "game-browse-worker-prod",
+			// Prod-only OTel export — see apps/accounts/wrangler.jsonc for what
+			// "k8s-logs"/"k8s" are and why this only appears here.
+			"observability": {
+				"enabled": true,
+				"head_sampling_rate": 1,
+				"logs": {
+					"enabled": true,
+					"destinations": ["k8s-logs"],
+					"head_sampling_rate": 1
+				},
+				"traces": {
+					"enabled": true,
+					"destinations": ["k8s"],
+					"head_sampling_rate": 1
+				}
+			},
 			"routes": [
 				{
 					"pattern": "api.browse.ryanb.co.za",
