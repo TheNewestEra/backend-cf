@@ -1,4 +1,5 @@
 import {z} from "@hono/zod-openapi";
+import {GameKindSchema} from "@game-worker/shared/game";
 
 export const FriendSummarySchema = z
     .object({id: z.string(), username: z.string(), color: z.string()})
@@ -15,7 +16,7 @@ export const GroupSummarySchema = z
 export const InviteSummarySchema = z
     .object({
         id: z.string(),
-        kind: z.enum(["guess", "puzzle"]),
+        kind: GameKindSchema,
         sessionId: z.string(),
         inviterUsername: z.string(),
         inviterColor: z.string(),

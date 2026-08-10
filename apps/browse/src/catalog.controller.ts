@@ -1,5 +1,7 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
+import {GameKindSchema} from "@game-worker/shared/game";
+import {immutableImageResponse} from "@game-worker/shared/images";
 import {CatalogEntrySchema, PlayStatusSchema} from "./catalog.schema";
 import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
 
@@ -22,7 +24,7 @@ browseRoutes.openapi(
             "can only spectate — both also include entries with no thumbnail yet.",
         request: {
             query: z.object({
-                kind: z.enum(["guess", "puzzle"]).optional().openapi({description: "Filter to one game type"}),
+                kind: GameKindSchema.optional().openapi({description: "Filter to one game type"}),
                 sort: z.enum(["recent", "rating"]).optional().openapi({description: "Defaults to recent"}),
                 playStatus: PlayStatusSchema.optional().openapi({
                     description: "Filter to what's joinable, in progress, or finished right now",
@@ -119,11 +121,7 @@ browseRoutes.openapi(
         const object = await c.env.IMAGES.get(key);
         if (!object) return c.notFound();
 
-        const headers = new Headers();
-        object.writeHttpMetadata(headers);
-        headers.set("etag", object.httpEtag);
-        headers.set("Cache-Control", "public, max-age=31536000, immutable");
-        return new Response(object.body, {headers});
+        return immutableImageResponse(object);
     },
 );
 

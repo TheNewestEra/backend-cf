@@ -7,6 +7,12 @@ export const ROUND_COUNT = 5;
  * countdown, so the two games can't drift apart on "how long is the wait". */
 export {LOBBY_COUNTDOWN_SECONDS} from "@game-worker/shared/lobby";
 
+/** Theme/player-name length caps and the host-token body shape, sourced
+ * from `@game-worker/shared/game-session` — Piece Puzzle's create/join
+ * forms (see puzzle.constants.ts) take the exact same shape, so the two
+ * can't drift apart on these limits. */
+export {HostBodySchema, MAX_PLAYER_LENGTH, MAX_THEME_LENGTH} from "@game-worker/shared/game-session";
+
 /** Round scoring is time-weighted like the puzzle's solve score: full marks
  * for a correct guess submitted the instant the round's image is ready,
  * floor score for one that takes guessTimeLimitSeconds() or longer. An

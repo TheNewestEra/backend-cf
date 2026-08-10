@@ -12,8 +12,9 @@
 // Worker only ever reads it (for display names), never writes it.
 
 import type {Database} from "@game-worker/shared/db";
+import type {GameKind} from "@game-worker/shared/game";
 
-export type LeaderboardKind = "guess" | "puzzle";
+export type LeaderboardKind = GameKind;
 export type LeaderboardPeriod = "all" | "day" | "week" | "month";
 
 const PERIOD_MS: Record<Exclude<LeaderboardPeriod, "all">, number> = {

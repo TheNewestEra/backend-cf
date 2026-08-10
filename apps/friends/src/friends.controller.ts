@@ -1,5 +1,6 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
+import {GameKindSchema, playUrlFor} from "@game-worker/shared/game";
 import {actionResponse} from "@game-worker/shared/http-exceptions";
 import {currentUser} from "./auth.middleware";
 import {
@@ -330,7 +331,7 @@ friendsRoutes.openapi(
                 content: {
                     "application/json": {
                         schema: z.object({
-                            kind: z.enum(["guess", "puzzle"]),
+                            kind: GameKindSchema,
                             sessionId: z.string(),
                             friendId: z.string().optional(),
                             groupId: z.string().optional(),
@@ -432,7 +433,7 @@ friendsRoutes.openapi(
         const result = await respondToInvite(c.env.DB, id, user.id, true);
         if (!result.ok) return c.json({error: result.error}, result.error === "forbidden" ? 403 : 400);
 
-        const playUrl = result.kind === "guess" ? `/games/${result.sessionId}/play` : `/puzzles/${result.sessionId}/play`;
+        const playUrl = playUrlFor(result.kind, result.sessionId);
         return c.json({ok: true as const, playUrl}, 200);
     },
 );

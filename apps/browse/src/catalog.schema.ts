@@ -1,4 +1,5 @@
 import {z} from "@hono/zod-openapi";
+import {GameKindSchema} from "@game-worker/shared/game";
 
 /** 'joinable' — spectate *or* join in as a player (still generating, or a
  * Piece Puzzle lobby). 'active' — started; spectate only. 'finished' —
@@ -8,7 +9,7 @@ export const PlayStatusSchema = z.enum(["joinable", "active", "finished"]).opena
 export const CatalogEntrySchema = z
     .object({
         id: z.string(),
-        kind: z.enum(["guess", "puzzle"]),
+        kind: GameKindSchema,
         theme: z.string().nullable(),
         thumbnailUrl: z.string().nullable(),
         playUrl: z.string(),

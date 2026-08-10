@@ -10,6 +10,7 @@
 // Worker that ever writes `catalog`/`ratings`.
 
 import type {Database} from "@game-worker/shared/db";
+import {playUrlFor} from "@game-worker/shared/game";
 import type {CatalogEntrySchema, PlayStatusSchema} from "./catalog.schema";
 import type {z} from "@hono/zod-openapi";
 
@@ -166,7 +167,7 @@ function toPublic(row: CatalogRow): CatalogEntry {
         // rather than pointing across to `guess`/`puzzle` — the browse page
         // only ever has to talk to one origin for a page of results.
         thumbnailUrl: row.thumbnail_key ? `/api/catalog/${row.id}/thumbnail` : null,
-        playUrl: row.kind === "guess" ? `/games/${row.id}/play` : `/puzzles/${row.id}/play`,
+        playUrl: playUrlFor(row.kind, row.id),
         playStatus: row.play_status,
         averageRating: row.rating_count > 0 ? row.rating_sum / row.rating_count : null,
         ratingCount: row.rating_count,

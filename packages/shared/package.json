@@ -13,7 +13,10 @@
     "./session": "./src/session.ts",
     "./rpc-types": "./src/rpc-types.ts",
     "./color": "./src/color.ts",
-    "./lobby": "./src/lobby.ts"
+    "./lobby": "./src/lobby.ts",
+    "./game": "./src/game.ts",
+    "./game-session": "./src/game-session.ts",
+    "./images": "./src/images.ts"
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.5.2",

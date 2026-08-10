@@ -50,3 +50,18 @@ export async function logOutVia(c: Context, accounts: AccountsSessionRpc): Promi
     if (token) await accounts.deleteSession(token);
     deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts());
 }
+
+/** Builds the `currentUser`/`logIn`/`logOut` trio every non-accounts
+ * service's `auth.middleware.ts` re-exports, bound to that Worker's own
+ * `ACCOUNTS` binding — was copy-pasted identically into `friends`, `guess`,
+ * `leaderboard`, and `puzzle` before this existed. `Env` is each caller's
+ * own ambient `Env` (see `worker-configuration.d.ts`), passed explicitly as
+ * a type argument since it's declared globally per-app and can't be
+ * inferred from here. */
+export function accountsAuthMiddleware<Env extends { ACCOUNTS: AccountsSessionRpc }>() {
+    return {
+        currentUser: (c: Context<{ Bindings: Env }>) => currentUserVia(c, c.env.ACCOUNTS),
+        logIn: (c: Context<{ Bindings: Env }>, userId: string) => logInVia(c, c.env.ACCOUNTS, userId),
+        logOut: (c: Context<{ Bindings: Env }>) => logOutVia(c, c.env.ACCOUNTS),
+    };
+}

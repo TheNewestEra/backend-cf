@@ -1,15 +1,11 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { ErrorSchema, OkSchema } from "@game-worker/shared/common.schema";
 import { hostActionError } from "@game-worker/shared/http-exceptions";
+import { immutableImageResponse } from "@game-worker/shared/images";
 import { currentUser } from "./auth.middleware";
-import { imageKeyFor, ROUND_COUNT } from "./guess.constants";
+import { HostBodySchema, imageKeyFor, MAX_PLAYER_LENGTH, MAX_THEME_LENGTH, ROUND_COUNT } from "./guess.constants";
 import type { GuessQueueMessage } from "./guess.queue";
 import { GamePublicSchema, GuessResultSchema, JoinResultSchema } from "./guess.schema";
-
-const MAX_THEME_LENGTH = 120;
-const MAX_PLAYER_LENGTH = 40;
-
-const hostBodySchema = z.object({ hostToken: z.string().optional() });
 
 export const guessRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -90,7 +86,7 @@ guessRoutes.openapi(
     summary: "Host-only: end the lobby countdown early and start play",
     request: {
       params: z.object({ id: z.string() }),
-      body: { content: { "application/json": { schema: hostBodySchema } }, required: false },
+      body: { content: { "application/json": { schema: HostBodySchema } }, required: false },
     },
     responses: {
       200: { description: "Started", content: { "application/json": { schema: OkSchema } } },
@@ -321,10 +317,6 @@ guessRoutes.openapi(
     const object = await c.env.IMAGES.get(imageKeyFor(gameId, index));
     if (!object) return c.notFound();
 
-    const headers = new Headers();
-    object.writeHttpMetadata(headers);
-    headers.set("etag", object.httpEtag);
-    headers.set("Cache-Control", "public, max-age=31536000, immutable");
-    return new Response(object.body, { headers });
+    return immutableImageResponse(object);
   },
 );

@@ -1,21 +1,20 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
+import {immutableImageResponse} from "@game-worker/shared/images";
 import {currentUser} from "./auth.middleware";
 import {
     DEFAULT_GRID_SIZE,
+    HostBodySchema,
     MAX_GRID_SIZE,
+    MAX_PLAYER_LENGTH,
+    MAX_THEME_LENGTH,
     MIN_GRID_SIZE,
     puzzleImageKeyFor,
     puzzleTimeLimitMs,
 } from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
 import {JoinResultSchema, MoveResultSchema, PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
-
-const MAX_THEME_LENGTH = 120;
-const MAX_PLAYER_LENGTH = 40;
-
-const hostBodySchema = z.object({hostToken: z.string().optional()});
 
 export const puzzleRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -98,7 +97,7 @@ puzzleRoutes.openapi(
         summary: "Host-only: start a fresh generation run (new image, same theme)",
         request: {
             params: z.object({id: z.string()}),
-            body: {content: {"application/json": {schema: hostBodySchema}}, required: false},
+            body: {content: {"application/json": {schema: HostBodySchema}}, required: false},
         },
         responses: {
             200: {description: "Regeneration queued", content: {"application/json": {schema: OkSchema}}},
@@ -132,7 +131,7 @@ puzzleRoutes.openapi(
         summary: "Host-only: end the lobby countdown early and start play",
         request: {
             params: z.object({id: z.string()}),
-            body: {content: {"application/json": {schema: hostBodySchema}}, required: false},
+            body: {content: {"application/json": {schema: HostBodySchema}}, required: false},
         },
         responses: {
             200: {description: "Started", content: {"application/json": {schema: OkSchema}}},
@@ -383,11 +382,7 @@ puzzleRoutes.openapi(
         const object = await c.env.IMAGES.get(puzzleImageKeyFor(id));
         if (!object) return c.notFound();
 
-        const headers = new Headers();
-        object.writeHttpMetadata(headers);
-        headers.set("etag", object.httpEtag);
-        headers.set("Cache-Control", "public, max-age=31536000, immutable");
-        return new Response(object.body, {headers});
+        return immutableImageResponse(object);
     },
 );
 

@@ -13,6 +13,8 @@
 // global declaration merging is whole-program, not per-directory), which
 // corrupts both. Depending only on these dependency-free interfaces avoids
 // that entirely — the real RPC stub still satisfies them structurally.
+import type {GameKind} from "./game";
+
 export interface AccountRecord {
     id: string;
     username: string;
@@ -35,7 +37,7 @@ export type AccountsSessionRpc = Pick<AccountsRpc, "getUserBySession" | "createS
 
 /** RPC surface exposed by `apps/browse`'s `CatalogService`. */
 export interface CatalogRpc {
-    insertCatalogEntry(id: string, kind: "guess" | "puzzle", theme: string | null): Promise<void>;
+    insertCatalogEntry(id: string, kind: GameKind, theme: string | null): Promise<void>;
     markCatalogGenerating(id: string): Promise<void>;
     markCatalogReady(id: string, thumbnailKey: string): Promise<void>;
     markCatalogError(id: string): Promise<void>;
@@ -47,7 +49,7 @@ export interface CatalogRpc {
 
 /** RPC surface exposed by `apps/leaderboard`'s `LeaderboardService`. */
 export interface LeaderboardRpc {
-    recordScore(input: { userId: string; kind: "guess" | "puzzle"; sessionId: string; score: number }): Promise<void>;
+    recordScore(input: { userId: string; kind: GameKind; sessionId: string; score: number }): Promise<void>;
 }
 
 /** RPC surface exposed by `apps/puzzle`'s `PuzzleService`. */

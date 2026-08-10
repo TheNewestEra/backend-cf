@@ -1,5 +1,6 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { ErrorSchema } from "@game-worker/shared/common.schema";
+import { GameKindSchema } from "@game-worker/shared/game";
 import { currentUser } from "./auth.middleware";
 import {
   LeaderboardEntrySchema,
@@ -27,7 +28,7 @@ leaderboardRoutes.openapi(
       "being logged in.",
     request: {
       query: z.object({
-        kind: z.enum(["guess", "puzzle"]).optional().openapi({ description: "Filter to one game type" }),
+        kind: GameKindSchema.optional().openapi({ description: "Filter to one game type" }),
         period: LeaderboardPeriodSchema.optional().openapi({ description: "Defaults to all-time" }),
         scope: LeaderboardScopeSchema.optional().openapi({ description: "Defaults to global" }),
         page: z.coerce
