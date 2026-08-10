@@ -1,7 +1,7 @@
 import type {Database} from "@game-worker/shared/db";
 import {type GameKind, playUrlFor} from "@game-worker/shared/game";
 import {type CatalogEntry, CatalogSort, CatalogStatus, PlayStatus} from "./catalog.schema";
-import {D1Result, URL} from "@cloudflare/workers-types";
+import {D1Result} from "@cloudflare/workers-types";
 
 interface CatalogRow {
     readonly id: string;
