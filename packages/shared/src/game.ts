@@ -1,23 +1,18 @@
-// The two game kinds this project supports, and the couple of things every
-// service needs to agree on when referring to one — what to validate it as,
-// what to call it in a URL. Before this existed, `"guess" | "puzzle"` unions
-// and `z.enum(["guess", "puzzle"])` calls were redeclared per service
-// (leaderboard, browse/catalog, friends' invites, ...); this is the one
-// place that pairing is spelled out, so a third game type only ever needs
-// adding here.
-
 import {z} from "@hono/zod-openapi";
 
-export const GAME_KINDS = ["guess", "puzzle"] as const;
+export const GameKind = {
+    Guess: "guess",
+    Puzzle: "puzzle",
+} as const;
 
-export type GameKind = (typeof GAME_KINDS)[number];
+export type GameKind = (typeof GameKind)[keyof typeof GameKind];
 
-export const GameKindSchema = z.enum(GAME_KINDS);
+export const GameKindSchema = z.nativeEnum(GameKind);
 
-/** Where a catalog entry or accepted invite of this kind is actually played
- * — Guess the Prompt lives under `/games`, Piece Puzzle under `/puzzles`.
- * Shared by the browse catalog and friends' invites so the two routers
- * can't compute this path differently. */
-export function playUrlFor(kind: GameKind, sessionId: string): string {
-    return kind === "guess" ? `/games/${sessionId}/play` : `/puzzles/${sessionId}/play`;
-}
+const GAME_ROUTES = {
+    [GameKind.Guess]: (id: string) => `/games/guess/${id}`,
+    [GameKind.Puzzle]: (id: string) => `/games/piece-puzzle/${id}`,
+} as const satisfies Record<GameKind, (id: string) => `/games/${string}/${string}`>;
+
+export const playUrlFor = (kind: GameKind, sessionId: string) =>
+    GAME_ROUTES[kind](sessionId);

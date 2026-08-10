@@ -2,7 +2,7 @@ import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
 import {GameKindSchema} from "@game-worker/shared/game";
 import {immutableImageResponse} from "@game-worker/shared/images";
-import {CatalogEntrySchema, PlayStatusSchema} from "./catalog.schema";
+import {CatalogEntrySchema, CatalogSort, CatalogSortSchema, PlayStatusSchema,} from "./catalog.schema";
 import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
 
 const DEFAULT_LIMIT = 24;
@@ -25,7 +25,7 @@ browseRoutes.openapi(
         request: {
             query: z.object({
                 kind: GameKindSchema.optional().openapi({description: "Filter to one game type"}),
-                sort: z.enum(["recent", "rating"]).optional().openapi({description: "Defaults to recent"}),
+                sort: CatalogSortSchema.optional().openapi({description: `Defaults to ${CatalogSort.Recent}`}),
                 playStatus: PlayStatusSchema.optional().openapi({
                     description: "Filter to what's joinable, in progress, or finished right now",
                 }),
@@ -42,13 +42,19 @@ browseRoutes.openapi(
     }),
     async (c) => {
         const {kind, sort, playStatus, limit, offset} = c.req.valid("query");
-        const entries = await listCatalog(c.env.DB, {
-            kind: kind ?? null,
-            sort: sort ?? "recent",
-            playStatus: playStatus ?? null,
-            limit: clamp(limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT),
-            offset: Math.max(0, offset ?? 0),
-        });
+        const origin = new URL(c.req.url).origin;
+
+        const entries = await listCatalog(
+            c.env.DB,
+            {
+                kind: kind ?? null,
+                sort: sort ?? CatalogSort.Recent,
+                playStatus: playStatus ?? null,
+                limit: clamp(limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT),
+                offset: Math.max(0, offset ?? 0),
+            },
+            origin
+        );
         return c.json({entries}, 200);
     },
 );
@@ -125,6 +131,4 @@ browseRoutes.openapi(
     },
 );
 
-function clamp(n: number, min: number, max: number): number {
-    return Math.min(max, Math.max(min, n));
-}
+const clamp = (n: number, min: number, max: number): number => Math.min(max, Math.max(min, n));

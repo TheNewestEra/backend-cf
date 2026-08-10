@@ -1,17 +1,18 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
+import {type GameKind} from "@game-worker/shared/game";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {browseRoutes} from "./catalog.controller";
+import {type PlayStatus} from "./catalog.schema";
 import {
-    type CatalogKind,
     insertCatalogEntry,
     markCatalogError,
     markCatalogGenerating,
     markCatalogReady,
-    type PlayStatus,
     updatePlayStatus,
 } from "./catalog.service";
+import {D1Result} from "@cloudflare/workers-types";
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -30,29 +31,16 @@ app.doc("/openapi.json", {
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
 
-/** RPC surface for the `guess` and `puzzle` Workers (bound via a `services`
- * entry with `entrypoint: "CatalogService"`) — called once when a game/
- * puzzle is created, then again as its background generation progresses. */
 export class CatalogService extends WorkerEntrypoint<Env> {
-    insertCatalogEntry(id: string, kind: CatalogKind, theme: string | null): Promise<void> {
-        return insertCatalogEntry(this.env.DB, id, kind, theme);
-    }
+    insertCatalogEntry = (id: string, kind: GameKind, theme: string | null): Promise<D1Result> => insertCatalogEntry(this.env.DB, id, kind, theme);
 
-    markCatalogGenerating(id: string): Promise<void> {
-        return markCatalogGenerating(this.env.DB, id);
-    }
+    markCatalogGenerating = (id: string): Promise<D1Result> => markCatalogGenerating(this.env.DB, id);
 
-    markCatalogReady(id: string, thumbnailKey: string): Promise<void> {
-        return markCatalogReady(this.env.DB, id, thumbnailKey);
-    }
+    markCatalogReady = (id: string, thumbnailKey: string): Promise<D1Result> => markCatalogReady(this.env.DB, id, thumbnailKey);
 
-    markCatalogError(id: string): Promise<void> {
-        return markCatalogError(this.env.DB, id);
-    }
+    markCatalogError = (id: string): Promise<D1Result> => markCatalogError(this.env.DB, id);
 
-    updatePlayStatus(id: string, playStatus: PlayStatus): Promise<void> {
-        return updatePlayStatus(this.env.DB, id, playStatus);
-    }
+    updatePlayStatus = (id: string, playStatus: PlayStatus): Promise<D1Result> => updatePlayStatus(this.env.DB, id, playStatus);
 }
 
 export default {
