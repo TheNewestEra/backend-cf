@@ -371,7 +371,12 @@ friendsRoutes.openapi(
             }
         } else {
             const {status} = await c.env.GUESS.getStatus(sessionId);
-            if (status !== "queued" && status !== "generating_prompts" && status !== "generating_images") {
+            if (
+                status !== "queued" &&
+                status !== "generating_prompts" &&
+                status !== "generating_images" &&
+                status !== "waiting"
+            ) {
                 return c.json({error: "Invites are only open before the game starts."}, 409);
             }
         }

@@ -7,10 +7,19 @@ browsers over a WebSocket. A D1-backed catalog indexes every game/puzzle
 ever created, across all users, for browsing and rating.
 
 - **Guess the Prompt** — 5 AI images generate around a theme; players guess
-  the prompt behind each one.
+  the prompt behind each one. Starts in a waiting room the host controls.
 - **Piece Puzzle** — one AI image generates, scrambles into an N×N grid,
   and 2+ players collaboratively race a countdown to put it back together
   on the same shared board. Starts in a waiting room the host controls.
+
+Both games share the exact same **lobby** shape (see `packages/shared/src/
+lobby.ts`): once content is ready, play doesn't start instantly — a
+`waiting` room opens for `LOBBY_COUNTDOWN_SECONDS` so players can join and
+see who else showed up, ending either on a DO alarm or the host calling
+"start now" early. They also share **participant colors** (`packages/
+shared/src/color.ts`, the same generator `accounts` uses for a real
+account's color) and a `player_joined` broadcast, so every connected client
+can render a live roster of who's in the lobby and in what color.
 
 ## Architecture: one Worker per service, connected by RPC
 
@@ -82,22 +91,43 @@ that file has no binding of its own.
 - **Partial failures**: if some images fail, the game ends in `error`
   status (not stuck retrying) — there's no way to reset it in place any
   more (see Replay below); the only way forward is a fresh instance.
+- **Waiting room**: once every round's image is ready, the game enters a
+  `waiting` status — same lobby shape as Piece Puzzle (see the intro
+  above). The **host** — whoever created it, identified by a one-time
+  `hostToken` returned at creation, never broadcast or exposed elsewhere —
+  can start immediately (`POST /games/:id/start`); otherwise a **DO alarm**
+  auto-starts it after `LOBBY_COUNTDOWN_SECONDS` (30s), same alarm
+  mechanism as `PuzzleDO`. Direct friend/group invites (`POST
+  /api/invites`, served by `friends`) are only accepted pre-start
+  (`queued`/`generating_prompts`/`generating_images`/`waiting`) — `friends`
+  checks this through the `GuessService.getStatus` RPC call rather than a
+  direct binding to this service's Durable Object namespace.
 - **Joining**: `POST /games/:id/join` registers a player — required before
   any `guess`/`reveal` call, and only possible while rounds are still
-  generating (`queued`/`generating_prompts`/`generating_images`). Once the
+  generating or the lobby is open
+  (`queued`/`generating_prompts`/`generating_images`/`waiting`). Once the
   game is `ready` it's playable, so joining then would be joining a game
   already in progress rather than just spectating it — late arrivals can
   still watch over the WebSocket, but `join()` (and everything gated on
   having joined) throws. Logged-in players are identified by their session
-  from then on; anonymous guests get back a one-time `token` they must
-  resend with every guess/reveal, since a free-text name alone isn't a
-  real identity.
+  from then on and keep their account color; anonymous guests get back a
+  one-time `token` they must resend with every guess/reveal (since a
+  free-text name alone isn't a real identity) and a freshly generated
+  color.
+- **Interactivity**: the DO broadcasts a `connectedPlayers` count on every
+  connect/disconnect and a `player_joined` (name + color) event on every
+  join, and `getState()`/every `state` broadcast includes the full
+  `participants` roster — so the lobby and play page can show who's
+  actually there, live. `guess`/`reveal` broadcasts include the acting
+  player's name and color too. A lightweight `{"type":"typing",...}`
+  WebSocket message (not an RPC — see `GameDO.webSocketMessage`) rebroadcasts
+  a `player_typing` cue while someone's composing a guess.
 - **Replay**: `POST /games/:id/replay` creates an *independent* game (its
-  own id, rounds, guesses, and join roster) seeded from this one's theme
-  and re-runs generation — it never touches the source game, so anyone
-  browsing/spectating a game can replay it and invite their own friends to
-  the new instance without disrupting whoever's still playing the
-  original.
+  own id, lobby, host token, rounds, guesses, and join roster) seeded from
+  this one's theme and re-runs generation — it never touches the source
+  game, so anyone browsing/spectating a game can replay it and invite their
+  own friends to the new instance without disrupting whoever's still
+  playing the original.
 - **Rating**: once every round has generated, the play page shows a 1-5
   star widget (`POST /api/catalog/:id/rate`, served by `browse`); one
   rating per browser (tracked in `localStorage`, not enforced server-side).
@@ -107,8 +137,9 @@ that file has no binding of its own.
   aren't leaderboard-eligible.
 
 Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
-`POST /games/:id/join`, `POST /games/:id/guess`, `POST /games/:id/reveal`,
-`POST /games/:id/replay`, `GET /games/:id/images/:index`.
+`POST /games/:id/join`, `POST /games/:id/start`, `POST /games/:id/guess`,
+`POST /games/:id/reveal`, `POST /games/:id/replay`,
+`GET /games/:id/images/:index`.
 
 ### Piece Puzzle (`apps/puzzle`)
 
@@ -120,30 +151,38 @@ Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
   offset per tile — no server-side image slicing. Grid size is 3×3 to 6×6
   (player-chosen at creation, default 4×4).
 - **Waiting room**: once the image is ready, the puzzle enters a `waiting`
-  status. The **host** — whoever created it, identified by a one-time
-  `hostToken` returned at creation, never broadcast or exposed elsewhere —
-  can regenerate the image (`POST /puzzles/:id/regenerate`, only while
-  still pre-start) or start immediately (`POST /puzzles/:id/start`);
-  otherwise a **DO alarm** auto-starts it after `LOBBY_COUNTDOWN_SECONDS`
-  (30s). Direct friend/group invites (`POST /api/invites`, served by
-  `friends`) are also only accepted pre-start (`queued`/`generating`/
-  `waiting`) — `friends` checks this through the `PuzzleService.
-  getLobbyStatus` RPC call rather than a direct binding to this service's
-  Durable Object namespace. Guess the Prompt is gated the same way now,
-  via its own `GuessService.getStatus`.
+  status (see the shared lobby shape in the intro above). The **host** —
+  whoever created it, identified by a one-time `hostToken` returned at
+  creation, never broadcast or exposed elsewhere — can regenerate the
+  image (`POST /puzzles/:id/regenerate`, only while still pre-start) or
+  start immediately (`POST /puzzles/:id/start`); otherwise a **DO alarm**
+  auto-starts it after `LOBBY_COUNTDOWN_SECONDS` (30s). Direct friend/group
+  invites (`POST /api/invites`, served by `friends`) are also only
+  accepted pre-start (`queued`/`generating`/`waiting`) — `friends` checks
+  this through the `PuzzleService.getLobbyStatus` RPC call rather than a
+  direct binding to this service's Durable Object namespace. Guess the
+  Prompt is gated the same way now, via its own `GuessService.getStatus`.
 - **Joining**: `POST /puzzles/:id/join` registers a player — required
   before any `move` call, and only possible pre-start
   (`queued`/`generating`/`waiting`). Once the puzzle is `playing` this
   throws, so late arrivals can still spectate over the WebSocket but can't
-  join in. Logged-in players are identified by their session from then on;
-  anonymous guests get back a one-time `token` they must resend with every
-  move, since a free-text name alone isn't a real identity.
+  join in. Logged-in players are identified by their session from then on
+  and keep their account color; anonymous guests get back a one-time
+  `token` they must resend with every move (since a free-text name alone
+  isn't a real identity) and a freshly generated color.
 - **Moves**: click a tile, then another, to swap them — free swap, not a
   classic sliding-15-puzzle, so any arrangement is trivially solvable and
   two players can never block each other on an empty-slot constraint.
   Every move is server-authoritative: `PuzzleDO.swapTiles()` checks the
   caller joined before start, then persists the swap and broadcasts it to
-  *every* connected client (including the mover).
+  *every* connected client (including the mover), tagged with the mover's
+  name and color.
+- **Block selection**: `POST /puzzles/:id/select` broadcasts a
+  `tile_selected` event (`cell`, `player`, `color`) the instant a joined
+  player picks a block, *before* they've picked its swap partner — a pure
+  UX cue, not persisted anywhere and not itself a move (see `PuzzleDO.
+  selectTile()`), so every other connected client can highlight what's
+  about to move and in whose color.
 - **Timer**: same DO alarm mechanism as the lobby, just re-armed for
   `startedAt + timeLimitMs` once play begins. On solve, the alarm is
   cancelled; on expiry, the puzzle ends `timeout` with score 0.
@@ -159,14 +198,17 @@ Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
   `regenerate`, replaying isn't host-gated — the replayer becomes the new
   instance's host.
 - **Presence**: the DO broadcasts a `connectedPlayers` count on every
-  connect/disconnect.
+  connect/disconnect and a `player_joined` (name + color) event on every
+  join; `getState()`/every `state` broadcast includes the full
+  `participants` roster.
 - **Rating**: shown once solved/timed out, same star widget/mechanism as
   Guess the Prompt.
 
 Routes: `POST /puzzles`, `GET /puzzles/:id`, `GET /puzzles/:id/ws`,
 `POST /puzzles/:id/join`, `POST /puzzles/:id/move`,
-`POST /puzzles/:id/start`, `POST /puzzles/:id/replay`,
-`POST /puzzles/:id/regenerate`, `GET /puzzles/:id/image`.
+`POST /puzzles/:id/select`, `POST /puzzles/:id/start`,
+`POST /puzzles/:id/replay`, `POST /puzzles/:id/regenerate`,
+`GET /puzzles/:id/image`.
 
 ### Browse & ratings (`apps/browse`)
 
@@ -185,23 +227,22 @@ mirrors a coarse `playStatus`, not moves/scores/timers.
 - **`playStatus`** (`joinable` | `active` | `finished`) tracks each entry's
   live join/spectate window, independently of `status` (which only reflects
   generation progress / thumbnail availability) — the two don't move in
-  lockstep: a Piece Puzzle becomes `ready` (has a thumbnail) the instant it
-  enters its waiting-room lobby, which is still `joinable`, not `active`.
+  lockstep: both games become `ready` (have a thumbnail) the instant they
+  enter their waiting-room lobby, which is still `joinable`, not `active`.
   `joinable` covers still-generating entries too (no thumbnail yet), since
-  Guess the Prompt's own join window is open right from creation, not just
-  once a lobby exists. `guess` calls `updatePlayStatus(id, "active")` the
-  moment its rounds are `ready`, from `processGuessGame` (`guess.queue.ts`)
-  right alongside `markCatalogReady` — and never anything after, since
-  Guess the Prompt has no terminal state. `puzzle` calls it from three
-  places inside `PuzzleDO` itself (not the queue consumer, since these are
-  live-gameplay transitions, not generation ones): `"active"` when
-  `beginPlaying()` runs (host "start now" or the lobby alarm), `"finished"`
-  on a solve (`swapTiles`) or a timeout (`alarm()`). Both games' calls are
-  `.catch()`'d (and, for `puzzle`, wrapped in `ctx.waitUntil()` since
-  they're fired from a DO method that doesn't otherwise await them) so a
-  `browse` hiccup can never break a live move, a lobby auto-start, or
-  (worse, for `guess`) trigger a spurious retry of AI generation that
-  already succeeded.
+  both games' own join window is open right from creation, not just once a
+  lobby exists. Since both games now share the exact same lobby shape (see
+  the intro above), both flip to `"active"` the same way: from inside their
+  own DO (`GameDO`/`PuzzleDO`), not their queue consumer, since it's a
+  live-gameplay transition (host "start now" or the lobby alarm) rather
+  than a generation one — see `GameDO.beginPlaying()` / `PuzzleDO.
+  beginPlaying()`. `puzzle` additionally calls `"finished"` on a solve
+  (`swapTiles`) or a timeout (`alarm()`); Guess the Prompt has no terminal
+  state, so it never calls `"finished"`. Every call is `.catch()`'d and
+  wrapped in `ctx.waitUntil()` (fired from a DO method that doesn't
+  otherwise await them) so a `browse` hiccup can never break a live move,
+  a lobby auto-start, or (for generation-phase writes) trigger a spurious
+  retry of AI generation that already succeeded.
 - `GET /api/catalog` without `playStatus` is the plain browse gallery,
   unchanged: everything with `status = 'ready'`, filterable by kind and
   sortable by recency or average rating. Pass `playStatus=joinable` for
@@ -245,11 +286,14 @@ accounts depend on it.
 - **Play identity**: both play pages' "Playing as" field is your real
   username (read-only) when logged in. Identity is now established once,
   at `POST .../join` — logged-in players are upserted by session `userId`
-  (can't be spoofed), anonymous guests submit a freeform nickname there
-  and get back a bearer `token`. Every later `guess`/`reveal`/`move` call
-  is checked against that join roster (`participantId` + `token` for
-  guests, session for logged-in players) rather than trusting a name
-  resent on each request.
+  (can't be spoofed) and keep their account color, anonymous guests submit
+  a freeform nickname there and get back a bearer `token` plus a freshly
+  generated color (`@game-worker/shared/color`, the same generator used at
+  registration). Every later `guess`/`reveal`/`move` call is checked
+  against that join roster (`participantId` + `token` for guests, session
+  for logged-in players) rather than trusting a name resent on each
+  request, and every join broadcasts a `player_joined` event so connected
+  clients can render a live, colored roster.
 
 ### Friends & invites (`apps/friends`)
 

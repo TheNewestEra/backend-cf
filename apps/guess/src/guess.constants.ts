@@ -1,6 +1,12 @@
 /** Every "guess the prompt" game has exactly this many image/prompt rounds. */
 export const ROUND_COUNT = 5;
 
+/** How long the waiting room lasts once every round's image is ready,
+ * before the game auto-starts. Sourced from `@game-worker/shared/lobby` —
+ * Piece Puzzle's own lobby (see puzzle.constants.ts) uses the exact same
+ * countdown, so the two games can't drift apart on "how long is the wait". */
+export {LOBBY_COUNTDOWN_SECONDS} from "@game-worker/shared/lobby";
+
 /** Round scoring is time-weighted like the puzzle's solve score: full marks
  * for a correct guess submitted the instant the round's image is ready,
  * floor score for one that takes guessTimeLimitSeconds() or longer. An

@@ -1,5 +1,5 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
-import { ErrorSchema } from "@game-worker/shared/common.schema";
+import { ErrorSchema, OkSchema } from "@game-worker/shared/common.schema";
 import { hostActionError } from "@game-worker/shared/http-exceptions";
 import { currentUser } from "./auth.middleware";
 import { imageKeyFor, ROUND_COUNT } from "./guess.constants";
@@ -9,6 +9,8 @@ import { GamePublicSchema, GuessResultSchema, JoinResultSchema } from "./guess.s
 const MAX_THEME_LENGTH = 120;
 const MAX_PLAYER_LENGTH = 40;
 
+const hostBodySchema = z.object({ hostToken: z.string().optional() });
+
 export const guessRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
 guessRoutes.openapi(
@@ -17,7 +19,10 @@ guessRoutes.openapi(
     path: "/games",
     tags: ["Guess the Prompt"],
     summary: "Create a new game",
-    description: "Enqueues generation (5 rounds of AI prompt + image); poll GET /games/{id} or connect to the WebSocket for progress.",
+    description:
+      "Enqueues generation (5 rounds of AI prompt + image); poll GET /games/{id} or connect to the WebSocket " +
+      "for progress. The returned hostToken authorizes starting the lobby early for this game (replaying it " +
+      "later gets its own, separate host token).",
     request: {
       body: {
         content: {
@@ -31,7 +36,7 @@ guessRoutes.openapi(
     responses: {
       202: {
         description: "Generation queued",
-        content: { "application/json": { schema: z.object({ gameId: z.string() }) } },
+        content: { "application/json": { schema: z.object({ gameId: z.string(), hostToken: z.string() }) } },
       },
     },
   }),
@@ -41,11 +46,11 @@ guessRoutes.openapi(
 
     const gameId = crypto.randomUUID();
     const stub = c.env.GAME_DO.getByName(gameId);
-    await stub.init(gameId, theme);
+    const hostToken = await stub.init(gameId, theme);
     await c.env.BROWSE.insertCatalogEntry(gameId, "guess", theme);
     await c.env.GAME_QUEUE.send({ gameId, theme } satisfies GuessQueueMessage);
 
-    return c.json({ gameId }, 202);
+    return c.json({ gameId, hostToken }, 202);
   },
 );
 
@@ -80,19 +85,49 @@ guessRoutes.get("/games/:id/ws", async (c) => {
 guessRoutes.openapi(
   createRoute({
     method: "post",
+    path: "/games/{id}/start",
+    tags: ["Guess the Prompt"],
+    summary: "Host-only: end the lobby countdown early and start play",
+    request: {
+      params: z.object({ id: z.string() }),
+      body: { content: { "application/json": { schema: hostBodySchema } }, required: false },
+    },
+    responses: {
+      200: { description: "Started", content: { "application/json": { schema: OkSchema } } },
+      403: { description: "Missing/incorrect host token", content: { "application/json": { schema: ErrorSchema } } },
+      409: { description: "Game isn't waiting to start", content: { "application/json": { schema: ErrorSchema } } },
+    },
+  }),
+  async (c) => {
+    const { id } = c.req.valid("param");
+    const { hostToken } = c.req.valid("json");
+    const stub = c.env.GAME_DO.getByName(id);
+    try {
+      await stub.startNow(hostToken ?? "");
+      return c.json({ ok: true as const }, 200);
+    } catch (err) {
+      const { status, body } = hostActionError(err);
+      return c.json(body, status);
+    }
+  },
+);
+
+guessRoutes.openapi(
+  createRoute({
+    method: "post",
     path: "/games/{id}/replay",
     tags: ["Guess the Prompt"],
     summary: "Start a brand-new game with the same theme",
     description:
-      "Creates an independent game instance (its own id, rounds, and guesses) seeded from this one's theme " +
-      "and re-runs generation — it never touches the source game, so anyone can replay a game they're " +
-      "spectating/browsing and invite their own friends to the new instance without disrupting whoever's " +
-      "still playing the original.",
+      "Creates an independent game instance (its own id, lobby, host token, rounds, and guesses) seeded from " +
+      "this one's theme and re-runs generation — it never touches the source game, so anyone can replay a " +
+      "game they're spectating/browsing and invite their own friends to the new instance without disrupting " +
+      "whoever's still playing the original.",
     request: { params: z.object({ id: z.string() }) },
     responses: {
       202: {
         description: "New game's generation queued",
-        content: { "application/json": { schema: z.object({ gameId: z.string() }) } },
+        content: { "application/json": { schema: z.object({ gameId: z.string(), hostToken: z.string() }) } },
       },
     },
   }),
@@ -102,11 +137,11 @@ guessRoutes.openapi(
 
     const gameId = crypto.randomUUID();
     const stub = c.env.GAME_DO.getByName(gameId);
-    await stub.init(gameId, source.theme);
+    const hostToken = await stub.init(gameId, source.theme);
     await c.env.BROWSE.insertCatalogEntry(gameId, "guess", source.theme);
     await c.env.GAME_QUEUE.send({ gameId, theme: source.theme } satisfies GuessQueueMessage);
 
-    return c.json({ gameId }, 202);
+    return c.json({ gameId, hostToken }, 202);
   },
 );
 
@@ -118,10 +153,11 @@ guessRoutes.openapi(
     summary: "Join a game as a player before it starts",
     description:
       "Must be called (and must succeed) before submitting any guess or reveal — it's what distinguishes a " +
-      "player from a spectator. Only possible while rounds are still generating; once the game is `ready` " +
-      "this returns 409 and late arrivals can only spectate over the WebSocket. Logged-in players are " +
-      "identified by their session; `player` is only used for anonymous guests, who get back a `token` they " +
-      "must resend with every guess/reveal.",
+      "player from a spectator. Only possible while rounds are still generating or the lobby is open " +
+      "(`queued`/`generating_prompts`/`generating_images`/`waiting`); once the game is `ready` this returns " +
+      "409 and late arrivals can only spectate over the WebSocket. Logged-in players are identified by their " +
+      "session and keep their account color; `player` is only used for anonymous guests, who get back a " +
+      "`token` they must resend with every guess/reveal, plus a freshly generated `color`.",
     request: {
       params: z.object({ id: z.string() }),
       body: {
@@ -147,7 +183,7 @@ guessRoutes.openapi(
 
     const stub = c.env.GAME_DO.getByName(id);
     try {
-      return c.json(await stub.join(user?.id ?? null, player), 200);
+      return c.json(await stub.join(user?.id ?? null, player, user?.color ?? null), 200);
     } catch (err) {
       // join() only ever throws the "already started" case (never a
       // "forbidden: ..." one), so this is always a 409 — unlike the

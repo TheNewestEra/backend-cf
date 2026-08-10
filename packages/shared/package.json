@@ -11,7 +11,9 @@
     "./db": "./src/db.ts",
     "./ai": "./src/ai.ts",
     "./session": "./src/session.ts",
-    "./rpc-types": "./src/rpc-types.ts"
+    "./rpc-types": "./src/rpc-types.ts",
+    "./color": "./src/color.ts",
+    "./lobby": "./src/lobby.ts"
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.5.2",

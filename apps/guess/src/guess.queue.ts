@@ -27,17 +27,16 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
 
     const failures = results.filter((r) => r.status === "rejected").length;
     if (failures === 0) {
-        await stub.setStatus("ready");
+        // Opens the waiting room rather than starting instantly — see
+        // guess.model.ts's `setReady()`. `playStatus` stays `joinable`
+        // (its default since creation) until the lobby actually ends and
+        // play begins; that transition to `active` now lives in
+        // `GameDO.beginPlaying()` itself, same as Piece Puzzle, since it's
+        // a live-gameplay transition (host "start now" or the lobby alarm)
+        // rather than a generation one.
+        await stub.setReady();
         // Round 0 always exists when there are no failures, so it's a safe thumbnail.
         await env.BROWSE.markCatalogReady(gameId, imageKeyFor(gameId, 0));
-        // Distinct write from markCatalogReady — see updatePlayStatus's own
-        // doc comment. Guess the Prompt has no further transition after
-        // this: it's `active` (spectate-only, join() now rejects) for good.
-        // `.catch()`'d so a transient BROWSE hiccup never turns into a
-        // pointless retry of AI generation that already succeeded.
-        await env.BROWSE.updatePlayStatus(gameId, "active").catch((err) => {
-            console.error("failed to update catalog play status", gameId, err);
-        });
     } else {
         await stub.setStatus(
             "error",

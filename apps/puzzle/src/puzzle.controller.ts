@@ -217,8 +217,9 @@ puzzleRoutes.openapi(
             "Must be called (and must succeed) before submitting any move — it's what distinguishes a player " +
             "from a spectator. Only possible while the lobby is open (or generation is still running); once " +
             "the puzzle is `playing` this returns 409 and late arrivals can only spectate over the WebSocket. " +
-            "Logged-in players are identified by their session; `player` is only used for anonymous guests, " +
-            "who get back a `token` they must resend with every move.",
+            "Logged-in players are identified by their session and keep their account color; `player` is only " +
+            "used for anonymous guests, who get back a `token` they must resend with every move, plus a " +
+            "freshly generated `color`.",
         request: {
             params: z.object({id: z.string()}),
             body: {
@@ -244,7 +245,7 @@ puzzleRoutes.openapi(
 
         const stub = c.env.PUZZLE_DO.getByName(id);
         try {
-            return c.json(await stub.join(user?.id ?? null, player), 200);
+            return c.json(await stub.join(user?.id ?? null, player, user?.color ?? null), 200);
         } catch (err) {
             // join() only ever throws the "already started" case (never a
             // "forbidden: ..." one), so this is always a 409 — unlike the
@@ -300,6 +301,57 @@ puzzleRoutes.openapi(
         const stub = c.env.PUZZLE_DO.getByName(id);
         try {
             return c.json(await stub.swapTiles(participantId, token ?? null, cellA, cellB, user?.id ?? null), 200);
+        } catch (err) {
+            const {status, body} = hostActionError(err);
+            return c.json(body, status);
+        }
+    },
+);
+
+puzzleRoutes.openapi(
+    createRoute({
+        method: "post",
+        path: "/puzzles/{id}/select",
+        tags: ["Piece Puzzle"],
+        summary: "Broadcast that a player selected a block",
+        description:
+            "Purely a live cue for other connected clients — who's about to move which tile, and in what " +
+            "color — before they've picked its swap partner; it doesn't move anything itself, see " +
+            "POST /puzzles/{id}/move for the actual swap. Requires having joined via POST /puzzles/{id}/join " +
+            "first — see that endpoint for why.",
+        request: {
+            params: z.object({id: z.string()}),
+            body: {
+                content: {
+                    "application/json": {
+                        schema: z.object({
+                            cell: z.number().int(),
+                            participantId: z.string(),
+                            token: z.string().optional(),
+                        }),
+                    },
+                },
+            },
+        },
+        responses: {
+            200: {description: "Broadcast", content: {"application/json": {schema: OkSchema}}},
+            400: {description: "Invalid cell index", content: {"application/json": {schema: ErrorSchema}}},
+            403: {description: "Didn't join this puzzle before it started", content: {"application/json": {schema: ErrorSchema}}},
+            409: {
+                description: "Puzzle is not in progress",
+                content: {"application/json": {schema: ErrorSchema}}
+            },
+        },
+    }),
+    async (c) => {
+        const {id} = c.req.valid("param");
+        const {cell, participantId, token} = c.req.valid("json");
+        const user = await currentUser(c);
+
+        const stub = c.env.PUZZLE_DO.getByName(id);
+        try {
+            await stub.selectTile(participantId, token ?? null, cell, user?.id ?? null);
+            return c.json({ok: true as const}, 200);
         } catch (err) {
             const {status, body} = hostActionError(err);
             return c.json(body, status);

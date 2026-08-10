@@ -14,6 +14,7 @@
 // exposed to real accounts worth protecting.
 
 import type {Database} from "@game-worker/shared/db";
+import {generateColor} from "@game-worker/shared/color";
 import type {UserSchema} from "./account.schema";
 import type {z} from "@hono/zod-openapi";
 
@@ -52,26 +53,11 @@ function generateCode(): string {
     return ((n ?? 0) % 1_000_000).toString().padStart(6, "0");
 }
 
-/** Picks a random display color for a newly-registered user, e.g. "#4f9d69".
- * Fixed saturation/lightness (not a fully random hex) so every generated
- * color reads well as text/avatar fill against a light or dark background —
- * only the hue varies. Stored at registration and never regenerated, so a
- * user's color stays stable everywhere it's shown. */
-function generateColor(): string {
-    const [hueRoll] = crypto.getRandomValues(new Uint32Array(1));
-    const hue = (hueRoll ?? 0) % 360;
-    return hslToHex(hue, 65, 55);
-}
-
-function hslToHex(h: number, s: number, l: number): string {
-    const sFrac = s / 100;
-    const lFrac = l / 100;
-    const k = (n: number) => (n + h / 30) % 12;
-    const a = sFrac * Math.min(lFrac, 1 - lFrac);
-    const f = (n: number) => lFrac - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-    const toHex = (n: number) => Math.round(f(n) * 255).toString(16).padStart(2, "0");
-    return `#${toHex(0)}${toHex(8)}${toHex(4)}`;
-}
+// generateColor() moved to @game-worker/shared/color — Piece Puzzle and
+// Guess the Prompt need the exact same "stable, readable random color" for
+// anonymous participants, so it's no longer private to this file. Stored at
+// registration and never regenerated here, so a logged-in user's color
+// stays stable everywhere it's shown.
 
 async function hashCode(code: string, salt: string): Promise<string> {
     const data = new TextEncoder().encode(`${salt}:${code}`);

@@ -43,5 +43,8 @@ export async function puzzleTimeLimitMs(env: Env): Promise<number> {
 /** How long the waiting room lasts before the puzzle auto-starts. Also the
  * window during which direct friend/group invites can be sent for a puzzle
  * — see POST /api/invites in the `friends` service, which checks lobby
- * status through the `PuzzleService` RPC entrypoint. */
-export const LOBBY_COUNTDOWN_SECONDS = 30;
+ * status through the `PuzzleService` RPC entrypoint. Sourced from
+ * `@game-worker/shared/lobby` — Guess the Prompt's own lobby (see
+ * guess.constants.ts) uses the exact same countdown, so the two games
+ * can't drift apart on "how long is the wait". */
+export {LOBBY_COUNTDOWN_SECONDS} from "@game-worker/shared/lobby";

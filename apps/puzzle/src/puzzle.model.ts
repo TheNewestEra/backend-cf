@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "@hono/zod-openapi";
-import { LOBBY_COUNTDOWN_SECONDS, PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE } from "./puzzle.constants";
+import { generateColor } from "@game-worker/shared/color";
+import { lobbyEndsAt, lobbyRemainingMs } from "@game-worker/shared/lobby";
+import { PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE } from "./puzzle.constants";
 import type { MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema } from "./puzzle.schema";
 
 export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
@@ -32,7 +34,13 @@ interface ParticipantRow extends Record<string, SqlStorageValue> {
   name: string;
   user_id: string | null;
   token: string | null;
+  color: string;
   joined_at: number;
+}
+
+interface ParticipantPublic extends Record<string, SqlStorageValue> {
+  name: string;
+  color: string;
 }
 
 /** Statuses in which play hasn't started yet — the only window during which
@@ -89,9 +97,20 @@ export class PuzzleDO extends DurableObject<Env> {
         name TEXT NOT NULL,
         user_id TEXT,
         token TEXT,
+        color TEXT NOT NULL DEFAULT '#888888',
         joined_at INTEGER NOT NULL
       );
     `);
+    // `color` was added after some DO instances already had this table —
+    // `CREATE TABLE IF NOT EXISTS` only helps brand-new ones, so existing
+    // instances need a backfill too. There's no `ALTER TABLE ... ADD
+    // COLUMN IF NOT EXISTS`, so a "duplicate column" failure (on an
+    // instance that already has it) is just swallowed.
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'");
+    } catch {
+      // Column already exists on this instance — nothing to do.
+    }
   }
 
   // --- RPC: create a brand new puzzle (never called twice for the same id) -
@@ -130,7 +149,7 @@ export class PuzzleDO extends DurableObject<Env> {
   ): Promise<string> {
     await this.ctx.storage.deleteAlarm();
     const hostToken = crypto.randomUUID();
-    const lobbyEndsAt = Date.now() + LOBBY_COUNTDOWN_SECONDS * 1000;
+    const endsAt = lobbyEndsAt(Date.now());
     this.ctx.storage.sql.exec(
       `INSERT INTO puzzle (id, theme, prompt, status, error, grid_size, board, time_limit_ms,
                             started_at, lobby_ends_at, ended_at, score, solved_by, host_token, created_at)
@@ -140,11 +159,11 @@ export class PuzzleDO extends DurableObject<Env> {
       prompt,
       gridSize,
       timeLimitMs,
-      lobbyEndsAt,
+      endsAt,
       hostToken,
       Date.now(),
     );
-    await this.ctx.storage.setAlarm(lobbyEndsAt);
+    await this.ctx.storage.setAlarm(endsAt);
     this.broadcast({ type: "state", ...this.readPublicState() });
     return hostToken;
   }
@@ -170,13 +189,13 @@ export class PuzzleDO extends DurableObject<Env> {
   /** Image is ready — enter the waiting room rather than starting instantly,
    * so players can gather, and the host can preview/regenerate/start early. */
   async setReady(prompt: string): Promise<void> {
-    const lobbyEndsAt = Date.now() + LOBBY_COUNTDOWN_SECONDS * 1000;
+    const endsAt = lobbyEndsAt(Date.now());
     this.ctx.storage.sql.exec(
       "UPDATE puzzle SET prompt = ?, status = 'waiting', error = NULL, lobby_ends_at = ?",
       prompt,
-      lobbyEndsAt,
+      endsAt,
     );
-    await this.ctx.storage.setAlarm(lobbyEndsAt);
+    await this.ctx.storage.setAlarm(endsAt);
     this.broadcast({ type: "state", ...this.readPublicState() });
   }
 
@@ -218,37 +237,49 @@ export class PuzzleDO extends DurableObject<Env> {
    * this throws, so late arrivals can still spectate over the
    * WebSocket/`getState()` but can't play. Logged-in users are upserted by
    * `userId` (idempotent across reconnects/tab refreshes, no token needed
-   * since the session re-proves identity on every request); anonymous
-   * guests get a fresh bearer token they must resend with every move,
-   * since a free-text name alone isn't a real identity. */
-  async join(userId: string | null, playerName: string): Promise<{ participantId: string; token: string | null }> {
+   * since the session re-proves identity on every request) and keep their
+   * account color; anonymous guests get a fresh bearer token they must
+   * resend with every move (since a free-text name alone isn't a real
+   * identity) and a freshly generated color. Either way, the color is
+   * returned so the caller's own client knows what to render before the
+   * next broadcast. */
+  async join(
+    userId: string | null,
+    playerName: string,
+    userColor: string | null,
+  ): Promise<{ participantId: string; token: string | null; color: string }> {
     const row = this.requireRow();
     if (!JOINABLE_STATUSES.includes(row.status)) {
       throw new Error("puzzle has already started; you can spectate but not join");
     }
+    const color = userColor ?? generateColor();
 
     if (userId) {
       this.ctx.storage.sql.exec(
-        `INSERT INTO participants (id, name, user_id, token, joined_at) VALUES (?, ?, ?, NULL, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
+        `INSERT INTO participants (id, name, user_id, token, color, joined_at) VALUES (?, ?, ?, NULL, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, color = excluded.color`,
         userId,
         playerName,
         userId,
+        color,
         Date.now(),
       );
-      return { participantId: userId, token: null };
+      this.broadcast({ type: "player_joined", name: playerName, color });
+      return { participantId: userId, token: null, color };
     }
 
     const participantId = crypto.randomUUID();
     const token = crypto.randomUUID();
     this.ctx.storage.sql.exec(
-      "INSERT INTO participants (id, name, user_id, token, joined_at) VALUES (?, ?, NULL, ?, ?)",
+      "INSERT INTO participants (id, name, user_id, token, color, joined_at) VALUES (?, ?, NULL, ?, ?, ?)",
       participantId,
       playerName,
       token,
+      color,
       Date.now(),
     );
-    return { participantId, token };
+    this.broadcast({ type: "player_joined", name: playerName, color });
+    return { participantId, token, color };
   }
 
   /** Resolves and authorizes a participant: logged-in callers must be
@@ -256,8 +287,13 @@ export class PuzzleDO extends DurableObject<Env> {
    * the token issued at join time. Throws `Error("forbidden: ...")` for
    * either failure, which `hostActionError` (shared/http-exceptions.ts)
    * maps to a 403 — someone who never joined can still spectate, they just
-   * can't act. Returns the joined display name to record on the move. */
-  private requireParticipant(participantId: string, token: string | null, userId: string | null): string {
+   * can't act. Returns the joined display name/color to record on the
+   * move and broadcast alongside it. */
+  private requireParticipant(
+    participantId: string,
+    token: string | null,
+    userId: string | null,
+  ): { name: string; color: string } {
     const row = this.ctx.storage.sql
       .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
       .toArray()[0];
@@ -267,7 +303,7 @@ export class PuzzleDO extends DurableObject<Env> {
     } else if (!token || token !== row.token) {
       throw new Error("forbidden: invalid participant token");
     }
-    return row.name;
+    return { name: row.name, color: row.color };
   }
 
   // --- RPC: player interaction ---------------------------------------------
@@ -284,7 +320,7 @@ export class PuzzleDO extends DurableObject<Env> {
     cellB: number,
     userId: string | null,
   ): Promise<MoveResult> {
-    const player = this.requireParticipant(participantId, token, userId);
+    const participant = this.requireParticipant(participantId, token, userId);
     const row = this.requireRow();
     if (row.status !== "playing") throw new Error("puzzle is not in progress");
 
@@ -320,18 +356,50 @@ export class PuzzleDO extends DurableObject<Env> {
         JSON.stringify(board),
         endedAt,
         score,
-        player,
+        participant.name,
       );
       await this.ctx.storage.deleteAlarm();
-      this.broadcast({ type: "solved", board, score, solvedBy: player, remainingMs });
+      this.broadcast({
+        type: "solved",
+        board,
+        score,
+        solvedBy: participant.name,
+        solvedByColor: participant.color,
+        remainingMs,
+      });
       this.updateCatalogPlayStatus(row.id, "finished");
       if (userId) await this.env.LEADERBOARD.recordScore({ userId, kind: "puzzle", sessionId: row.id, score });
       return { status: "solved", board, solved: true, score };
     }
 
     this.ctx.storage.sql.exec("UPDATE puzzle SET board = ?", JSON.stringify(board));
-    this.broadcast({ type: "move", cellA, cellB, by: player });
+    this.broadcast({ type: "move", cellA, cellB, by: participant.name, color: participant.color });
     return { status: "playing", board, solved: false, score: null };
+  }
+
+  /** Broadcasts that a player has selected/highlighted a block, before
+   * they've picked its swap partner — purely a live UX cue (no swap
+   * happens here; see `swapTiles()` for the actual move), so other
+   * connected clients can see who's about to move which tile and in what
+   * color. Not persisted: a reconnecting client just won't see stale
+   * selections, which is preferable to a selection outliving the player's
+   * attention. */
+  async selectTile(
+    participantId: string,
+    token: string | null,
+    cell: number,
+    userId: string | null,
+  ): Promise<void> {
+    const participant = this.requireParticipant(participantId, token, userId);
+    const row = this.requireRow();
+    if (row.status !== "playing") throw new Error("puzzle is not in progress");
+
+    const cellCount = row.grid_size * row.grid_size;
+    if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount) {
+      throw new Error("invalid cell index");
+    }
+
+    this.broadcast({ type: "tile_selected", cell, player: participant.name, color: participant.color });
   }
 
   // --- alarm: drives both the lobby auto-start and the countdown timeout --
@@ -441,6 +509,7 @@ export class PuzzleDO extends DurableObject<Env> {
         score: null,
         solvedBy: null,
         connectedPlayers: this.ctx.getWebSockets().length,
+        participants: [],
       };
     }
 
@@ -448,10 +517,13 @@ export class PuzzleDO extends DurableObject<Env> {
       row.status === "playing" && row.started_at !== null
         ? Math.max(0, row.time_limit_ms - (Date.now() - row.started_at))
         : null;
-    const lobbyRemainingMs =
-      row.status === "waiting" && row.lobby_ends_at !== null
-        ? Math.max(0, row.lobby_ends_at - Date.now())
-        : null;
+    // `row.status === "waiting"` isn't checked separately here — `lobby_ends_at`
+    // is always nulled out the moment the lobby ends (see beginPlaying()/
+    // resetForRegenerate()), so lobbyRemainingMs() already reads null outside
+    // the lobby window.
+    const participants = this.ctx.storage.sql
+      .exec<ParticipantPublic>("SELECT name, color FROM participants ORDER BY joined_at ASC")
+      .toArray();
 
     return {
       id: row.id,
@@ -464,11 +536,12 @@ export class PuzzleDO extends DurableObject<Env> {
       timeLimitMs: row.time_limit_ms,
       startedAt: row.started_at,
       remainingMs,
-      lobbyRemainingMs,
+      lobbyRemainingMs: lobbyRemainingMs(row.lobby_ends_at),
       endedAt: row.ended_at,
       score: row.score,
       solvedBy: row.solved_by,
       connectedPlayers: this.ctx.getWebSockets().length,
+      participants: participants.map((p) => ({ name: p.name, color: p.color })),
     };
   }
 
