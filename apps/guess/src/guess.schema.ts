@@ -25,3 +25,14 @@ export const GuessResultSchema = z
     score: z.number().nullable().openapi({ description: "Time-weighted points earned; null when the guess was wrong" }),
   })
   .openapi("GuessResult");
+
+/** `token` is only present for anonymous guests — it's the bearer secret
+ * they must resend with every guess/reveal (see guess.model.ts's
+ * `requireParticipant`). Logged-in players are re-identified by their
+ * session on every request instead, so `token` is null for them. */
+export const JoinResultSchema = z
+  .object({
+    participantId: z.string(),
+    token: z.string().nullable(),
+  })
+  .openapi("JoinResult");

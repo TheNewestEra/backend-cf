@@ -42,6 +42,11 @@
 			"binding": "PUZZLE",
 			"service": "game-puzzle-worker",
 			"entrypoint": "PuzzleService"
+		},
+		{
+			"binding": "GUESS",
+			"service": "game-guess-worker",
+			"entrypoint": "GuessService"
 		}
 	],
 	// One DO instance per user (getByName(userId)) — a pure WebSocket
@@ -95,6 +100,11 @@
 					"binding": "PUZZLE",
 					"service": "game-puzzle-worker-staging",
 					"entrypoint": "PuzzleService"
+				},
+				{
+					"binding": "GUESS",
+					"service": "game-guess-worker-staging",
+					"entrypoint": "GuessService"
 				}
 			],
 			"durable_objects": {
@@ -140,6 +150,11 @@
 					"binding": "PUZZLE",
 					"service": "game-puzzle-worker-prod",
 					"entrypoint": "PuzzleService"
+				},
+				{
+					"binding": "GUESS",
+					"service": "game-guess-worker-prod",
+					"entrypoint": "GuessService"
 				}
 			],
 			"durable_objects": {

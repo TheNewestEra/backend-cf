@@ -28,6 +28,22 @@ interface RoundRow extends Record<string, SqlStorageValue> {
   error: string | null;
 }
 
+interface ParticipantRow extends Record<string, SqlStorageValue> {
+  id: string;
+  name: string;
+  user_id: string | null;
+  token: string | null;
+  joined_at: number;
+}
+
+/** Statuses in which a round hasn't been generated yet — the only window
+ * during which joining is allowed. Once a game reaches `ready` its rounds
+ * are playable, so letting someone join at that point would let them play
+ * a game already in progress rather than just spectate it; `error` is a
+ * dead end with nothing left to join (replay creates a fresh instance
+ * instead). */
+const JOINABLE_STATUSES: readonly GameStatus[] = ["queued", "generating_prompts", "generating_images"];
+
 /**
  * One instance per game (routed via `env.GAME_DO.getByName(gameId)`).
  * Owns the game's durable state (prompts, round/image status, guesses) and
@@ -65,10 +81,18 @@ export class GameDO extends DurableObject<Env> {
         correct INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS participants (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        user_id TEXT,
+        token TEXT,
+        joined_at INTEGER NOT NULL
+      );
     `);
   }
 
-  // --- RPC: create (or fully reset, for /regenerate) a game's state -----
+  // --- RPC: create a brand new game's state (never called twice for the
+  // same id — /replay always targets a fresh, independent gameId) --------
 
   async init(gameId: string, theme: string | null): Promise<void> {
     const now = Date.now();
@@ -127,12 +151,80 @@ export class GameDO extends DurableObject<Env> {
     this.broadcast({ type: "round_ready", index });
   }
 
+  // --- RPC: joining --------------------------------------------------------
+
+  /** Registers a player as allowed to guess/reveal in this game, only while
+   * a round hasn't been generated yet (see JOINABLE_STATUSES) — once the
+   * game is `ready` this throws, so late arrivals can still spectate over
+   * the WebSocket/`getState()` but can't play. Logged-in users are
+   * upserted by `userId` (idempotent across reconnects/tab refreshes, no
+   * token needed since the session re-proves identity on every request);
+   * anonymous guests get a fresh bearer token they must resend with every
+   * guess/reveal, since a free-text name alone isn't a real identity. */
+  async join(userId: string | null, playerName: string): Promise<{ participantId: string; token: string | null }> {
+    const game = this.ctx.storage.sql.exec<GameRow>("SELECT status FROM game LIMIT 1").toArray()[0];
+    if (!game || !JOINABLE_STATUSES.includes(game.status)) {
+      throw new Error("game has already started; you can spectate but not join");
+    }
+
+    if (userId) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO participants (id, name, user_id, token, joined_at) VALUES (?, ?, ?, NULL, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
+        userId,
+        playerName,
+        Date.now(),
+      );
+      return { participantId: userId, token: null };
+    }
+
+    const participantId = crypto.randomUUID();
+    const token = crypto.randomUUID();
+    this.ctx.storage.sql.exec(
+      "INSERT INTO participants (id, name, user_id, token, joined_at) VALUES (?, ?, NULL, ?, ?)",
+      participantId,
+      playerName,
+      token,
+      Date.now(),
+    );
+    return { participantId, token };
+  }
+
+  /** Resolves and authorizes a participant: logged-in callers must be
+   * signed in as the same user who joined; anonymous callers must present
+   * the token issued at join time. Throws `Error("forbidden: ...")` for
+   * either failure, which `hostActionError` (shared/http-exceptions.ts)
+   * maps to a 403 — someone who never joined can still spectate, they just
+   * can't act. Returns the joined display name to record on the action. */
+  private requireParticipant(participantId: string, token: string | null, userId: string | null): string {
+    const row = this.ctx.storage.sql
+      .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
+      .toArray()[0];
+    if (!row) throw new Error("forbidden: join the game before playing");
+    if (row.user_id) {
+      if (row.user_id !== userId) throw new Error("forbidden: not your participant id");
+    } else if (!token || token !== row.token) {
+      throw new Error("forbidden: invalid participant token");
+    }
+    return row.name;
+  }
+
   // --- RPC: player interaction --------------------------------------------
 
   /** `userId` is null for anonymous guests — their guesses still count in
    * this game's own state, they just aren't logged to the leaderboard
-   * (recorded via the LEADERBOARD service binding — see wrangler.jsonc). */
-  async submitGuess(index: number, player: string, guess: string, userId: string | null): Promise<GuessResult> {
+   * (recorded via the LEADERBOARD service binding — see wrangler.jsonc).
+   * `participantId`/`token` prove the caller joined before the game
+   * started — see `join()` and `requireParticipant()`. */
+  async submitGuess(
+    index: number,
+    participantId: string,
+    token: string | null,
+    guess: string,
+    userId: string | null,
+  ): Promise<GuessResult> {
+    const player = this.requireParticipant(participantId, token, userId);
+
     const round = this.ctx.storage.sql
       .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
       .toArray()[0];
@@ -162,7 +254,9 @@ export class GameDO extends DurableObject<Env> {
     return { correct, prompt: correct ? round.prompt : null, score };
   }
 
-  async revealRound(index: number): Promise<string | null> {
+  async revealRound(index: number, participantId: string, token: string | null, userId: string | null): Promise<string | null> {
+    this.requireParticipant(participantId, token, userId);
+
     const round = this.ctx.storage.sql
       .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
       .toArray()[0];

@@ -27,6 +27,20 @@ interface PuzzleRow extends Record<string, SqlStorageValue> {
   created_at: number;
 }
 
+interface ParticipantRow extends Record<string, SqlStorageValue> {
+  id: string;
+  name: string;
+  user_id: string | null;
+  token: string | null;
+  joined_at: number;
+}
+
+/** Statuses in which play hasn't started yet — the only window during which
+ * joining (and, separately, the host's "regenerate") is allowed. Once a
+ * puzzle is `playing` it's in progress, so letting someone join then would
+ * let them play a match already underway rather than just spectate it. */
+const JOINABLE_STATUSES: readonly PuzzleStatus[] = ["queued", "generating", "waiting"];
+
 /**
  * One instance per puzzle (routed via `env.PUZZLE_DO.getByName(puzzleId)`).
  * Two or more players connect to the same instance's WebSocket and see
@@ -38,9 +52,12 @@ interface PuzzleRow extends Record<string, SqlStorageValue> {
  * still connected.
  *
  * The creator ("host") gets a one-time secret token back from `init()`,
- * which their browser stores and must present to regenerate, start early,
- * or replay. It's never included in any broadcast or `getState()` — it
- * only ever leaves the DO once, in the creation response.
+ * which their browser stores and must present to regenerate or start
+ * early. It's never included in any broadcast or `getState()` — it only
+ * ever leaves the DO once, in the creation response. Replaying a finished
+ * puzzle doesn't reuse this token at all — see POST /puzzles/{id}/replay,
+ * which spins up a whole new instance (and a new host token) instead of
+ * resetting this one in place.
  */
 export class PuzzleDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -67,6 +84,13 @@ export class PuzzleDO extends DurableObject<Env> {
         host_token TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS participants (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        user_id TEXT,
+        token TEXT,
+        joined_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -86,6 +110,41 @@ export class PuzzleDO extends DurableObject<Env> {
       hostToken,
       Date.now(),
     );
+    this.broadcast({ type: "state", ...this.readPublicState() });
+    return hostToken;
+  }
+
+  /** Creates a brand-new puzzle instance already sitting in the waiting
+   * room with a known image — used by POST /puzzles/{id}/replay, which
+   * reuses a *finished* puzzle's image (copied into this new id's R2 key
+   * by the caller) rather than spending a fresh AI call. Never called
+   * twice for the same id, same as `init()`. Returns a fresh host token —
+   * whoever replays becomes this new instance's host, independent of who
+   * hosted the original. */
+  async initFromSource(
+    puzzleId: string,
+    theme: string | null,
+    gridSize: number,
+    timeLimitMs: number,
+    prompt: string,
+  ): Promise<string> {
+    await this.ctx.storage.deleteAlarm();
+    const hostToken = crypto.randomUUID();
+    const lobbyEndsAt = Date.now() + LOBBY_COUNTDOWN_SECONDS * 1000;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO puzzle (id, theme, prompt, status, error, grid_size, board, time_limit_ms,
+                            started_at, lobby_ends_at, ended_at, score, solved_by, host_token, created_at)
+       VALUES (?, ?, ?, 'waiting', NULL, ?, '[]', ?, NULL, ?, NULL, NULL, NULL, ?, ?)`,
+      puzzleId,
+      theme,
+      prompt,
+      gridSize,
+      timeLimitMs,
+      lobbyEndsAt,
+      hostToken,
+      Date.now(),
+    );
+    await this.ctx.storage.setAlarm(lobbyEndsAt);
     this.broadcast({ type: "state", ...this.readPublicState() });
     return hostToken;
   }
@@ -124,10 +183,17 @@ export class PuzzleDO extends DurableObject<Env> {
   // --- RPC: host-only lobby actions ----------------------------------------
 
   /** Starts a fresh generation run — new AI image, new prompt. Returns the
-   * theme to re-enqueue with; keeps the same host token. */
+   * theme to re-enqueue with; keeps the same host token. Only available
+   * pre-start: once the puzzle is `playing`, other joined players are
+   * mid-game, so wiping it out from under them is no longer this action's
+   * job — see POST /puzzles/{id}/replay instead, which spins up a whole
+   * new instance. */
   async resetForRegenerate(hostToken: string): Promise<string | null> {
     const row = this.requireRow();
     this.assertHost(row, hostToken);
+    if (!JOINABLE_STATUSES.includes(row.status)) {
+      throw new Error("regenerate is only available before the puzzle starts");
+    }
     await this.ctx.storage.deleteAlarm();
     this.ctx.storage.sql.exec(
       `UPDATE puzzle SET prompt = NULL, status = 'queued', error = NULL, board = '[]',
@@ -145,32 +211,79 @@ export class PuzzleDO extends DurableObject<Env> {
     await this.beginPlaying(row.grid_size, row.time_limit_ms);
   }
 
-  /** Replays the *same* image: reshuffles and goes back through the lobby.
-   * No new AI call — the source image in R2 is reused as-is. */
-  async replay(hostToken: string): Promise<void> {
-    const row = this.requireRow();
-    this.assertHost(row, hostToken);
-    if (row.status !== "solved" && row.status !== "timeout") {
-      throw new Error("puzzle must be finished before replaying");
-    }
-    if (!row.prompt) throw new Error("no image to replay");
+  // --- RPC: joining --------------------------------------------------------
 
-    const lobbyEndsAt = Date.now() + LOBBY_COUNTDOWN_SECONDS * 1000;
+  /** Registers a player as allowed to move tiles in this puzzle, only
+   * while it hasn't started (see JOINABLE_STATUSES) — once it's `playing`
+   * this throws, so late arrivals can still spectate over the
+   * WebSocket/`getState()` but can't play. Logged-in users are upserted by
+   * `userId` (idempotent across reconnects/tab refreshes, no token needed
+   * since the session re-proves identity on every request); anonymous
+   * guests get a fresh bearer token they must resend with every move,
+   * since a free-text name alone isn't a real identity. */
+  async join(userId: string | null, playerName: string): Promise<{ participantId: string; token: string | null }> {
+    const row = this.requireRow();
+    if (!JOINABLE_STATUSES.includes(row.status)) {
+      throw new Error("puzzle has already started; you can spectate but not join");
+    }
+
+    if (userId) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO participants (id, name, user_id, token, joined_at) VALUES (?, ?, ?, NULL, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
+        userId,
+        playerName,
+        Date.now(),
+      );
+      return { participantId: userId, token: null };
+    }
+
+    const participantId = crypto.randomUUID();
+    const token = crypto.randomUUID();
     this.ctx.storage.sql.exec(
-      `UPDATE puzzle SET status = 'waiting', board = '[]', started_at = NULL,
-         lobby_ends_at = ?, ended_at = NULL, score = NULL, solved_by = NULL`,
-      lobbyEndsAt,
+      "INSERT INTO participants (id, name, user_id, token, joined_at) VALUES (?, ?, NULL, ?, ?)",
+      participantId,
+      playerName,
+      token,
+      Date.now(),
     );
-    await this.ctx.storage.setAlarm(lobbyEndsAt);
-    this.broadcast({ type: "state", ...this.readPublicState() });
+    return { participantId, token };
+  }
+
+  /** Resolves and authorizes a participant: logged-in callers must be
+   * signed in as the same user who joined; anonymous callers must present
+   * the token issued at join time. Throws `Error("forbidden: ...")` for
+   * either failure, which `hostActionError` (shared/http-exceptions.ts)
+   * maps to a 403 — someone who never joined can still spectate, they just
+   * can't act. Returns the joined display name to record on the move. */
+  private requireParticipant(participantId: string, token: string | null, userId: string | null): string {
+    const row = this.ctx.storage.sql
+      .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
+      .toArray()[0];
+    if (!row) throw new Error("forbidden: join the puzzle before playing");
+    if (row.user_id) {
+      if (row.user_id !== userId) throw new Error("forbidden: not your participant id");
+    } else if (!token || token !== row.token) {
+      throw new Error("forbidden: invalid participant token");
+    }
+    return row.name;
   }
 
   // --- RPC: player interaction ---------------------------------------------
 
   /** `userId` is null for anonymous guests — a solve still counts for this
    * puzzle's own state, it just isn't logged to the leaderboard (recorded
-   * via the LEADERBOARD service binding — see wrangler.jsonc). */
-  async swapTiles(player: string, cellA: number, cellB: number, userId: string | null): Promise<MoveResult> {
+   * via the LEADERBOARD service binding — see wrangler.jsonc).
+   * `participantId`/`token` prove the caller joined before the puzzle
+   * started — see `join()` and `requireParticipant()`. */
+  async swapTiles(
+    participantId: string,
+    token: string | null,
+    cellA: number,
+    cellB: number,
+    userId: string | null,
+  ): Promise<MoveResult> {
+    const player = this.requireParticipant(participantId, token, userId);
     const row = this.requireRow();
     if (row.status !== "playing") throw new Error("puzzle is not in progress");
 

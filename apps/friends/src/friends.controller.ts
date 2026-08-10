@@ -324,7 +324,7 @@ friendsRoutes.openapi(
         path: "/api/invites",
         tags: ["Invites"],
         summary: "Invite a friend, or every member of a group, to a session",
-        description: 'Piece Puzzle invites are only accepted while the puzzle\'s lobby is open ("waiting"); Guess the Prompt has no lobby, so it isn\'t restricted.',
+        description: "Invites are only accepted before the session has started — both games reject joining once they have (see each game's own POST .../join) — so an invite sent after that point would 409 instead of landing the recipient on a game they can only spectate.",
         request: {
             body: {
                 content: {
@@ -347,7 +347,7 @@ friendsRoutes.openapi(
             400: {description: "Missing fields", content: {"application/json": {schema: ErrorSchema}}},
             401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
             409: {
-                description: "Puzzle's lobby is no longer open",
+                description: "The session has already started",
                 content: {"application/json": {schema: ErrorSchema}}
             },
         },
@@ -358,17 +358,21 @@ friendsRoutes.openapi(
 
         const {kind, sessionId, friendId, groupId} = c.req.valid("json");
 
-        // Piece Puzzle has an actual lobby ("waiting", see the `puzzle`
-        // service) — once play starts there's no more "come join us," so
-        // invites for it only go out during that window. Guess the Prompt
-        // has no lobby (rounds are just generated and playable any time),
-        // so it isn't restricted here. Checked via the PUZZLE service
-        // binding rather than a direct Durable Object binding, since the
-        // puzzle's DO namespace belongs to a different Worker.
+        // Both games reject joining once they've started (see each
+        // service's own `join()` RPC) — an invite sent after that point
+        // would land someone on a page they can only spectate, not play,
+        // so invites are gated to the same pre-start window here. Checked
+        // via service bindings rather than direct Durable Object bindings,
+        // since each game's DO namespace belongs to a different Worker.
         if (kind === "puzzle") {
             const {status} = await c.env.PUZZLE.getLobbyStatus(sessionId);
-            if (status !== "waiting") {
-                return c.json({error: "Invites are only open during the puzzle's lobby."}, 409);
+            if (status !== "waiting" && status !== "queued" && status !== "generating") {
+                return c.json({error: "Invites are only open before the puzzle starts."}, 409);
+            }
+        } else {
+            const {status} = await c.env.GUESS.getStatus(sessionId);
+            if (status !== "queued" && status !== "generating_prompts" && status !== "generating_images") {
+                return c.json({error: "Invites are only open before the game starts."}, 409);
             }
         }
 

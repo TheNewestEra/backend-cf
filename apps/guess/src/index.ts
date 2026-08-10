@@ -1,8 +1,9 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
+import {WorkerEntrypoint} from "cloudflare:workers";
 import {guessRoutes} from "./guess.controller";
-import {GameDO} from "./guess.model";
+import {GameDO, type GameStatus} from "./guess.model";
 import {type GuessQueueMessage, processGuessGame} from "./guess.queue";
 
 export {GameDO};
@@ -25,6 +26,18 @@ app.doc("/openapi.json", {
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
+
+/** RPC surface for the `friends` service (bound via a `services` entry with
+ * `entrypoint: "GuessService"`) — used to gate direct invites to a game
+ * once its rounds are no longer joinable, without giving `friends` a
+ * binding to this Worker's Durable Object namespace directly. Mirrors
+ * `apps/puzzle`'s `PuzzleService.getLobbyStatus`. */
+export class GuessService extends WorkerEntrypoint<Env> {
+    async getStatus(gameId: string): Promise<{ status: GameStatus }> {
+        const state = await this.env.GAME_DO.getByName(gameId).getState();
+        return {status: state.status};
+    }
+}
 
 export default {
     fetch: app.fetch,

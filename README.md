@@ -24,8 +24,8 @@ itself deployed). Each service owns a slice of the single shared D1 database
 | `accounts` | `users`, `sessions` | `AccountsService`: session + user lookups | — |
 | `browse` | `catalog`, `ratings` | `CatalogService`: catalog status writes | — |
 | `leaderboard` | `leaderboard_entries` | `LeaderboardService`: `recordScore` | accounts |
-| `friends` | friends/groups/invites tables, `UserDO` | — | accounts, puzzle |
-| `guess` | `GameDO` | — | accounts, browse, leaderboard |
+| `friends` | friends/groups/invites tables, `UserDO` | — | accounts, puzzle, guess |
+| `guess` | `GameDO` | `GuessService`: `getStatus` | accounts, browse, leaderboard |
 | `puzzle` | `PuzzleDO` | `PuzzleService`: `getLobbyStatus` | accounts, browse, leaderboard |
 
 Two access patterns are both in play, deliberately:
@@ -80,8 +80,24 @@ that file has no binding of its own.
   guess. A round only reveals its prompt to the guesser on a correct
   guess, or to anyone via "give up" (`POST /games/:id/reveal`).
 - **Partial failures**: if some images fail, the game ends in `error`
-  status (not stuck retrying); `POST /games/:id/regenerate` resets and
-  re-enqueues the whole game.
+  status (not stuck retrying) — there's no way to reset it in place any
+  more (see Replay below); the only way forward is a fresh instance.
+- **Joining**: `POST /games/:id/join` registers a player — required before
+  any `guess`/`reveal` call, and only possible while rounds are still
+  generating (`queued`/`generating_prompts`/`generating_images`). Once the
+  game is `ready` it's playable, so joining then would be joining a game
+  already in progress rather than just spectating it — late arrivals can
+  still watch over the WebSocket, but `join()` (and everything gated on
+  having joined) throws. Logged-in players are identified by their session
+  from then on; anonymous guests get back a one-time `token` they must
+  resend with every guess/reveal, since a free-text name alone isn't a
+  real identity.
+- **Replay**: `POST /games/:id/replay` creates an *independent* game (its
+  own id, rounds, guesses, and join roster) seeded from this one's theme
+  and re-runs generation — it never touches the source game, so anyone
+  browsing/spectating a game can replay it and invite their own friends to
+  the new instance without disrupting whoever's still playing the
+  original.
 - **Rating**: once every round has generated, the play page shows a 1-5
   star widget (`POST /api/catalog/:id/rate`, served by `browse`); one
   rating per browser (tracked in `localStorage`, not enforced server-side).
@@ -91,8 +107,8 @@ that file has no binding of its own.
   aren't leaderboard-eligible.
 
 Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
-`POST /games/:id/guess`, `POST /games/:id/reveal`,
-`POST /games/:id/regenerate`, `GET /games/:id/images/:index`.
+`POST /games/:id/join`, `POST /games/:id/guess`, `POST /games/:id/reveal`,
+`POST /games/:id/replay`, `GET /games/:id/images/:index`.
 
 ### Piece Puzzle (`apps/puzzle`)
 
@@ -106,40 +122,51 @@ Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
 - **Waiting room**: once the image is ready, the puzzle enters a `waiting`
   status. The **host** — whoever created it, identified by a one-time
   `hostToken` returned at creation, never broadcast or exposed elsewhere —
-  can regenerate the image (`POST /puzzles/:id/regenerate`) or start
-  immediately (`POST /puzzles/:id/start`); otherwise a **DO alarm**
-  auto-starts it after `LOBBY_COUNTDOWN_SECONDS` (30s). Direct friend/group
-  invites (`POST /api/invites`, served by `friends`) are also only accepted
-  while status is `waiting` — `friends` checks this through the
-  `PuzzleService.getLobbyStatus` RPC call rather than a direct binding to
-  this service's Durable Object namespace. A `replay` reopens a fresh
-  lobby, so invites open back up for it too. Guess the Prompt has no lobby
-  concept, so its invites aren't time-limited this way.
+  can regenerate the image (`POST /puzzles/:id/regenerate`, only while
+  still pre-start) or start immediately (`POST /puzzles/:id/start`);
+  otherwise a **DO alarm** auto-starts it after `LOBBY_COUNTDOWN_SECONDS`
+  (30s). Direct friend/group invites (`POST /api/invites`, served by
+  `friends`) are also only accepted pre-start (`queued`/`generating`/
+  `waiting`) — `friends` checks this through the `PuzzleService.
+  getLobbyStatus` RPC call rather than a direct binding to this service's
+  Durable Object namespace. Guess the Prompt is gated the same way now,
+  via its own `GuessService.getStatus`.
+- **Joining**: `POST /puzzles/:id/join` registers a player — required
+  before any `move` call, and only possible pre-start
+  (`queued`/`generating`/`waiting`). Once the puzzle is `playing` this
+  throws, so late arrivals can still spectate over the WebSocket but can't
+  join in. Logged-in players are identified by their session from then on;
+  anonymous guests get back a one-time `token` they must resend with every
+  move, since a free-text name alone isn't a real identity.
 - **Moves**: click a tile, then another, to swap them — free swap, not a
   classic sliding-15-puzzle, so any arrangement is trivially solvable and
   two players can never block each other on an empty-slot constraint.
-  Every move is server-authoritative: `PuzzleDO.swapTiles()` persists the
-  swap and broadcasts it to *every* connected client (including the
-  mover). Not host-gated — anyone with the link (including a stranger
-  arriving via `/browse`) can play.
+  Every move is server-authoritative: `PuzzleDO.swapTiles()` checks the
+  caller joined before start, then persists the swap and broadcasts it to
+  *every* connected client (including the mover).
 - **Timer**: same DO alarm mechanism as the lobby, just re-armed for
   `startedAt + timeLimitMs` once play begins. On solve, the alarm is
   cancelled; on expiry, the puzzle ends `timeout` with score 0.
 - **Scoring**: `max(50, round(remainingMs / timeLimitMs × 1000))`, recorded
   via `env.LEADERBOARD.recordScore(...)` for the logged-in solver — full
   marks for an instant solve, a 50-point floor for finishing at the buzzer.
-- **Replay**: once solved/timed out, the host can replay the *same* image
-  (`POST /puzzles/:id/replay`) or generate a brand new one
-  (`POST /puzzles/:id/regenerate`).
+- **Replay**: once solved/timed out, `POST /puzzles/:id/replay` creates an
+  *independent* puzzle (its own id, lobby, host token, and join roster)
+  that reuses the same image (copied in R2, no fresh AI call) — it never
+  touches the source puzzle, so anyone browsing/spectating a finished
+  puzzle can replay it and invite their own friends to the new lobby
+  without disrupting anyone still viewing the original. Unlike
+  `regenerate`, replaying isn't host-gated — the replayer becomes the new
+  instance's host.
 - **Presence**: the DO broadcasts a `connectedPlayers` count on every
   connect/disconnect.
 - **Rating**: shown once solved/timed out, same star widget/mechanism as
   Guess the Prompt.
 
 Routes: `POST /puzzles`, `GET /puzzles/:id`, `GET /puzzles/:id/ws`,
-`POST /puzzles/:id/move`, `POST /puzzles/:id/start`,
-`POST /puzzles/:id/replay`, `POST /puzzles/:id/regenerate`,
-`GET /puzzles/:id/image`.
+`POST /puzzles/:id/join`, `POST /puzzles/:id/move`,
+`POST /puzzles/:id/start`, `POST /puzzles/:id/replay`,
+`POST /puzzles/:id/regenerate`, `GET /puzzles/:id/image`.
 
 ### Browse & ratings (`apps/browse`)
 
@@ -191,10 +218,13 @@ accounts depend on it.
   `packages/shared/src/session.ts` for the shared cookie-handling logic
   each service's middleware is built on.
 - **Play identity**: both play pages' "Playing as" field is your real
-  username (read-only) when logged in — `POST /games/:id/guess` and
-  `POST /puzzles/:id/move` both resolve it from the session server-side,
-  ignoring whatever the client sent, so it can't be spoofed. Anonymous
-  players keep the old freeform, localStorage-remembered nickname.
+  username (read-only) when logged in. Identity is now established once,
+  at `POST .../join` — logged-in players are upserted by session `userId`
+  (can't be spoofed), anonymous guests submit a freeform nickname there
+  and get back a bearer `token`. Every later `guess`/`reveal`/`move` call
+  is checked against that join roster (`participantId` + `token` for
+  guests, session for logged-in players) rather than trusting a name
+  resent on each request.
 
 ### Friends & invites (`apps/friends`)
 

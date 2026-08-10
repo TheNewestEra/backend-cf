@@ -28,3 +28,21 @@ export const MoveResultSchema = z
         score: z.number().nullable(),
     })
     .openapi("MoveResult");
+
+/** `token` is only present for anonymous guests — it's the bearer secret
+ * they must resend with every move (see puzzle.model.ts's
+ * `requireParticipant`). Logged-in players are re-identified by their
+ * session on every request instead, so `token` is null for them. */
+export const JoinResultSchema = z
+    .object({
+        participantId: z.string(),
+        token: z.string().nullable(),
+    })
+    .openapi("JoinResult");
+
+export const ReplayResultSchema = z
+    .object({
+        puzzleId: z.string(),
+        hostToken: z.string(),
+    })
+    .openapi("ReplayResult");

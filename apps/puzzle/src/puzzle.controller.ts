@@ -12,7 +12,7 @@ import {
     SECONDS_PER_TILE,
 } from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
-import {MoveResultSchema, PuzzlePublicSchema} from "./puzzle.schema";
+import {JoinResultSchema, MoveResultSchema, PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
 
 const MAX_THEME_LENGTH = 120;
 const MAX_PLAYER_LENGTH = 40;
@@ -27,7 +27,7 @@ puzzleRoutes.openapi(
         path: "/puzzles",
         tags: ["Piece Puzzle"],
         summary: "Create a new puzzle",
-        description: "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. The returned hostToken authorizes regenerate/start/replay for this puzzle.",
+        description: "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. The returned hostToken authorizes regenerate/start for this puzzle (replaying it later gets its own, separate host token).",
         request: {
             body: {
                 content: {
@@ -161,30 +161,95 @@ puzzleRoutes.openapi(
         method: "post",
         path: "/puzzles/{id}/replay",
         tags: ["Piece Puzzle"],
-        summary: "Host-only: reshuffle the same image and return to the lobby",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {content: {"application/json": {schema: hostBodySchema}}, required: false},
-        },
+        summary: "Start a brand-new puzzle with the same image",
+        description:
+            "Only once this puzzle is finished (solved/timeout). Creates an independent puzzle instance " +
+            "(its own id, lobby, and host token) that reuses the same image without a fresh AI call — it " +
+            "never touches the source puzzle, so anyone can replay a puzzle they're spectating/browsing and " +
+            "invite their own friends to the new lobby without disrupting anyone still viewing the original.",
+        request: {params: z.object({id: z.string()})},
         responses: {
-            200: {description: "Back in the lobby", content: {"application/json": {schema: OkSchema}}},
-            403: {description: "Missing/incorrect host token", content: {"application/json": {schema: ErrorSchema}}},
+            201: {description: "New puzzle created, waiting in its lobby", content: {"application/json": {schema: ReplayResultSchema}}},
             409: {
-                description: "Puzzle must be finished before replaying",
+                description: "Source puzzle isn't finished yet, or has no image",
                 content: {"application/json": {schema: ErrorSchema}}
             },
         },
     }),
     async (c) => {
+        const {id: sourceId} = c.req.valid("param");
+        const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
+        if (source.status !== "solved" && source.status !== "timeout") {
+            return c.json({error: "puzzle must be finished before replaying"}, 409);
+        }
+        if (!source.prompt) {
+            return c.json({error: "no image to replay"}, 409);
+        }
+
+        const puzzleId = crypto.randomUUID();
+        const sourceKey = puzzleImageKeyFor(sourceId);
+        const sourceImage = await c.env.IMAGES.get(sourceKey);
+        if (!sourceImage) {
+            return c.json({error: "no image to replay"}, 409);
+        }
+        await c.env.IMAGES.put(puzzleImageKeyFor(puzzleId), sourceImage.body, {
+            httpMetadata: sourceImage.httpMetadata,
+        });
+
+        const stub = c.env.PUZZLE_DO.getByName(puzzleId);
+        const hostToken = await stub.initFromSource(puzzleId, source.theme, source.gridSize, source.timeLimitMs, source.prompt);
+        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", source.theme);
+        await c.env.BROWSE.markCatalogReady(puzzleId, puzzleImageKeyFor(puzzleId));
+
+        return c.json({puzzleId, hostToken}, 201);
+    },
+);
+
+puzzleRoutes.openapi(
+    createRoute({
+        method: "post",
+        path: "/puzzles/{id}/join",
+        tags: ["Piece Puzzle"],
+        summary: "Join a puzzle as a player before it starts",
+        description:
+            "Must be called (and must succeed) before submitting any move — it's what distinguishes a player " +
+            "from a spectator. Only possible while the lobby is open (or generation is still running); once " +
+            "the puzzle is `playing` this returns 409 and late arrivals can only spectate over the WebSocket. " +
+            "Logged-in players are identified by their session; `player` is only used for anonymous guests, " +
+            "who get back a `token` they must resend with every move.",
+        request: {
+            params: z.object({id: z.string()}),
+            body: {
+                content: {
+                    "application/json": {schema: z.object({player: z.string().max(MAX_PLAYER_LENGTH).optional()})},
+                },
+                required: false,
+            },
+        },
+        responses: {
+            200: {description: "Joined", content: {"application/json": {schema: JoinResultSchema}}},
+            400: {description: "Missing player name", content: {"application/json": {schema: ErrorSchema}}},
+            409: {description: "Puzzle has already started", content: {"application/json": {schema: ErrorSchema}}},
+        },
+    }),
+    async (c) => {
         const {id} = c.req.valid("param");
-        const {hostToken} = c.req.valid("json");
+        const body = c.req.valid("json") ?? {};
+        const user = await currentUser(c);
+        const player = user ? user.username : (body.player?.trim().slice(0, MAX_PLAYER_LENGTH) ?? "");
+
+        if (!player) return c.json({error: "player is required"}, 400);
+
         const stub = c.env.PUZZLE_DO.getByName(id);
         try {
-            await stub.replay(hostToken ?? "");
-            return c.json({ok: true as const}, 200);
+            return c.json(await stub.join(user?.id ?? null, player), 200);
         } catch (err) {
-            const {status, body} = hostActionError(err);
-            return c.json(body, status);
+            // join() only ever throws the "already started" case (never a
+            // "forbidden: ..." one), so this is always a 409 — unlike the
+            // participant-gated actions below, there's no host/participant
+            // check to fail here.
+            const message = err instanceof Error ? err.message : "unable to join";
+            return c.json({error: message}, 409);
         }
     },
 );
@@ -195,7 +260,7 @@ puzzleRoutes.openapi(
         path: "/puzzles/{id}/move",
         tags: ["Piece Puzzle"],
         summary: "Swap two tiles",
-        description: "Logged-in players are identified server-side by their session; `player` is only used for anonymous guests.",
+        description: "Requires having joined via POST /puzzles/{id}/join first — see that endpoint for why.",
         request: {
             params: z.object({id: z.string()}),
             body: {
@@ -204,7 +269,8 @@ puzzleRoutes.openapi(
                         schema: z.object({
                             cellA: z.number().int(),
                             cellB: z.number().int(),
-                            player: z.string().max(MAX_PLAYER_LENGTH).optional(),
+                            participantId: z.string(),
+                            token: z.string().optional(),
                         }),
                     },
                 },
@@ -213,6 +279,7 @@ puzzleRoutes.openapi(
         responses: {
             200: {description: "Move applied", content: {"application/json": {schema: MoveResultSchema}}},
             400: {description: "Missing/invalid fields", content: {"application/json": {schema: ErrorSchema}}},
+            403: {description: "Didn't join this puzzle before it started", content: {"application/json": {schema: ErrorSchema}}},
             409: {
                 description: "Move rejected (not playing, invalid cells, etc.)",
                 content: {"application/json": {schema: ErrorSchema}}
@@ -221,21 +288,19 @@ puzzleRoutes.openapi(
     }),
     async (c) => {
         const {id} = c.req.valid("param");
-        const {cellA, cellB, player: bodyPlayer} = c.req.valid("json");
-        // Logged-in players are identified by their real username server-side —
-        // the client only gets to pick a name when there's no account to spoof.
+        const {cellA, cellB, participantId, token} = c.req.valid("json");
         const user = await currentUser(c);
-        const player = user ? user.username : (bodyPlayer?.trim().slice(0, MAX_PLAYER_LENGTH) ?? "");
 
-        if (cellA === cellB || !player) {
-            return c.json({error: "cellA, cellB (different), and player are required"}, 400);
+        if (cellA === cellB) {
+            return c.json({error: "cellA and cellB must be different"}, 400);
         }
 
         const stub = c.env.PUZZLE_DO.getByName(id);
         try {
-            return c.json(await stub.swapTiles(player, cellA, cellB, user?.id ?? null), 200);
+            return c.json(await stub.swapTiles(participantId, token ?? null, cellA, cellB, user?.id ?? null), 200);
         } catch (err) {
-            return c.json({error: err instanceof Error ? err.message : "move rejected"}, 409);
+            const {status, body} = hostActionError(err);
+            return c.json(body, status);
         }
     },
 );

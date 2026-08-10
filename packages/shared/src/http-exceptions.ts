@@ -52,10 +52,12 @@ export function actionResponse(result: { ok: true } | { ok: false; error: string
     return {status: result.error === "forbidden" ? 403 : 400, body: {error: result.error}};
 }
 
-/** Host-gated Durable Object RPCs (see puzzle.model.ts) throw
- * `Error("forbidden: ...")` for a bad/missing host token and a plain
- * message for anything else (wrong status, etc.) — translate that
- * convention into the right HTTP status. */
+/** Host-gated and participant-gated Durable Object RPCs (see
+ * puzzle.model.ts's host token checks and guess.model.ts/puzzle.model.ts's
+ * join-roster checks) throw `Error("forbidden: ...")` for a bad/missing
+ * token or an unjoined participant, and a plain message for anything else
+ * (wrong status, etc.) — translate that convention into the right HTTP
+ * status. */
 export function hostActionError(err: unknown): { status: 403 | 409; body: { error: string } } {
     const message = err instanceof Error ? err.message : "action rejected";
     const status = message.startsWith("forbidden") ? 403 : 409;

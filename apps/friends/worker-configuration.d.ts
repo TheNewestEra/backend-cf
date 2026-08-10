@@ -6,12 +6,13 @@
 // dependency graph, and its ambient `Env`, into this program). Note: this
 // import makes the file a module, so the `Env` augmentation below must go
 // inside `declare global` to still merge into the ambient global scope.
-import type {AccountsRpc, PuzzleRpc} from "@game-worker/shared/rpc-types";
+import type {AccountsRpc, GuessRpc, PuzzleRpc} from "@game-worker/shared/rpc-types";
 
 interface __BaseEnv_Env {
 	DB: D1Database;
 	ACCOUNTS: AccountsRpc;
 	PUZZLE: PuzzleRpc;
+	GUESS: GuessRpc;
 	USER_DO: DurableObjectNamespace<import("./src/index").UserDO>;
 }
 declare global {

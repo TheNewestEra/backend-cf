@@ -50,3 +50,8 @@ export interface LeaderboardRpc {
 export interface PuzzleRpc {
     getLobbyStatus(puzzleId: string): Promise<{ status: string }>;
 }
+
+/** RPC surface exposed by `apps/guess`'s `GuessService`. */
+export interface GuessRpc {
+    getStatus(gameId: string): Promise<{ status: string }>;
+}
