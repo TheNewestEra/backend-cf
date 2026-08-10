@@ -5,11 +5,9 @@ import {currentUser} from "./auth.middleware";
 import {
     DEFAULT_GRID_SIZE,
     MAX_GRID_SIZE,
-    MAX_TIME_LIMIT_SECONDS,
     MIN_GRID_SIZE,
-    MIN_TIME_LIMIT_SECONDS,
     puzzleImageKeyFor,
-    SECONDS_PER_TILE,
+    puzzleTimeLimitMs,
 } from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
 import {JoinResultSchema, MoveResultSchema, PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
@@ -52,7 +50,7 @@ puzzleRoutes.openapi(
         const body = c.req.valid("json");
         const theme = body.theme?.trim() ? body.theme.trim().slice(0, MAX_THEME_LENGTH) : null;
         const gridSize = clampGridSize(body.gridSize);
-        const timeLimitMs = timeLimitMsFor(gridSize);
+        const timeLimitMs = await puzzleTimeLimitMs(c.env);
 
         const puzzleId = crypto.randomUUID();
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
@@ -196,8 +194,12 @@ puzzleRoutes.openapi(
             httpMetadata: sourceImage.httpMetadata,
         });
 
+        // Re-evaluate rather than reusing source.timeLimitMs: the flag may
+        // have changed since the source puzzle was created, and a replay is
+        // a fresh play session that should get today's time limit.
+        const timeLimitMs = await puzzleTimeLimitMs(c.env);
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
-        const hostToken = await stub.initFromSource(puzzleId, source.theme, source.gridSize, source.timeLimitMs, source.prompt);
+        const hostToken = await stub.initFromSource(puzzleId, source.theme, source.gridSize, timeLimitMs, source.prompt);
         await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", source.theme);
         await c.env.BROWSE.markCatalogReady(puzzleId, puzzleImageKeyFor(puzzleId));
 
@@ -340,13 +342,4 @@ puzzleRoutes.openapi(
 function clampGridSize(input: number | undefined): number {
     if (!Number.isInteger(input)) return DEFAULT_GRID_SIZE;
     return Math.min(MAX_GRID_SIZE, Math.max(MIN_GRID_SIZE, input as number));
-}
-
-function timeLimitMsFor(gridSize: number): number {
-    const tileCount = gridSize * gridSize;
-    const seconds = Math.min(
-        MAX_TIME_LIMIT_SECONDS,
-        Math.max(MIN_TIME_LIMIT_SECONDS, tileCount * SECONDS_PER_TILE),
-    );
-    return seconds * 1000;
 }

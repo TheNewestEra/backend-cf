@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { z } from "@hono/zod-openapi";
 import { isGuessCorrect } from "./guess-matching";
 import type { GamePublicSchema, GuessResultSchema, RoundPublicSchema } from "./guess.schema";
-import { GUESS_MAX_SCORE, GUESS_MIN_SCORE, GUESS_TIME_LIMIT_SECONDS, ROUND_COUNT } from "./guess.constants";
+import { GUESS_MAX_SCORE, GUESS_MIN_SCORE, ROUND_COUNT, guessTimeLimitSeconds } from "./guess.constants";
 
 export type RoundStatus = z.infer<typeof RoundPublicSchema>["status"];
 export type GameStatus = z.infer<typeof GamePublicSchema>["status"];
@@ -233,7 +233,7 @@ export class GameDO extends DurableObject<Env> {
     }
 
     const correct = isGuessCorrect(guess, round.prompt);
-    const score = correct ? scoreForGuess(round.ready_at) : null;
+    const score = correct ? scoreForGuess(round.ready_at, await guessTimeLimitSeconds(this.env)) : null;
 
     this.ctx.storage.sql.exec(
       "INSERT INTO guesses (round_idx, player, guess, correct, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -322,13 +322,13 @@ export class GameDO extends DurableObject<Env> {
   }
 }
 
-/** See GUESS_TIME_LIMIT_SECONDS: linear falloff from GUESS_MAX_SCORE at 0
+/** See guessTimeLimitSeconds(): linear falloff from GUESS_MAX_SCORE at 0
  * elapsed to GUESS_MIN_SCORE at the limit or beyond. `readyAt` is only null
  * for a round created before this column existed; treated as "just became
  * ready" (max score) rather than throwing. */
-function scoreForGuess(readyAt: number | null): number {
+function scoreForGuess(readyAt: number | null, limitSeconds: number): number {
   const elapsedMs = Date.now() - (readyAt ?? Date.now());
-  const limitMs = GUESS_TIME_LIMIT_SECONDS * 1000;
+  const limitMs = limitSeconds * 1000;
   const remainingMs = Math.max(0, limitMs - elapsedMs);
   return Math.max(GUESS_MIN_SCORE, Math.round((remainingMs / limitMs) * GUESS_MAX_SCORE));
 }

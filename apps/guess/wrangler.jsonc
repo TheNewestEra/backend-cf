@@ -29,6 +29,17 @@
 	"ai": {
 		"binding": "AI"
 	},
+	// Cloudflare Flagship — same "timer" app across every environment, on
+	// purpose: it's how "guess-time-seconds" / "dev-mode" /
+	// "guess-time-override-seconds" get changed without a redeploy (see
+	// guessTimeLimitSeconds() in guess.constants.ts). Shared with `puzzle`,
+	// which uses the same app for its own puzzle-time-* flags.
+	"flagship": [
+		{
+			"binding": "FLAGS",
+			"app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+		}
+	],
 	// Shared with `puzzle` — round images live at `games/<gameId>/<index>.png`
 	// (see guess.constants.ts).
 	"r2_buckets": [
@@ -113,6 +124,12 @@
 			"ai": {
 				"binding": "AI"
 			},
+			"flagship": [
+				{
+					"binding": "FLAGS",
+					"app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+				}
+			],
 			"r2_buckets": [
 				{
 					"binding": "IMAGES",
@@ -181,6 +198,12 @@
 			"ai": {
 				"binding": "AI"
 			},
+			"flagship": [
+				{
+					"binding": "FLAGS",
+					"app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+				}
+			],
 			"r2_buckets": [
 				{
 					"binding": "IMAGES",

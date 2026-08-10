@@ -11,6 +11,7 @@ import type {AccountsRpc, CatalogRpc, LeaderboardRpc} from "@game-worker/shared/
 interface __BaseEnv_Env {
 	IMAGES: R2Bucket;
 	PUZZLE_QUEUE: Queue;
+	FLAGS: Flagship;
 	AI: Ai;
 	ACCOUNTS: AccountsRpc;
 	BROWSE: CatalogRpc;
