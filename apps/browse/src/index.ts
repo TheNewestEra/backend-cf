@@ -32,15 +32,25 @@ app.doc("/openapi.json", {
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
 
 export class CatalogService extends WorkerEntrypoint<Env> {
-    insertCatalogEntry = (id: string, kind: GameKind, theme: string | null): Promise<D1Result> => insertCatalogEntry(this.env.DB, id, kind, theme);
+    insertCatalogEntry(id: string, kind: GameKind, theme: string | null): Promise<D1Result> {
+        return insertCatalogEntry(this.env.DB, id, kind, theme);
+    }
 
-    markCatalogGenerating = (id: string): Promise<D1Result> => markCatalogGenerating(this.env.DB, id);
+    markCatalogGenerating(id: string): Promise<D1Result> {
+        return markCatalogGenerating(this.env.DB, id);
+    }
 
-    markCatalogReady = (id: string, thumbnailKey: string): Promise<D1Result> => markCatalogReady(this.env.DB, id, thumbnailKey);
+    markCatalogReady(id: string, thumbnailKey: string): Promise<D1Result> {
+        return markCatalogReady(this.env.DB, id, thumbnailKey);
+    }
 
-    markCatalogError = (id: string): Promise<D1Result> => markCatalogError(this.env.DB, id);
+    markCatalogError(id: string): Promise<D1Result> {
+        return markCatalogError(this.env.DB, id);
+    }
 
-    updatePlayStatus = (id: string, playStatus: PlayStatus): Promise<D1Result> => updatePlayStatus(this.env.DB, id, playStatus);
+    updatePlayStatus(id: string, playStatus: PlayStatus): Promise<D1Result> {
+        return updatePlayStatus(this.env.DB, id, playStatus);
+    }
 }
 
 export default {
