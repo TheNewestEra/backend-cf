@@ -3,54 +3,83 @@ export function puzzleImageKeyFor(puzzleId: string): string {
     return `puzzles/${puzzleId}/source.png`;
 }
 
-export const DEFAULT_GRID_SIZE = 4;
-export const MIN_GRID_SIZE = 3;
-export const MAX_GRID_SIZE = 6;
-
 /** Sanity bounds the resolved Flagship time limit (see puzzleTimeLimitMs())
  * is clamped to, regardless of grid size — protects against a misconfigured
- * flag value (0, negative, absurdly large) producing an unplayable puzzle. */
+ * flag value (0, negative, absurdly large) producing an unplayable puzzle.
+ * Deliberately kept as hardcoded constants rather than Flagship flags
+ * themselves: their entire purpose is bounding a Flagship value that might
+ * be wrong, so making them just another Flagship value would remove the
+ * safety net they exist to provide. */
 export const MIN_TIME_LIMIT_SECONDS = 60;
 export const MAX_TIME_LIMIT_SECONDS = 600;
 
-/** Score awarded for solving with no time left; full marks (PUZZLE_MAX_SCORE)
- * for solving instantly. Linear in between. */
-export const PUZZLE_MAX_SCORE = 1000;
-export const PUZZLE_MIN_SOLVED_SCORE = 50;
-
 // Fallbacks used only if Flagship evaluation itself fails (network hiccup,
-// binding misconfigured, etc.) — kept in sync by hand with the flags' own
+// binding misconfigured, etc.) — kept in sync by hand with each flag's own
 // default variation, set via `wrangler flagship flags create/update` (see
-// the "timer" app referenced by env.FLAGS in wrangler.jsonc).
+// the "timer" app referenced by env.FLAGS in wrangler.jsonc). No dev-mode
+// branch any more: every knob below is just its own flag, so trying a
+// different value for testing means changing that flag, not flipping
+// dev-mode and hoping a second "-override-" flag happens to hold what you
+// want.
+const DEFAULT_GRID_SIZE = 4;
+const DEFAULT_MIN_GRID_SIZE = 3;
+const DEFAULT_MAX_GRID_SIZE = 6;
+const DEFAULT_PUZZLE_MAX_SCORE = 1000;
+const DEFAULT_PUZZLE_MIN_SOLVED_SCORE = 50;
 const DEFAULT_PUZZLE_TIME_LIMIT_SECONDS = 180;
-const DEFAULT_PUZZLE_TIME_OVERRIDE_SECONDS = 20;
 
-/** The puzzle solve countdown, in ms, sourced from Cloudflare Flagship:
- * normally the "puzzle-time-seconds" flag, or "puzzle-time-override-seconds"
- * instead whenever the "dev-mode" flag is on — flip dev-mode in the
- * Flagship dashboard/CLI to test the countdown/timeout quickly without
- * waiting out the real limit. No redeploy needed for either flag to take
- * effect. Every puzzle gets the same limit regardless of grid size; clamped
- * to [MIN_TIME_LIMIT_SECONDS, MAX_TIME_LIMIT_SECONDS] as a safety net. */
+/** Resolves this puzzle's grid size: `requested` (POST /puzzles' optional
+ * `gridSize` body field) clamped to [min, max] — both sourced from
+ * Cloudflare Flagship's "grid-size-min"/"grid-size-max" flags — or, absent
+ * a request, Flagship's "grid-size-default" flag. Bundles the fetch+clamp
+ * in one place (rather than three separate exported numbers) since nothing
+ * else ever needs min/max/default independently of this. */
+export async function resolveGridSize(env: Env, requested: number | undefined): Promise<number> {
+    if (!Number.isInteger(requested)) {
+        return env.FLAGS.getNumberValue("grid-size-default", DEFAULT_GRID_SIZE);
+    }
+    const [min, max] = await Promise.all([
+        env.FLAGS.getNumberValue("grid-size-min", DEFAULT_MIN_GRID_SIZE),
+        env.FLAGS.getNumberValue("grid-size-max", DEFAULT_MAX_GRID_SIZE),
+    ]);
+    return Math.min(max, Math.max(min, requested as number));
+}
+
+/** Score awarded for solving with no time left; full marks for solving
+ * instantly. Linear in between. Sourced from Cloudflare Flagship's
+ * "puzzle-max-score"/"puzzle-min-solved-score" flags. */
+export async function puzzleMaxScore(env: Env): Promise<number> {
+    return env.FLAGS.getNumberValue("puzzle-max-score", DEFAULT_PUZZLE_MAX_SCORE);
+}
+
+export async function puzzleMinSolvedScore(env: Env): Promise<number> {
+    return env.FLAGS.getNumberValue("puzzle-min-solved-score", DEFAULT_PUZZLE_MIN_SOLVED_SCORE);
+}
+
+/** The puzzle solve countdown, in ms, sourced from Cloudflare Flagship's
+ * "puzzle-time-seconds" flag — flip it in the Flagship dashboard/CLI to
+ * test the countdown/timeout without a redeploy. Every puzzle gets the same
+ * limit regardless of grid size; clamped to [MIN_TIME_LIMIT_SECONDS,
+ * MAX_TIME_LIMIT_SECONDS] as a safety net. */
 export async function puzzleTimeLimitMs(env: Env): Promise<number> {
-    const devMode = await env.FLAGS.getBooleanValue("dev-mode", false);
-    const seconds = await (devMode
-        ? env.FLAGS.getNumberValue("puzzle-time-override-seconds", DEFAULT_PUZZLE_TIME_OVERRIDE_SECONDS)
-        : env.FLAGS.getNumberValue("puzzle-time-seconds", DEFAULT_PUZZLE_TIME_LIMIT_SECONDS));
+    const seconds = await env.FLAGS.getNumberValue("puzzle-time-seconds", DEFAULT_PUZZLE_TIME_LIMIT_SECONDS);
     return Math.min(MAX_TIME_LIMIT_SECONDS, Math.max(MIN_TIME_LIMIT_SECONDS, seconds)) * 1000;
 }
 
 /** How long the waiting room lasts before the puzzle auto-starts. Also the
  * window during which direct friend/group invites can be sent for a puzzle
  * — see POST /api/invites in the `friends` service, which checks lobby
- * status through the `PuzzleService` RPC entrypoint. Sourced from
- * `@game-worker/shared/lobby` — Guess the Prompt's own lobby (see
- * guess.constants.ts) uses the exact same countdown, so the two games
- * can't drift apart on "how long is the wait". */
-export {LOBBY_COUNTDOWN_SECONDS} from "@game-worker/shared/lobby";
+ * status through the `PuzzleService` RPC entrypoint. `lobbyCountdownSeconds()`
+ * is async (Flagship-backed), so puzzle.model.ts imports it directly from
+ * `@game-worker/shared/lobby` instead of being re-exported here — Guess the
+ * Prompt's own lobby (see guess.constants.ts) reads the exact same flag, so
+ * the two games can't drift apart on "how long is the wait". */
 
 /** Theme/player-name length caps and the host-token body shape, sourced
  * from `@game-worker/shared/game-session` — Guess the Prompt's create/join
- * forms (see guess.constants.ts) take the exact same shape, so the two
- * can't drift apart on these limits. */
-export {HostBodySchema, MAX_PLAYER_LENGTH, MAX_THEME_LENGTH} from "@game-worker/shared/game-session";
+ * forms (see guess.constants.ts) take the exact same shape/flags, so the
+ * two can't drift apart on these limits. `maxThemeLength()`/
+ * `maxPlayerLength()` are async (Flagship-backed) so they're imported
+ * directly from there instead of being re-exported here; only the static
+ * `HostBodySchema` shape makes sense to re-export as-is. */
+export {HostBodySchema} from "@game-worker/shared/game-session";

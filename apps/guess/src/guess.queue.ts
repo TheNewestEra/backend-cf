@@ -5,7 +5,7 @@
 
 import {generateImage, generateRoundPrompts} from "@game-worker/shared/ai";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
-import {imageKeyFor, ROUND_COUNT} from "./guess.constants";
+import {imageKeyFor} from "./guess.constants";
 import {RoundStatus} from "./guess.schema";
 
 export interface GuessQueueMessage {
@@ -19,7 +19,15 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
 
     await stub.setStatus(GameSessionStatus.Generating);
     await env.BROWSE.markCatalogGenerating(gameId);
-    const prompts = await generateRoundPrompts(env.AI, theme, ROUND_COUNT);
+    // How many rounds this particular game has was already resolved (from
+    // Flagship's "round-count" flag) and committed by GameDO.init(), which
+    // always runs before this message is even enqueued — read it back off
+    // the game's own state rather than re-reading the flag here, so a flag
+    // flip mid-generation can't leave the row count `init()` already
+    // created and the number of prompts/images generated here disagreeing
+    // with each other. See roundCount() in guess.constants.ts.
+    const roundCount = (await stub.getState()).rounds.length;
+    const prompts = await generateRoundPrompts(env.AI, theme, roundCount);
     await stub.setPrompts(prompts);
 
     // Still `generating` — per-round progress from here on is visible via
@@ -44,7 +52,7 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     } else {
         await stub.setStatus(
             GameSessionStatus.Error,
-            `${failures} of ${ROUND_COUNT} images failed to generate. Start a new game to try again.`,
+            `${failures} of ${roundCount} images failed to generate. Start a new game to try again.`,
         );
         await env.BROWSE.markCatalogError(gameId);
     }

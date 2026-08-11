@@ -1,11 +1,12 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
 import {generateColor, isValidHexColor} from "@game-worker/shared/color";
+import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
-import {lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
+import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
-import {MAX_PLAYER_LENGTH, PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE} from "./puzzle.constants";
+import {puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
 import type {MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
 import {PuzzleWsClientEventType, PuzzleWsClientMessageSchema, PuzzleWsEventType} from "./puzzle.schema";
 
@@ -142,7 +143,7 @@ export class PuzzleDO extends DurableObject<Env> {
     ): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
-        const endsAt = lobbyEndsAt(Date.now());
+        const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
         this.ctx.storage.sql.exec(
             `INSERT INTO puzzle (id, theme, prompt, status, error, grid_size, board, time_limit_ms,
                                  started_at, lobby_ends_at, ended_at, score, solved_by, host_token, created_at)
@@ -182,7 +183,7 @@ export class PuzzleDO extends DurableObject<Env> {
     /** Image is ready — enter the waiting room rather than starting instantly,
      * so players can gather, and the host can preview/regenerate/start early. */
     async setReady(prompt: string): Promise<void> {
-        const endsAt = lobbyEndsAt(Date.now());
+        const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
         this.ctx.storage.sql.exec(
             "UPDATE puzzle SET prompt = ?, status = 'waiting', error = NULL, lobby_ends_at = ?",
             prompt,
@@ -348,10 +349,11 @@ export class PuzzleDO extends DurableObject<Env> {
             const endedAt = Date.now();
             const elapsedMs = endedAt - (row.started_at ?? endedAt);
             const remainingMs = Math.max(0, row.time_limit_ms - elapsedMs);
-            const score = Math.max(
-                PUZZLE_MIN_SOLVED_SCORE,
-                Math.round((remainingMs / row.time_limit_ms) * PUZZLE_MAX_SCORE),
-            );
+            const [minSolvedScore, maxScore] = await Promise.all([
+                puzzleMinSolvedScore(this.env),
+                puzzleMaxScore(this.env),
+            ]);
+            const score = Math.max(minSolvedScore, Math.round((remainingMs / row.time_limit_ms) * maxScore));
 
             this.ctx.storage.sql.exec(
                 "UPDATE puzzle SET board = ?, status = 'solved', ended_at = ?, score = ?, solved_by = ?",
@@ -495,7 +497,7 @@ export class PuzzleDO extends DurableObject<Env> {
 
         switch (data.type) {
             case PuzzleWsClientEventType.Join: {
-                const player = data.player?.trim().slice(0, MAX_PLAYER_LENGTH) ?? "";
+                const player = data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "";
                 if (!player) {
                     this.send(ws, {type: PuzzleWsEventType.Error, action: "join", error: "player is required"});
                     return;

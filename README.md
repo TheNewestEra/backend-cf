@@ -347,6 +347,16 @@ wrangler d1 create game-worker-catalog                # then paste database_id i
 wrangler d1 migrations apply game-worker-catalog --remote   # run from apps/accounts, or any D1-bound service
 ```
 
+Also needed but not covered by the commands above: a Cloudflare Flagship
+app (named "timer" in every `apps/*/wrangler.jsonc` comment) holding every
+tunable flag `guess`/`puzzle` read — see [`terraform/`](terraform/) below.
+
+[`terraform/`](terraform/) codifies this entire section (R2/queues/D1/
+Flagship, all three environments) as IaC, as an alternative to running
+these commands by hand — see its own README for the full bootstrap flow,
+including how to adopt resources this project's already-live account
+created before that directory existed.
+
 No secrets to set and nothing to register — accounts are a username plus
 a hashed 6-digit code, both entirely in D1, and sessions are opaque tokens
 looked up the same way, not signed cookies.

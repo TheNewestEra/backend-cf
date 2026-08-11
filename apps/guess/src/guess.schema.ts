@@ -50,7 +50,8 @@ export const ROUND_VISIBLE_STATUSES: readonly RoundStatus[] = [
  * action), these are the ones whose `prompt` is safe to include directly in
  * `RoundPublicSchema`/state pushes without spoiling anything — the round is
  * no longer guessable either way, so there's no give-up action left to
- * short-circuit. Drives the post-round reveal (see `POST_ROUND_SECONDS`). */
+ * short-circuit. Drives the post-round reveal (see guess.constants.ts's
+ * `postRoundSeconds()`). */
 export const ROUND_RESOLVED_STATUSES: readonly RoundStatus[] = [RoundStatus.Complete, RoundStatus.Timeout];
 
 export const RoundPublicSchema = z

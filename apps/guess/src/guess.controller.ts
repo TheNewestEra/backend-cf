@@ -1,9 +1,10 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
+import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {currentUser} from "./auth.middleware";
-import {HostBodySchema, imageKeyFor, MAX_PLAYER_LENGTH, MAX_THEME_LENGTH, ROUND_COUNT} from "./guess.constants";
+import {HostBodySchema, imageKeyFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
 import {GamePublicSchema, GuessResultSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
 
@@ -16,14 +17,15 @@ guessRoutes.openapi(
         tags: ["Guess the Prompt"],
         summary: "Create a new game",
         description:
-            "Enqueues generation (5 rounds of AI prompt + image); poll GET /games/{id} or connect to the WebSocket " +
-            "for progress. The returned hostToken authorizes starting the lobby early for this game (replaying it " +
-            "later gets its own, separate host token).",
+            "Enqueues generation (each round is an AI prompt + image — see GET /games/{id}'s rounds array for how " +
+            "many this particular game has); poll GET /games/{id} or connect to the WebSocket for progress. The " +
+            "returned hostToken authorizes starting the lobby early for this game (replaying it later gets its " +
+            "own, separate host token).",
         request: {
             body: {
                 content: {
                     "application/json": {
-                        schema: z.object({theme: z.string().max(MAX_THEME_LENGTH).optional()}),
+                        schema: z.object({theme: z.string().optional()}),
                     },
                 },
                 required: false,
@@ -38,7 +40,8 @@ guessRoutes.openapi(
     }),
     async (c) => {
         const body = c.req.valid("json") ?? {};
-        const theme = body.theme?.trim() ? body.theme.trim().slice(0, MAX_THEME_LENGTH) : null;
+        const maxTheme = await maxThemeLength(c.env.FLAGS);
+        const theme = body.theme?.trim() ? body.theme.trim().slice(0, maxTheme) : null;
 
         const gameId = crypto.randomUUID();
         const stub = c.env.GAME_DO.getByName(gameId);
@@ -158,7 +161,7 @@ guessRoutes.openapi(
             params: z.object({id: z.string()}),
             body: {
                 content: {
-                    "application/json": {schema: z.object({player: z.string().max(MAX_PLAYER_LENGTH).optional()})},
+                    "application/json": {schema: z.object({player: z.string().optional()})},
                 },
                 required: false,
             },
@@ -173,7 +176,8 @@ guessRoutes.openapi(
         const {id} = c.req.valid("param");
         const body = c.req.valid("json") ?? {};
         const user = await currentUser(c);
-        const player = user ? user.username : (body.player?.trim().slice(0, MAX_PLAYER_LENGTH) ?? "");
+        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
 
         if (!player) return c.json({error: "player is required"}, 400);
 
@@ -197,14 +201,18 @@ guessRoutes.openapi(
         path: "/games/{id}/guess",
         tags: ["Guess the Prompt"],
         summary: "Submit a guess for a round",
-        description: "Requires having joined via POST /games/{id}/join first — see that endpoint for why.",
+        description:
+            "Requires having joined via POST /games/{id}/join first — see that endpoint for why. `index` isn't " +
+            "bounds-checked against this game's actual round count here (that count is per-game, see GET " +
+            "/games/{id}'s rounds array) — an out-of-range index just 409s the same as any other round that isn't " +
+            "currently active.",
         request: {
             params: z.object({id: z.string()}),
             body: {
                 content: {
                     "application/json": {
                         schema: z.object({
-                            index: z.number().int().min(0).max(ROUND_COUNT - 1),
+                            index: z.number().int().min(0),
                             participantId: z.string(),
                             token: z.string().optional(),
                             guess: z.string(),
@@ -250,14 +258,17 @@ guessRoutes.openapi(
         path: "/games/{id}/reveal",
         tags: ["Guess the Prompt"],
         summary: "Reveal a round's prompt without guessing",
-        description: "Requires having joined via POST /games/{id}/join first — see that endpoint for why.",
+        description:
+            "Requires having joined via POST /games/{id}/join first — see that endpoint for why. `index` isn't " +
+            "bounds-checked against this game's actual round count here — see POST /games/{id}/guess's note on " +
+            "the same thing.",
         request: {
             params: z.object({id: z.string()}),
             body: {
                 content: {
                     "application/json": {
                         schema: z.object({
-                            index: z.number().int().min(0).max(ROUND_COUNT - 1),
+                            index: z.number().int().min(0),
                             participantId: z.string(),
                             token: z.string().optional(),
                         }),
@@ -316,7 +327,7 @@ guessRoutes.openapi(
                 // out-of-range/non-numeric index still 404s exactly like a
                 // missing image, rather than the validator's 400 — see the
                 // manual check below.
-                index: z.string().openapi({description: `0-${ROUND_COUNT - 1}`}),
+                index: z.string().openapi({description: "0-based round index (see this game's rounds array for the valid count)"}),
             }),
         },
         responses: {
@@ -330,11 +341,16 @@ guessRoutes.openapi(
     async (c) => {
         const {id: gameId, index: rawIndex} = c.req.valid("param");
         const index = Number(rawIndex);
-        if (!Number.isInteger(index) || index < 0 || index >= ROUND_COUNT) return c.notFound();
+        if (!Number.isInteger(index) || index < 0) return c.notFound();
 
         // Spoiler gate: only serve a round's image once it's been played (the
         // active round, or one that's already resolved) — never a round that's
         // merely generated and waiting its turn. See ROUND_VISIBLE_STATUSES.
+        // The upper bound on `index` is enforced implicitly here too: an
+        // out-of-range index just means `state.rounds[index]` is undefined,
+        // same as any other not-visible round — this game's round count is
+        // per-game (see roundCount() in guess.constants.ts), not a static
+        // import-time value to check against.
         const state = await c.env.GAME_DO.getByName(gameId).getState();
         const round = state.rounds[index];
         if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return c.notFound();

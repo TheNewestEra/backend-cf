@@ -1,6 +1,5 @@
 import {z} from "@hono/zod-openapi";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
-import {MAX_PLAYER_LENGTH} from "@game-worker/shared/game-session";
 import {
         WsPlayerJoinedMessageSchema,
         WsPongMessageSchema,
@@ -245,11 +244,15 @@ export type PuzzleWsClientEventType = (typeof PuzzleWsClientEventType)[keyof typ
  * (`#`+6 hex digits) or it's discarded in favor of a generated one, same as
  * omitting it entirely. Reply comes back as a `PuzzleWsJoinResultMessage`
  * (success) or `PuzzleWsErrorMessage` (already started), addressed only to
- * this socket. */
+ * this socket. `player` isn't length-capped here — Flagship's
+ * "max-player-length" flag is async, so it can't back a static schema bound
+ * the way this used to; over-length names are truncated instead, at the
+ * point `player` actually gets used (see puzzle.model.ts's
+ * `webSocketMessage()`). */
 export const PuzzleWsJoinRequestSchema = z
     .object({
         type: z.literal(PuzzleWsClientEventType.Join),
-        player: z.string().max(MAX_PLAYER_LENGTH).optional(),
+        player: z.string().optional(),
         color: z.string().optional(),
     })
     .openapi("PuzzleWsJoinRequest");

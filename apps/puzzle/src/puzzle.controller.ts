@@ -1,17 +1,10 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
+import {maxThemeLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
-import {
-    DEFAULT_GRID_SIZE,
-    HostBodySchema,
-    MAX_GRID_SIZE,
-    MAX_THEME_LENGTH,
-    MIN_GRID_SIZE,
-    puzzleImageKeyFor,
-    puzzleTimeLimitMs,
-} from "./puzzle.constants";
+import {HostBodySchema, puzzleImageKeyFor, puzzleTimeLimitMs, resolveGridSize} from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
 import {PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
 
@@ -23,14 +16,14 @@ puzzleRoutes.openapi(
         path: "/puzzles",
         tags: ["Piece Puzzle"],
         summary: "Create a new puzzle",
-        description: "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. The returned hostToken authorizes regenerate/start for this puzzle (replaying it later gets its own, separate host token).",
+        description: "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. The returned hostToken authorizes regenerate/start for this puzzle (replaying it later gets its own, separate host token). `gridSize`, if given, is clamped to Flagship's configured [min, max] rather than rejected out of range.",
         request: {
             body: {
                 content: {
                     "application/json": {
                         schema: z.object({
-                            theme: z.string().max(MAX_THEME_LENGTH).optional(),
-                            gridSize: z.number().int().min(MIN_GRID_SIZE).max(MAX_GRID_SIZE).optional(),
+                            theme: z.string().optional(),
+                            gridSize: z.number().int().optional(),
                         }),
                     },
                 },
@@ -46,8 +39,9 @@ puzzleRoutes.openapi(
     }),
     async (c) => {
         const body = c.req.valid("json");
-        const theme = body.theme?.trim() ? body.theme.trim().slice(0, MAX_THEME_LENGTH) : null;
-        const gridSize = clampGridSize(body.gridSize);
+        const maxTheme = await maxThemeLength(c.env.FLAGS);
+        const theme = body.theme?.trim() ? body.theme.trim().slice(0, maxTheme) : null;
+        const gridSize = await resolveGridSize(c.env, body.gridSize);
         const timeLimitMs = await puzzleTimeLimitMs(c.env);
 
         const puzzleId = crypto.randomUUID();
@@ -239,8 +233,3 @@ puzzleRoutes.openapi(
         return immutableImageResponse(object);
     },
 );
-
-function clampGridSize(input: number | undefined): number {
-    if (!Number.isInteger(input)) return DEFAULT_GRID_SIZE;
-    return Math.min(MAX_GRID_SIZE, Math.max(MIN_GRID_SIZE, input as number));
-}

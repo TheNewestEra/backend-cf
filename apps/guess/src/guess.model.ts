@@ -2,18 +2,18 @@ import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
 import {generateColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
-import {lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
+import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
 import {GameWsEventType, ROUND_RESOLVED_STATUSES, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
 import {
   DEFAULT_GUESS_TIME_LIMIT_SECONDS,
-  GUESS_MAX_SCORE,
-  GUESS_MIN_SCORE,
+  guessMaxScore,
+  guessMinScore,
   guessTimeLimitSeconds,
-  POST_ROUND_SECONDS,
-  ROUND_COUNT,
+  postRoundSeconds,
+  roundCount,
 } from "./guess.constants";
 
 export {ROUND_VISIBLE_STATUSES, RoundStatus};
@@ -34,9 +34,15 @@ interface GameRow extends Record<string, SqlStorageValue> {
     lobby_ends_at: number | null;
     // Set together, by resolveCurrentRound(), while the just-resolved round
     // sits in its post-round reveal pause; both cleared together, by
-    // advanceAfterPostRound(), once that pause ends. See POST_ROUND_SECONDS.
+    // advanceAfterPostRound(), once that pause ends. See postRoundSeconds().
     post_round_index: number | null;
     post_round_ends_at: number | null;
+    // Resolved once, by init(), from Flagship's "round-count" flag (see
+    // guess.constants.ts's roundCount()) and never re-read after — the
+    // authoritative "how many rounds does this game have" for its entire
+    // lifetime, so a flag flip mid-game can't leave the `rounds` table and
+    // this game's own advancing logic disagreeing with each other.
+    round_count: number;
     created_at: number;
 }
 
@@ -84,8 +90,9 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * pushes live progress to every connected WebSocket as the queue consumer
  * calls its RPC methods.
  *
- * Rounds are generated up front (all `ROUND_COUNT` in parallel — see
- * guess.queue.ts) but played strictly sequentially: once play begins, round
+ * Rounds are generated up front (all of them, in parallel — see
+ * guess.queue.ts and `round_count` on `GameRow`) but played strictly
+ * sequentially: once play begins, round
  * 0 is the only one `Active` (open for guessing); each subsequent round only
  * opens once the previous one resolves, either because every joined
  * participant answered it correctly (early advance) or its own guess-timeout
@@ -95,7 +102,8 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * Mirrors `apps/puzzle`'s `PuzzleDO` lobby shape: once every round's image
  * is ready, the game sits in a `waiting` room (see `setReady()`) instead of
  * starting instantly, so players can gather before play begins — either
- * automatically after `LOBBY_COUNTDOWN_SECONDS` (a DO alarm) or early via
+ * automatically after Flagship's "lobby-countdown-seconds" flag elapses
+ * (a DO alarm — see `lobbyCountdownSeconds()`) or early via
  * the host's `startNow()`. The creator ("host") gets a one-time secret
  * token back from `init()`, never broadcast or included in `getState()`,
  * which their browser must present to start early — same contract as
@@ -111,23 +119,27 @@ export class GameDO extends DurableObject<Env> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         const now = Date.now();
+        // Resolved once, here, and persisted on the game row — see the
+        // `round_count` field's doc comment on `GameRow`.
+        const rounds = await roundCount(this.env);
         this.ctx.storage.sql.exec("DELETE FROM guesses");
         this.ctx.storage.sql.exec("DELETE FROM rounds");
         this.ctx.storage.sql.exec("DELETE FROM participants");
         this.ctx.storage.sql.exec(
             `INSERT INTO game (id, theme, status, error, host_token, lobby_ends_at, post_round_index,
-                                post_round_ends_at, created_at)
-             VALUES (?, ?, 'queued', NULL, ?, NULL, NULL, NULL, ?) ON CONFLICT(id) DO
+                                post_round_ends_at, round_count, created_at)
+             VALUES (?, ?, 'queued', NULL, ?, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO
             UPDATE SET
                 theme = excluded.theme, status = 'queued', error = NULL,
                 host_token = excluded.host_token, lobby_ends_at = NULL,
-                post_round_index = NULL, post_round_ends_at = NULL`,
+                post_round_index = NULL, post_round_ends_at = NULL, round_count = excluded.round_count`,
             gameId,
             theme,
             hostToken,
+            rounds,
             now,
         );
-        for (let i = 0; i < ROUND_COUNT; i++) {
+        for (let i = 0; i < rounds; i++) {
             this.ctx.storage.sql.exec("INSERT INTO rounds (idx, status) VALUES (?, 'pending')", i);
         }
         this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
@@ -189,7 +201,7 @@ export class GameDO extends DurableObject<Env> {
      * starting instantly, so players can gather (see the class doc comment).
      * Mirrors `PuzzleDO.setReady()`. */
     async setReady(): Promise<void> {
-        const endsAt = lobbyEndsAt(Date.now());
+        const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
         this.ctx.storage.sql.exec(
             "UPDATE game SET status = 'waiting', error = NULL, lobby_ends_at = ?",
             endsAt,
@@ -307,7 +319,9 @@ export class GameDO extends DurableObject<Env> {
         }
 
         const correct = isGuessCorrect(guess, round.prompt);
-        const score = correct ? scoreForGuess(round.started_at, round.time_limit_ms) : null;
+        const score = correct
+            ? scoreForGuess(round.started_at, round.time_limit_ms, await guessMaxScore(this.env), await guessMinScore(this.env))
+            : null;
 
         this.ctx.storage.sql.exec(
             "INSERT INTO guesses (round_idx, participant_id, player, guess, correct, score, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -598,6 +612,10 @@ export class GameDO extends DurableObject<Env> {
             "ALTER TABLE game ADD COLUMN lobby_ends_at INTEGER",
             "ALTER TABLE game ADD COLUMN post_round_index INTEGER",
             "ALTER TABLE game ADD COLUMN post_round_ends_at INTEGER",
+            // DEFAULT 5 matches the static ROUND_COUNT every pre-existing
+            // instance was actually created with, before it became a
+            // per-game value resolved from Flagship at init() time.
+            "ALTER TABLE game ADD COLUMN round_count INTEGER NOT NULL DEFAULT 5",
             "ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'",
             "ALTER TABLE guesses ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE guesses ADD COLUMN score INTEGER",
@@ -712,7 +730,7 @@ export class GameDO extends DurableObject<Env> {
 
     /** Closes out the current round (`complete` if it got at least one
      * correct guess, `timeout` if none), then opens its post-round reveal
-     * pause (see `POST_ROUND_SECONDS`) rather than immediately moving on —
+     * pause (see `postRoundSeconds()`) rather than immediately moving on —
      * `advanceAfterPostRound()` does that once the pause elapses. Called from
      * two independent triggers: `alarm()` once a round's own deadline
      * passes, and `submitGuess()` the instant every joined participant has
@@ -735,7 +753,7 @@ export class GameDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, index);
         this.broadcast({type: GameWsEventType.RoundStatus, index, status});
 
-        const postRoundEndsAt = Date.now() + POST_ROUND_SECONDS * 1000;
+        const postRoundEndsAt = Date.now() + (await postRoundSeconds(this.env)) * 1000;
         this.ctx.storage.sql.exec(
             "UPDATE game SET post_round_index = ?, post_round_ends_at = ?",
             index,
@@ -754,10 +772,11 @@ export class GameDO extends DurableObject<Env> {
      * real wait — driven by `alarm()` — rather than something clients only
      * see for an instant. */
     private async advanceAfterPostRound(gameId: string, index: number): Promise<void> {
+        const row = this.requireGameRow();
         this.ctx.storage.sql.exec("UPDATE game SET post_round_index = NULL, post_round_ends_at = NULL");
 
         const nextIndex = index + 1;
-        if (nextIndex < ROUND_COUNT) {
+        if (nextIndex < row.round_count) {
             await this.activateRound(nextIndex);
             return;
         }
@@ -898,25 +917,12 @@ export class GameDO extends DurableObject<Env> {
                 index: r.idx,
                 status: r.status,
                 error: r.error ?? undefined,
-                // Mirrors PuzzleDO's `remainingMs`: only ever ticking for the one
-                // round that's currently open for guessing (see `activateRound()`'s
-                // "at most one round is ever `Active`" invariant) — null for every
-                // other round, whether it hasn't had its turn yet or has already
-                // resolved.
                 remainingMs:
                     r.status === RoundStatus.Active && r.started_at !== null
                         ? Math.max(0, (r.time_limit_ms ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.started_at))
                         : null,
-                // Only once a round is fully resolved — never for the still-
-                // guessable `active` round, which stays spoiler-gated behind the
-                // deliberate `revealRound()` give-up path. See
-                // ROUND_RESOLVED_STATUSES.
                 prompt: ROUND_RESOLVED_STATUSES.includes(r.status) ? r.prompt : null,
             })),
-            // At most one round is ever `Active` at a time (see `activateRound()`/
-            // `resolveCurrentRound()`) — null before play starts, during a
-            // post-round reveal pause, and after the game finishes, since
-            // nothing stays `Active` in any of those cases.
             currentRound: rounds.find((r) => r.status === RoundStatus.Active)?.idx ?? null,
             postRoundIndex: game?.post_round_index ?? null,
             postRoundRemainingMs:
@@ -947,18 +953,20 @@ export class GameDO extends DurableObject<Env> {
     }
 }
 
-/** See guessTimeLimitSeconds(): linear falloff from GUESS_MAX_SCORE at 0
- * elapsed (the instant a round became the current one — `started_at`,
- * stamped by `activateRound()`) to GUESS_MIN_SCORE at the limit or beyond.
- * `startedAt` is only null for a round that's somehow being scored before
- * `activateRound()` ran; treated as "just started" (max score) rather than
- * throwing. `limitMs` is likewise only null for a round some already-live
- * DO instance had mid-flight when the `time_limit_ms` column was added —
- * falls back to the same default `guessTimeLimitSeconds()` itself falls
- * back to, rather than throwing. */
-function scoreForGuess(startedAt: number | null, limitMs: number | null): number {
+/** See guessTimeLimitSeconds(): linear falloff from `maxScore` at 0 elapsed
+ * (the instant a round became the current one — `started_at`, stamped by
+ * `activateRound()`) to `minScore` at the limit or beyond — both resolved by
+ * the caller (`submitGuess()`) from Flagship's "guess-max-score"/
+ * "guess-min-score" flags right before calling this, same "resolve once,
+ * use once" shape as `limitMs` itself. `startedAt` is only null for a round
+ * that's somehow being scored before `activateRound()` ran; treated as
+ * "just started" (max score) rather than throwing. `limitMs` is likewise
+ * only null for a round some already-live DO instance had mid-flight when
+ * the `time_limit_ms` column was added — falls back to the same default
+ * `guessTimeLimitSeconds()` itself falls back to, rather than throwing. */
+function scoreForGuess(startedAt: number | null, limitMs: number | null, maxScore: number, minScore: number): number {
     const elapsedMs = Date.now() - (startedAt ?? Date.now());
     const effectiveLimitMs = limitMs ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000;
     const remainingMs = Math.max(0, effectiveLimitMs - elapsedMs);
-    return Math.max(GUESS_MIN_SCORE, Math.round((remainingMs / effectiveLimitMs) * GUESS_MAX_SCORE));
+    return Math.max(minScore, Math.round((remainingMs / effectiveLimitMs) * maxScore));
 }

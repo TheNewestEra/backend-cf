@@ -30,10 +30,19 @@
     "binding": "AI"
   },
   // Cloudflare Flagship — same "timer" app across every environment, on
-  // purpose: it's how "puzzle-time-seconds" / "dev-mode" /
-  // "puzzle-time-override-seconds" get changed without a redeploy (see
-  // puzzleTimeLimitMs() in puzzle.constants.ts). Shared with `guess`,
-  // which uses the same app for its own guess-time-* flags.
+  // purpose: it's how every tunable knob this service has gets changed
+  // without a redeploy (see puzzle.constants.ts, and @game-worker/shared's
+  // lobby.ts/game-session.ts for the two flags below shared with `guess`).
+  // No "dev-mode" flag any more — each knob is just its own flag, so
+  // testing a different value means changing that flag directly instead of
+  // flipping a mode and hoping a second "-override-" flag holds what you
+  // want. This service's own flags: "puzzle-time-seconds",
+  // "grid-size-default", "grid-size-min", "grid-size-max",
+  // "puzzle-max-score", "puzzle-min-solved-score". Shared with `guess`
+  // (exact same flag key, read independently by each service):
+  // "lobby-countdown-seconds", "max-theme-length", "max-player-length".
+  // `guess` also has its own guess-time-*/round-count/guess-*-score/
+  // post-round-seconds flags on this same app.
   "flagship": [
     {
       "binding": "FLAGS",
