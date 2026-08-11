@@ -3,13 +3,21 @@ import type { z } from "@hono/zod-openapi";
 import { generateColor } from "@game-worker/shared/color";
 import { lobbyEndsAt, lobbyRemainingMs } from "@game-worker/shared/lobby";
 import { isGuessCorrect } from "./guess-matching";
-import type { GamePublicSchema, GuessResultSchema, RoundPublicSchema } from "./guess.schema";
+import type { GamePublicSchema, GameResultSchema, GuessResultSchema, RoundPublicSchema } from "./guess.schema";
 import { GUESS_MAX_SCORE, GUESS_MIN_SCORE, ROUND_COUNT, guessTimeLimitSeconds } from "./guess.constants";
 
 export type RoundStatus = z.infer<typeof RoundPublicSchema>["status"];
 export type GameStatus = z.infer<typeof GamePublicSchema>["status"];
 export type GamePublic = z.infer<typeof GamePublicSchema>;
 export type GuessResult = z.infer<typeof GuessResultSchema>;
+export type GameResult = z.infer<typeof GameResultSchema>;
+
+/** Round statuses that no longer accept guesses — reached once a round's
+ * own guess-timeout deadline passes (see `resolveDueRounds()`), never
+ * reverted. A round can also stall in `error` (image generation failed),
+ * but that always takes the whole game to `error` too (see guess.queue.ts),
+ * so it's never in play long enough to need a deadline. */
+const ROUND_TERMINAL_STATUSES: readonly RoundStatus[] = ["complete", "timeout"];
 
 // The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
 // requires its row type to satisfy.
@@ -98,9 +106,11 @@ export class GameDO extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS guesses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         round_idx INTEGER NOT NULL,
+        participant_id TEXT NOT NULL DEFAULT '',
         player TEXT NOT NULL,
         guess TEXT NOT NULL,
         correct INTEGER NOT NULL,
+        score INTEGER,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS participants (
@@ -121,6 +131,8 @@ export class GameDO extends DurableObject<Env> {
       "ALTER TABLE game ADD COLUMN host_token TEXT NOT NULL DEFAULT ''",
       "ALTER TABLE game ADD COLUMN lobby_ends_at INTEGER",
       "ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'",
+      "ALTER TABLE guesses ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE guesses ADD COLUMN score INTEGER",
     ]) {
       try {
         this.ctx.storage.sql.exec(stmt);
@@ -167,6 +179,9 @@ export class GameDO extends DurableObject<Env> {
   // --- RPC: progress updates from the queue consumer ---------------------
 
   async setStatus(status: GameStatus, error?: string): Promise<void> {
+    // `error` is terminal (see guess.queue.ts) — drop any armed round-
+    // timeout/lobby alarm so a stale one can't fire against a dead game.
+    if (status === "error") await this.ctx.storage.deleteAlarm();
     this.ctx.storage.sql.exec("UPDATE game SET status = ?, error = ?", status, error ?? null);
     this.broadcast({ type: "status", status, error });
   }
@@ -196,6 +211,12 @@ export class GameDO extends DurableObject<Env> {
       index,
     );
     this.broadcast({ type: "round_ready", index });
+    // A round's guess-timeout deadline is measured from its own `ready_at`
+    // (same clock `scoreForGuess()` decays against), so it starts counting
+    // the instant this round is guessable — independent of whether the
+    // game itself has left `generating` yet. Rearm in case this is now the
+    // soonest pending deadline.
+    await this.scheduleNextAlarm();
   }
 
   /** Every round's image is ready — open the waiting room rather than
@@ -207,7 +228,7 @@ export class GameDO extends DurableObject<Env> {
       "UPDATE game SET status = 'waiting', error = NULL, lobby_ends_at = ?",
       endsAt,
     );
-    await this.ctx.storage.setAlarm(endsAt);
+    await this.scheduleNextAlarm();
     this.broadcast({ type: "state", ...this.readPublicState() });
   }
 
@@ -300,11 +321,16 @@ export class GameDO extends DurableObject<Env> {
 
   // --- RPC: player interaction --------------------------------------------
 
-  /** `userId` is null for anonymous guests — their guesses still count in
-   * this game's own state, they just aren't logged to the leaderboard
-   * (recorded via the LEADERBOARD service binding — see wrangler.jsonc).
-   * `participantId`/`token` prove the caller joined before the game
-   * started — see `join()` and `requireParticipant()`. */
+  /** `userId` is null for anonymous guests — their guesses still count
+   * toward this game's own scoreboard (`results`, see `readPublicState()`),
+   * they just aren't logged to the leaderboard, which only happens once
+   * per player as a single total when the game finishes (see
+   * `finalizeGame()`) rather than per guess. `participantId`/`token` prove
+   * the caller joined before the game started — see `join()` and
+   * `requireParticipant()`. Rejects once the round has resolved to
+   * `complete`/`timeout` (its guess-timeout deadline passed — see
+   * `resolveDueRounds()`), same "round not ready" error a pre-generation
+   * guess would get. */
   async submitGuess(
     index: number,
     participantId: string,
@@ -325,11 +351,13 @@ export class GameDO extends DurableObject<Env> {
     const score = correct ? scoreForGuess(round.ready_at, await guessTimeLimitSeconds(this.env)) : null;
 
     this.ctx.storage.sql.exec(
-      "INSERT INTO guesses (round_idx, player, guess, correct, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO guesses (round_idx, participant_id, player, guess, correct, score, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       index,
+      participantId,
       participant.name,
       guess,
       correct ? 1 : 0,
+      score,
       Date.now(),
     );
 
@@ -341,11 +369,6 @@ export class GameDO extends DurableObject<Env> {
       correct,
       score,
     });
-
-    if (score !== null && userId) {
-      const game = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM game LIMIT 1").toArray()[0];
-      if (game) await this.env.LEADERBOARD.recordScore({ userId, kind: "guess", sessionId: game.id, score });
-    }
 
     return { correct, prompt: correct ? round.prompt : null, score };
   }
@@ -382,15 +405,30 @@ export class GameDO extends DurableObject<Env> {
     this.broadcast({ type: "player_typing", index, player: row.name, color: row.color });
   }
 
-  // --- alarm: drives the lobby's auto-start -------------------------------
+  // --- alarm: drives the lobby's auto-start, then every round's own
+  // guess-timeout -----------------------------------------------------------
 
+  /** A DO has exactly one alarm slot, shared here by two different
+   * deadlines: the lobby countdown (`waiting` → `playing`) and, once
+   * playable, each round's own guess-timeout — `scheduleNextAlarm()`
+   * always arms it for whichever is soonest, so a single firing only ever
+   * needs to handle the one thing that's actually due; anything else
+   * still pending gets rearmed at the end. */
   async alarm(): Promise<void> {
     const row = this.requireGameRow();
-    if (row.status === "waiting") {
+
+    if (row.status === "waiting" && row.lobby_ends_at !== null && Date.now() >= row.lobby_ends_at) {
       await this.beginPlaying(row.id);
+      return;
     }
-    // Any other status means the game moved on (error, etc.) before this
-    // stale alarm fired — nothing to do.
+
+    if (row.status !== "waiting" && row.status !== "playing") {
+      // Game already moved on to a terminal status (error, or resolved by
+      // an earlier tick) before this stale alarm fired — nothing to do.
+      return;
+    }
+
+    await this.resolveDueRounds(row.id);
   }
 
   // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
@@ -441,8 +479,12 @@ export class GameDO extends DurableObject<Env> {
   /** Shared by the host's "start now" and the lobby alarm's auto-start.
    * Mirrors `PuzzleDO.beginPlaying()`. */
   private async beginPlaying(gameId: string): Promise<void> {
-    await this.ctx.storage.deleteAlarm();
     this.ctx.storage.sql.exec("UPDATE game SET status = 'playing', lobby_ends_at = NULL");
+    // The lobby alarm just consumed itself firing — rearm for whatever
+    // round guess-timeout is soonest now that the game is `playing` (some
+    // may already be overdue if the lobby ran long, which resolves them
+    // on the very next tick rather than losing the deadline).
+    await this.scheduleNextAlarm();
     this.broadcast({ type: "state", ...this.readPublicState() });
     // Distinct write from markCatalogReady (already fired back in
     // setReady()'s caller, guess.queue.ts) — see that RPC's own doc
@@ -453,6 +495,111 @@ export class GameDO extends DurableObject<Env> {
         console.error("failed to update catalog play status", gameId, err);
       }),
     );
+  }
+
+  /** Closes out every round whose own guess-timeout deadline has passed:
+   * `complete` if it got at least one correct guess, `timeout` if it got
+   * none. Once every round has reached one of those two terminal states
+   * (see `ROUND_TERMINAL_STATUSES`), the game itself is decided —
+   * `finalizeGame()` handles that; otherwise just rearms for whatever's
+   * still pending. */
+  private async resolveDueRounds(gameId: string): Promise<void> {
+    const limitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
+    const now = Date.now();
+
+    const rounds = this.ctx.storage.sql.exec<RoundRow>("SELECT * FROM rounds ORDER BY idx ASC").toArray();
+    for (const round of rounds) {
+      if (round.status !== "ready" || round.ready_at === null || round.ready_at + limitMs > now) continue;
+      const correct = this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND correct = 1", round.idx)
+        .toArray()[0]?.n;
+      const status: RoundStatus = correct && correct > 0 ? "complete" : "timeout";
+      this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, round.idx);
+      this.broadcast({ type: "round_status", index: round.idx, status });
+    }
+
+    const statuses = this.ctx.storage.sql.exec<{ status: RoundStatus }>("SELECT status FROM rounds").toArray();
+    if (statuses.every((r) => ROUND_TERMINAL_STATUSES.includes(r.status))) {
+      const gameStatus = statuses.some((r) => r.status === "complete") ? "solved" : "timeout";
+      await this.finalizeGame(gameId, gameStatus);
+      return;
+    }
+    await this.scheduleNextAlarm();
+  }
+
+  /** Every round has resolved — decide the game (`solved` if at least one
+   * round was completed by someone, `timeout` only if every round went
+   * unguessed), total each participant's correct-guess scores, and record
+   * one leaderboard entry per logged-in player for their total (replacing
+   * the old per-guess recording, so a player is only scored once here
+   * rather than once per correct round). */
+  private async finalizeGame(gameId: string, status: "solved" | "timeout"): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    this.ctx.storage.sql.exec("UPDATE game SET status = ?, error = NULL", status);
+
+    const totals = this.ctx.storage.sql
+      .exec<{ participant_id: string; total: number }>(
+        "SELECT participant_id, SUM(score) AS total FROM guesses WHERE correct = 1 GROUP BY participant_id",
+      )
+      .toArray();
+
+    for (const { participant_id, total } of totals) {
+      if (total <= 0) continue;
+      const participant = this.ctx.storage.sql
+        .exec<ParticipantRow>("SELECT user_id FROM participants WHERE id = ?", participant_id)
+        .toArray()[0];
+      if (!participant?.user_id) continue;
+      try {
+        await this.env.LEADERBOARD.recordScore({
+          userId: participant.user_id,
+          kind: "guess",
+          sessionId: gameId,
+          score: total,
+        });
+      } catch (err) {
+        console.error("failed to record guess game score", gameId, participant.user_id, err);
+      }
+    }
+
+    this.broadcast({ type: "state", ...this.readPublicState() });
+    // Mirrors PuzzleDO's solve/timeout: distinct from markCatalogReady
+    // (fired back in guess.queue.ts) — the game's join/spectate window is
+    // now closed for good. `.catch()`'d so a `browse` hiccup can't break
+    // a live game's finish.
+    this.ctx.waitUntil(
+      this.env.BROWSE.updatePlayStatus(gameId, "finished").catch((err) => {
+        console.error("failed to update catalog play status", gameId, err);
+      }),
+    );
+  }
+
+  /** Recomputes and (re)arms the single DO alarm to the earliest pending
+   * deadline across the lobby countdown and every still-`ready` round's own
+   * guess-timeout (each measured from that round's `ready_at`, matching the
+   * time-weighted scoring in `scoreForGuess()`). A DO only has one alarm
+   * slot, so whichever deadline is soonest wins and gets rearmed again once
+   * it fires (see `alarm()`). Deletes the alarm entirely once nothing is
+   * pending. */
+  private async scheduleNextAlarm(): Promise<void> {
+    const row = this.requireGameRow();
+    const candidates: number[] = [];
+    if (row.status === "waiting" && row.lobby_ends_at !== null) {
+      candidates.push(row.lobby_ends_at);
+    }
+
+    const limitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
+    const readyRounds = this.ctx.storage.sql
+      .exec<Pick<RoundRow, "ready_at">>("SELECT ready_at FROM rounds WHERE status = 'ready'")
+      .toArray();
+    for (const round of readyRounds) {
+      if (round.ready_at !== null) candidates.push(round.ready_at + limitMs);
+    }
+
+    if (candidates.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.min(...candidates));
   }
 
   private assertHost(row: GameRow, hostToken: string): void {
@@ -475,6 +622,20 @@ export class GameDO extends DurableObject<Env> {
     const participants = this.ctx.storage.sql
       .exec<ParticipantPublic>("SELECT name, color FROM participants ORDER BY joined_at ASC")
       .toArray();
+    // Live scoreboard, not just a finished-game summary — updates as
+    // guesses land, and doubles as the final standings once `status` hits
+    // `solved`/`timeout` (see `finalizeGame()`). Joined against
+    // `participants` (rather than trusting `guesses.player`) so a display
+    // name change after guessing still shows correctly here.
+    const results = this.ctx.storage.sql
+      .exec<{ name: string; color: string; total: number }>(
+        `SELECT p.name AS name, p.color AS color, SUM(g.score) AS total
+         FROM guesses g JOIN participants p ON p.id = g.participant_id
+         WHERE g.correct = 1
+         GROUP BY g.participant_id
+         ORDER BY total DESC`,
+      )
+      .toArray();
 
     return {
       id: game?.id ?? "",
@@ -489,6 +650,7 @@ export class GameDO extends DurableObject<Env> {
       lobbyRemainingMs: game ? lobbyRemainingMs(game.lobby_ends_at) : null,
       connectedPlayers: this.ctx.getWebSockets().length,
       participants: participants.map((p) => ({ name: p.name, color: p.color })),
+      results: results.map((r) => ({ name: r.name, color: r.color, score: r.total })),
     };
   }
 

@@ -3,10 +3,19 @@ import { z } from "@hono/zod-openapi";
 export const RoundPublicSchema = z
   .object({
     index: z.number(),
-    status: z.enum(["pending", "generating", "ready", "error"]),
+    status: z.enum(["pending", "generating", "ready", "error", "complete", "timeout"]),
     error: z.string().optional(),
   })
   .openapi("Round");
+
+/** A single participant's running total across every `correct` guess this
+ * game — sorted highest-first, so index 0 is always the leader. Present
+ * (and live-updating) throughout the game, not just once it's over; the
+ * client can render it as a scoreboard at any point, but it's only the
+ * *final* standings once `status` reaches `solved`/`timeout`. */
+export const GameResultSchema = z
+  .object({ name: z.string(), color: z.string(), score: z.number() })
+  .openapi("GameResult");
 
 /** A joined player's public roster entry — just enough to render an avatar
  * list in the lobby/play page. No id/token here; those stay private to the
@@ -20,7 +29,7 @@ export const GamePublicSchema = z
   .object({
     id: z.string(),
     theme: z.string().nullable(),
-    status: z.enum(["queued", "generating", "waiting", "playing", "error"]),
+    status: z.enum(["queued", "generating", "waiting", "playing", "solved", "timeout", "error"]),
     error: z.string().optional(),
     rounds: z.array(RoundPublicSchema),
     lobbyRemainingMs: z
@@ -29,6 +38,9 @@ export const GamePublicSchema = z
       .openapi({ description: "ms left in the waiting room; null outside the `waiting` status" }),
     connectedPlayers: z.number().openapi({ description: "Live WebSocket connection count (players + spectators)" }),
     participants: z.array(ParticipantPublicSchema).openapi({ description: "Everyone who has joined, in join order" }),
+    results: z
+      .array(GameResultSchema)
+      .openapi({ description: "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`" }),
   })
   .openapi("Game");
 
