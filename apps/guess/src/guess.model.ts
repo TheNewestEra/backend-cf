@@ -3,9 +3,10 @@ import type {z} from "@hono/zod-openapi";
 import {generateColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
+import {WsEventType} from "@game-worker/shared/ws-messages";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
-import {ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
+import {GameWsEventType, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
 import {
   DEFAULT_GUESS_TIME_LIMIT_SECONDS,
   GUESS_MAX_SCORE,
@@ -121,7 +122,7 @@ export class GameDO extends DurableObject<Env> {
         for (let i = 0; i < ROUND_COUNT; i++) {
             this.ctx.storage.sql.exec("INSERT INTO rounds (idx, status) VALUES (?, 'pending')", i);
         }
-        this.broadcast({type: "state", ...this.readPublicState()});
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
         return hostToken;
     }
 
@@ -139,7 +140,7 @@ export class GameDO extends DurableObject<Env> {
         // timeout/lobby alarm so a stale one can't fire against a dead game.
         if (status === GameSessionStatus.Error) await this.ctx.storage.deleteAlarm();
         this.ctx.storage.sql.exec("UPDATE game SET status = ?, error = ?", status, error ?? null);
-        this.broadcast({type: "status", status, error});
+        this.broadcast({type: WsEventType.Status, status, error});
     }
 
     // --- RPC: progress updates from the queue consumer ---------------------
@@ -148,7 +149,7 @@ export class GameDO extends DurableObject<Env> {
         prompts.forEach((prompt, idx) => {
             this.ctx.storage.sql.exec("UPDATE rounds SET prompt = ? WHERE idx = ?", prompt, idx);
         });
-        this.broadcast({type: "prompts_ready", count: prompts.length});
+        this.broadcast({type: GameWsEventType.PromptsReady, count: prompts.length});
     }
 
     async setRoundStatus(index: number, status: RoundStatus, error?: string): Promise<void> {
@@ -158,7 +159,7 @@ export class GameDO extends DurableObject<Env> {
             error ?? null,
             index,
         );
-        this.broadcast({type: "round_status", index, status, error});
+        this.broadcast({type: GameWsEventType.RoundStatus, index, status, error});
     }
 
     /** Image done generating — the round is now `ready`, i.e. queued up
@@ -173,7 +174,7 @@ export class GameDO extends DurableObject<Env> {
             Date.now(),
             index,
         );
-        this.broadcast({type: "round_ready", index});
+        this.broadcast({type: GameWsEventType.RoundReady, index});
     }
 
     /** Every round's image is ready — open the waiting room rather than
@@ -186,7 +187,7 @@ export class GameDO extends DurableObject<Env> {
             endsAt,
         );
         await this.scheduleNextAlarm();
-        this.broadcast({type: "state", ...this.readPublicState()});
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
     }
 
     /** Ends the lobby countdown immediately and starts play. Mirrors
@@ -233,7 +234,7 @@ export class GameDO extends DurableObject<Env> {
                 color,
                 Date.now(),
             );
-            this.broadcast({type: "player_joined", name: playerName, color});
+            this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
             return {participantId: userId, token: null, color};
         }
 
@@ -247,7 +248,7 @@ export class GameDO extends DurableObject<Env> {
             color,
             Date.now(),
         );
-        this.broadcast({type: "player_joined", name: playerName, color});
+        this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
         return {participantId, token, color};
     }
 
@@ -312,7 +313,7 @@ export class GameDO extends DurableObject<Env> {
         );
 
         this.broadcast({
-            type: "guess",
+            type: GameWsEventType.Guess,
             index,
             player: participant.name,
             color: participant.color,
@@ -352,7 +353,7 @@ export class GameDO extends DurableObject<Env> {
             .toArray()[0];
         if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return null;
         this.broadcast({
-            type: "revealed",
+            type: GameWsEventType.Revealed,
             index,
             prompt: round.prompt,
             player: participant.name,
@@ -406,17 +407,17 @@ export class GameDO extends DurableObject<Env> {
         }
         const pair = new WebSocketPair();
         this.ctx.acceptWebSocket(pair[1]);
-        this.send(pair[1], {type: "state", ...this.readPublicState()});
+        this.send(pair[1], {type: GameWsEventType.State, ...this.readPublicState()});
         // Let every other connected client know the spectator/player count
         // changed — mirrors PuzzleDO's presence broadcast.
-        this.broadcast({type: "presence", connectedPlayers: this.ctx.getWebSockets().length});
+        this.broadcast({type: WsEventType.Presence, connectedPlayers: this.ctx.getWebSockets().length});
         return new Response(null, {status: 101, webSocket: pair[0]});
     }
 
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
         if (typeof message !== "string") return;
         if (message === "ping") {
-            this.send(ws, {type: "pong"});
+            this.send(ws, {type: WsEventType.Pong});
             return;
         }
         // Anything else must be a small JSON envelope — currently only
@@ -446,7 +447,7 @@ export class GameDO extends DurableObject<Env> {
         // getWebSockets() on some runtimes; broadcasting a stale +1 count is
         // more confusing than a same-tick undercount that self-corrects on the
         // next presence event. Mirrors PuzzleDO's webSocketClose.
-        this.broadcast({type: "presence", connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1)});
+        this.broadcast({type: WsEventType.Presence, connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1)});
     }
 
     // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
@@ -633,7 +634,7 @@ export class GameDO extends DurableObject<Env> {
             .toArray()[0];
         if (!row) return;
         if (!row.user_id && (!token || token !== row.token)) return;
-        this.broadcast({type: "player_typing", index, player: row.name, color: row.color});
+        this.broadcast({type: GameWsEventType.PlayerTyping, index, player: row.name, color: row.color});
     }
 
     // --- internals -----------------------------------------------------------
@@ -646,7 +647,7 @@ export class GameDO extends DurableObject<Env> {
     private async beginPlaying(gameId: string): Promise<void> {
         this.ctx.storage.sql.exec("UPDATE game SET status = 'playing', lobby_ends_at = NULL");
         await this.activateRound(0);
-        this.broadcast({type: "state", ...this.readPublicState()});
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
         // Distinct write from markCatalogReady (already fired back in
         // setReady()'s caller, guess.queue.ts) — see that RPC's own doc
         // comment on `updatePlayStatus`. `.catch()`'d so a `browse` hiccup
@@ -680,7 +681,7 @@ export class GameDO extends DurableObject<Env> {
             timeLimitMs,
             index,
         );
-        this.broadcast({type: "round_status", index, status: RoundStatus.Active});
+        this.broadcast({type: GameWsEventType.RoundStatus, index, status: RoundStatus.Active});
         await this.scheduleNextAlarm();
     }
 
@@ -706,7 +707,7 @@ export class GameDO extends DurableObject<Env> {
             .toArray()[0]?.n;
         const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
         this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, index);
-        this.broadcast({type: "round_status", index, status});
+        this.broadcast({type: GameWsEventType.RoundStatus, index, status});
 
         const nextIndex = index + 1;
         if (nextIndex < ROUND_COUNT) {
@@ -757,7 +758,7 @@ export class GameDO extends DurableObject<Env> {
             }
         }
 
-        this.broadcast({type: "state", ...this.readPublicState()});
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
         // Mirrors PuzzleDO's solve/timeout: distinct from markCatalogReady
         // (fired back in guess.queue.ts) — the game's join/spectate window is
         // now closed for good. `.catch()`'d so a `browse` hiccup can't break

@@ -128,21 +128,38 @@ export const JoinResultSchema = z
 // named components — and therefore as generated model types — in this
 // service's spec/client for the FE to import and use.
 
+/** The `type` discriminator values for this game's own WS events — the
+ * shared ones (`status`, `player_joined`, `presence`, `pong`) live in
+ * `@game-worker/shared/ws-messages`'s `WsEventType` instead, since those are
+ * byte-for-byte identical to Piece Puzzle's. Together the two enums cover
+ * every member of `GameWsMessageSchema` below, and `guess.model.ts`
+ * broadcasts using these same values rather than raw string literals. */
+export const GameWsEventType = {
+    State: "state",
+    PromptsReady: "prompts_ready",
+    RoundStatus: "round_status",
+    RoundReady: "round_ready",
+    Guess: "guess",
+    Revealed: "revealed",
+    PlayerTyping: "player_typing",
+} as const;
+export type GameWsEventType = (typeof GameWsEventType)[keyof typeof GameWsEventType];
+
 /** A full state snapshot — sent on connect and after any status-changing
  * RPC. `.extend()` on an already-`.openapi()`-named schema (`Game`) makes
  * zod-to-openapi generate this as a composition over that component rather
  * than flattening/duplicating its fields. */
-export const GameWsStateMessageSchema = GamePublicSchema.extend({type: z.literal("state")}).openapi(
-    "GameWsStateMessage",
-);
+export const GameWsStateMessageSchema = GamePublicSchema.extend({
+    type: z.literal(GameWsEventType.State),
+}).openapi("GameWsStateMessage");
 
 export const GameWsPromptsReadyMessageSchema = z
-    .object({type: z.literal("prompts_ready"), count: z.number()})
+    .object({type: z.literal(GameWsEventType.PromptsReady), count: z.number()})
     .openapi("GameWsPromptsReadyMessage");
 
 export const GameWsRoundStatusMessageSchema = z
     .object({
-        type: z.literal("round_status"),
+        type: z.literal(GameWsEventType.RoundStatus),
         index: z.number(),
         status: RoundPublicSchema.shape.status,
         error: z.string().optional(),
@@ -150,12 +167,12 @@ export const GameWsRoundStatusMessageSchema = z
     .openapi("GameWsRoundStatusMessage");
 
 export const GameWsRoundReadyMessageSchema = z
-    .object({type: z.literal("round_ready"), index: z.number()})
+    .object({type: z.literal(GameWsEventType.RoundReady), index: z.number()})
     .openapi("GameWsRoundReadyMessage");
 
 export const GameWsGuessMessageSchema = z
     .object({
-        type: z.literal("guess"),
+        type: z.literal(GameWsEventType.Guess),
         index: z.number(),
         player: z.string(),
         color: z.string(),
@@ -166,7 +183,7 @@ export const GameWsGuessMessageSchema = z
 
 export const GameWsRevealedMessageSchema = z
     .object({
-        type: z.literal("revealed"),
+        type: z.literal(GameWsEventType.Revealed),
         index: z.number(),
         prompt: z.string(),
         player: z.string(),
@@ -177,7 +194,7 @@ export const GameWsRevealedMessageSchema = z
 /** Purely a live typing indicator — see guess.model.ts's `broadcastTyping`. */
 export const GameWsPlayerTypingMessageSchema = z
     .object({
-        type: z.literal("player_typing"),
+        type: z.literal(GameWsEventType.PlayerTyping),
         index: z.number(),
         player: z.string(),
         color: z.string(),
