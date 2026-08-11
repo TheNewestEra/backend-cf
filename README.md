@@ -99,14 +99,14 @@ that file has no binding of its own.
   auto-starts it after `LOBBY_COUNTDOWN_SECONDS` (30s), same alarm
   mechanism as `PuzzleDO`. Direct friend/group invites (`POST
   /api/invites`, served by `friends`) are only accepted pre-start
-  (`queued`/`generating_prompts`/`generating_images`/`waiting`) — `friends`
+  (`queued`/`generating`/`waiting`) — `friends`
   checks this through the `GuessService.getStatus` RPC call rather than a
   direct binding to this service's Durable Object namespace.
 - **Joining**: `POST /games/:id/join` registers a player — required before
   any `guess`/`reveal` call, and only possible while rounds are still
   generating or the lobby is open
-  (`queued`/`generating_prompts`/`generating_images`/`waiting`). Once the
-  game is `ready` it's playable, so joining then would be joining a game
+  (`queued`/`generating`/`waiting`). Once the
+  game is `playing` it's playable, so joining then would be joining a game
   already in progress rather than just spectating it — late arrivals can
   still watch over the WebSocket, but `join()` (and everything gated on
   having joined) throws. Logged-in players are identified by their session

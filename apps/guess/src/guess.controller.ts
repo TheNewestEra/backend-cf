@@ -150,7 +150,7 @@ guessRoutes.openapi(
     description:
       "Must be called (and must succeed) before submitting any guess or reveal — it's what distinguishes a " +
       "player from a spectator. Only possible while rounds are still generating or the lobby is open " +
-      "(`queued`/`generating_prompts`/`generating_images`/`waiting`); once the game is `ready` this returns " +
+      "(`queued`/`generating`/`waiting`); once the game is `playing` this returns " +
       "409 and late arrivals can only spectate over the WebSocket. Logged-in players are identified by their " +
       "session and keep their account color; `player` is only used for anonymous guests, who get back a " +
       "`token` they must resend with every guess/reveal, plus a freshly generated `color`.",

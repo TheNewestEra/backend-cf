@@ -47,18 +47,13 @@ interface ParticipantPublic extends Record<string, SqlStorageValue> {
 }
 
 /** Statuses in which a game hasn't started yet — the only window during
- * which joining is allowed. Once a game reaches `ready` its rounds are
+ * which joining is allowed. Once a game reaches `playing` its rounds are
  * playable, so letting someone join at that point would let them play a
  * game already in progress rather than just spectate it; `waiting` is the
  * lobby itself, still open to joiners same as Piece Puzzle's; `error` is a
  * dead end with nothing left to join (replay creates a fresh instance
  * instead). */
-const JOINABLE_STATUSES: readonly GameStatus[] = [
-  "queued",
-  "generating_prompts",
-  "generating_images",
-  "waiting",
-];
+const JOINABLE_STATUSES: readonly GameStatus[] = ["queued", "generating", "waiting"];
 
 /**
  * One instance per game (routed via `env.GAME_DO.getByName(gameId)`).
@@ -231,7 +226,7 @@ export class GameDO extends DurableObject<Env> {
 
   /** Registers a player as allowed to guess/reveal in this game, only while
    * a round hasn't been generated yet or the lobby is open (see
-   * JOINABLE_STATUSES) — once the game is `ready` this throws, so late
+   * JOINABLE_STATUSES) — once the game is `playing` this throws, so late
    * arrivals can still spectate over the WebSocket/`getState()` but can't
    * play. Logged-in users are upserted by `userId` (idempotent across
    * reconnects/tab refreshes, no token needed since the session re-proves
@@ -447,7 +442,7 @@ export class GameDO extends DurableObject<Env> {
    * Mirrors `PuzzleDO.beginPlaying()`. */
   private async beginPlaying(gameId: string): Promise<void> {
     await this.ctx.storage.deleteAlarm();
-    this.ctx.storage.sql.exec("UPDATE game SET status = 'ready', lobby_ends_at = NULL");
+    this.ctx.storage.sql.exec("UPDATE game SET status = 'playing', lobby_ends_at = NULL");
     this.broadcast({ type: "state", ...this.readPublicState() });
     // Distinct write from markCatalogReady (already fired back in
     // setReady()'s caller, guess.queue.ts) — see that RPC's own doc

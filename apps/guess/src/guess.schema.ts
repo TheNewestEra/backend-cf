@@ -20,7 +20,7 @@ export const GamePublicSchema = z
   .object({
     id: z.string(),
     theme: z.string().nullable(),
-    status: z.enum(["queued", "generating_prompts", "generating_images", "waiting", "ready", "error"]),
+    status: z.enum(["queued", "generating", "waiting", "playing", "error"]),
     error: z.string().optional(),
     rounds: z.array(RoundPublicSchema),
     lobbyRemainingMs: z

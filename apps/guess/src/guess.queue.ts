@@ -15,12 +15,14 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     const {gameId, theme} = message;
     const stub = env.GAME_DO.getByName(gameId);
 
-    await stub.setStatus("generating_prompts");
+    await stub.setStatus("generating");
     await env.BROWSE.markCatalogGenerating(gameId);
     const prompts = await generateRoundPrompts(env.AI, theme, ROUND_COUNT);
     await stub.setPrompts(prompts);
 
-    await stub.setStatus("generating_images");
+    // Still `generating` — per-round progress from here on is visible via
+    // each round's own pending/generating/ready/error status instead of a
+    // second top-level phase (mirrors Piece Puzzle's single `generating`).
     const results = await Promise.allSettled(
         prompts.map((prompt, index) => generateAndStoreImage(env, gameId, index, prompt)),
     );
