@@ -681,7 +681,12 @@ export class GameDO extends DurableObject<Env> {
             timeLimitMs,
             index,
         );
-        this.broadcast({type: GameWsEventType.RoundStatus, index, status: RoundStatus.Active});
+        this.broadcast({
+            type: GameWsEventType.RoundStatus,
+            index,
+            status: RoundStatus.Active,
+            remainingMs: timeLimitMs,
+        });
         await this.scheduleNextAlarm();
     }
 

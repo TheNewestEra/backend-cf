@@ -163,6 +163,7 @@ export const GameWsRoundStatusMessageSchema = z
         index: z.number(),
         status: RoundPublicSchema.shape.status,
         error: z.string().optional(),
+        remainingMs: z.number().optional(),
     })
     .openapi("GameWsRoundStatusMessage");
 
