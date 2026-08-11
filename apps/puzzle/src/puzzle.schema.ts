@@ -24,6 +24,18 @@ export const ParticipantPublicSchema = z
     .object({name: z.string(), color: z.string()})
     .openapi("Participant");
 
+/** A tile currently selected/highlighted by some participant — persisted
+ * (see puzzle.model.ts's `participants.selected_cell`), not just a live
+ * broadcast cue, so a client that reconnects mid-game (e.g. a page refresh)
+ * can rebuild the same "who's about to move what" picture from the state
+ * snapshot instead of just missing whatever it wasn't connected to see live.
+ * `participantId` (unlike `ParticipantPublicSchema`'s roster entries) is
+ * included here specifically so a reconnecting client can tell *its own*
+ * selection apart from everyone else's and restore it locally. */
+export const SelectionPublicSchema = z
+    .object({cell: z.number(), participantId: z.string(), player: z.string(), color: z.string()})
+    .openapi("Selection");
+
 export const PuzzlePublicSchema = z
     .object({
         id: z.string(),
@@ -42,6 +54,9 @@ export const PuzzlePublicSchema = z
         solvedBy: z.string().nullable(),
         connectedPlayers: z.number(),
         participants: z.array(ParticipantPublicSchema).openapi({description: "Everyone who has joined, in join order"}),
+        selections: z
+            .array(SelectionPublicSchema)
+            .openapi({description: "Every tile currently selected by a participant, for state restore on (re)connect"}),
     })
     .openapi("Puzzle");
 
@@ -96,6 +111,7 @@ export const PuzzleWsEventType = {
     Solved: "solved",
     Move: "move",
     TileSelected: "tile_selected",
+    TileDeselected: "tile_deselected",
     Timeout: "timeout",
     JoinResult: "join_result",
     Error: "error",
@@ -131,8 +147,11 @@ export const PuzzleWsMoveMessageSchema = z
     })
     .openapi("PuzzleWsMoveMessage");
 
-/** Purely a live "about to move this tile" cue — see puzzle.model.ts's
- * `selectTile`. */
+/** A live "about to move this tile" cue — see puzzle.model.ts's
+ * `selectTile`. Also persisted (`participants.selected_cell`), so a
+ * reconnecting client sees it again in the next `state` snapshot's
+ * `selections` (see `SelectionPublicSchema`) even if it missed this
+ * broadcast. */
 export const PuzzleWsTileSelectedMessageSchema = z
     .object({
         type: z.literal(PuzzleWsEventType.TileSelected),
@@ -141,6 +160,15 @@ export const PuzzleWsTileSelectedMessageSchema = z
         color: z.string(),
     })
     .openapi("PuzzleWsTileSelectedMessage");
+
+/** The flip side of `PuzzleWsTileSelectedMessageSchema` — broadcast when a
+ * participant clears their own selection (clicking the same tile again) or
+ * when whatever they'd selected gets superseded (picking a different tile,
+ * or that cell getting consumed by a move) — see puzzle.model.ts's
+ * `deselectTile()`/`selectTile()`/`swapTiles()`. */
+export const PuzzleWsTileDeselectedMessageSchema = z
+    .object({type: z.literal(PuzzleWsEventType.TileDeselected), cell: z.number()})
+    .openapi("PuzzleWsTileDeselectedMessage");
 
 export const PuzzleWsTimeoutMessageSchema = z
     .object({type: z.literal(PuzzleWsEventType.Timeout)})
@@ -163,7 +191,7 @@ export const PuzzleWsJoinResultMessageSchema = JoinResultSchema.extend({
 export const PuzzleWsErrorMessageSchema = z
     .object({
         type: z.literal(PuzzleWsEventType.Error),
-        action: z.enum(["join", "move", "select", "unknown"]),
+        action: z.enum(["join", "move", "select", "deselect", "unknown"]),
         error: z.string(),
     })
     .openapi("PuzzleWsErrorMessage");
@@ -178,6 +206,7 @@ export const PuzzleWsMessageSchema = z
         PuzzleWsSolvedMessageSchema,
         PuzzleWsMoveMessageSchema,
         PuzzleWsTileSelectedMessageSchema,
+        PuzzleWsTileDeselectedMessageSchema,
         PuzzleWsTimeoutMessageSchema,
         PuzzleWsJoinResultMessageSchema,
         PuzzleWsErrorMessageSchema,
@@ -200,17 +229,29 @@ export const PuzzleWsClientEventType = {
     Join: "join",
     Move: "move",
     Select: "select",
+    Deselect: "deselect",
 } as const;
 export type PuzzleWsClientEventType = (typeof PuzzleWsClientEventType)[keyof typeof PuzzleWsClientEventType];
 
 /** Was POST /puzzles/:id/join's body. `player` is only used for anonymous
  * guests — a logged-in caller is identified by the session resolved once at
  * WebSocket-upgrade time (see puzzle.model.ts's `fetch()`), same as it used
- * to be resolved per-request over HTTP. Reply comes back as a
- * `PuzzleWsJoinResultMessage` (success) or `PuzzleWsErrorMessage` (already
- * started), addressed only to this socket. */
+ * to be resolved per-request over HTTP. `color` is also guest-only: lets an
+ * anonymous caller bring whatever color its own UI already shows for "you"
+ * (e.g. a color picked client-side before ever joining a game) instead of
+ * always getting a server-generated one — ignored for logged-in callers,
+ * whose account color is always authoritative (see puzzle.model.ts's
+ * `join()`). Must look like `generateColor()`'s own output
+ * (`#`+6 hex digits) or it's discarded in favor of a generated one, same as
+ * omitting it entirely. Reply comes back as a `PuzzleWsJoinResultMessage`
+ * (success) or `PuzzleWsErrorMessage` (already started), addressed only to
+ * this socket. */
 export const PuzzleWsJoinRequestSchema = z
-    .object({type: z.literal(PuzzleWsClientEventType.Join), player: z.string().max(MAX_PLAYER_LENGTH).optional()})
+    .object({
+        type: z.literal(PuzzleWsClientEventType.Join),
+        player: z.string().max(MAX_PLAYER_LENGTH).optional(),
+        color: z.string().optional(),
+    })
     .openapi("PuzzleWsJoinRequest");
 
 /** Was POST /puzzles/:id/move's body. `token` is only needed for anonymous
@@ -239,9 +280,28 @@ export const PuzzleWsSelectRequestSchema = z
     })
     .openapi("PuzzleWsSelectRequest");
 
+/** Clears whatever tile this participant currently has selected — the WS
+ * equivalent of clicking an already-selected tile again. No `cell` field:
+ * a participant only ever has one active selection at a time (see
+ * puzzle.model.ts's `participants.selected_cell`), so the server already
+ * knows which cell to clear and broadcasts a `PuzzleWsTileDeselectedMessage`
+ * naming it. A no-op if nothing's currently selected. */
+export const PuzzleWsDeselectRequestSchema = z
+    .object({
+        type: z.literal(PuzzleWsClientEventType.Deselect),
+        participantId: z.string(),
+        token: z.string().optional(),
+    })
+    .openapi("PuzzleWsDeselectRequest");
+
 /** Every message shape `PuzzleDO` ever accepts over its WebSocket
  * (`"ping"` is handled separately as a bare string — see
  * puzzle.model.ts's `webSocketMessage()` — and isn't part of this union). */
 export const PuzzleWsClientMessageSchema = z
-    .discriminatedUnion("type", [PuzzleWsJoinRequestSchema, PuzzleWsMoveRequestSchema, PuzzleWsSelectRequestSchema])
+    .discriminatedUnion("type", [
+        PuzzleWsJoinRequestSchema,
+        PuzzleWsMoveRequestSchema,
+        PuzzleWsSelectRequestSchema,
+        PuzzleWsDeselectRequestSchema,
+    ])
     .openapi("PuzzleWsClientMessage");

@@ -1,6 +1,6 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
-import {generateColor} from "@game-worker/shared/color";
+import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
@@ -53,9 +53,21 @@ interface ParticipantRow extends Record<string, SqlStorageValue> {
     token: string | null;
     color: string;
     joined_at: number;
+    /** The cell this participant currently has selected/highlighted, or
+     * `null` if none — see `selectTile()`/`deselectTile()`. Persisted (not
+     * just broadcast) so a reconnecting client can restore it from the next
+     * `state` snapshot's `selections` (see `readPublicState()`). */
+    selected_cell: number | null;
 }
 
 interface ParticipantPublic extends Record<string, SqlStorageValue> {
+    name: string;
+    color: string;
+}
+
+interface SelectionRow extends Record<string, SqlStorageValue> {
+    cell: number;
+    participant_id: string;
     name: string;
     color: string;
 }
@@ -226,22 +238,31 @@ export class PuzzleDO extends DurableObject<Env> {
      * for a `join` client message, using the identity resolved once at that
      * socket's `fetch()`/upgrade time (see `ConnectionIdentity`). Logged-in
      * users are upserted by `userId` (idempotent across reconnects/tab
-     * refreshes) and keep their account color; anonymous guests get a fresh
-     * bearer token they must resend with every `move`/`select` message
-     * (since a free-text name alone isn't a real identity, and a new
-     * WebSocket connection has no memory of a previous one's identity) and a
-     * freshly generated color. Either way, the color is returned so the
+     * refreshes) and keep their account color (never `requestedColor` — an
+     * account's color is authoritative everywhere else in the app, so
+     * letting it be overridden per-puzzle would be surprising); anonymous
+     * guests get a fresh bearer token they must resend with every `move`/
+     * `select`/`deselect` message (since a free-text name alone isn't a real
+     * identity, and a new WebSocket connection has no memory of a previous
+     * one's identity) and either their own `requestedColor` (if it's a
+     * well-formed hex color — see `isValidHexColor`) or, absent that, a
+     * freshly generated one. Either way, the color is returned so the
      * caller's own client knows what to render before the next broadcast. */
     async join(
         userId: string | null,
         playerName: string,
         userColor: string | null,
+        requestedColor: string | null,
     ): Promise<{ participantId: string; token: string | null; color: string }> {
         const row = this.requireRow();
         if (!JOINABLE_STATUSES.includes(row.status)) {
             throw new Error("puzzle has already started; you can spectate but not join");
         }
-        const color = userColor ?? generateColor();
+        const color = userId
+            ? (userColor ?? generateColor())
+            : requestedColor && isValidHexColor(requestedColor)
+              ? requestedColor
+              : generateColor();
 
         if (userId) {
             this.ctx.storage.sql.exec(
@@ -306,6 +327,21 @@ export class PuzzleDO extends DurableObject<Env> {
         const board: number[] = JSON.parse(row.board);
         [board[cellA], board[cellB]] = [board[cellB]!, board[cellA]!];
 
+        // Whoever had cellA/cellB selected (typically just the mover, whose
+        // own selectedCell fed one half of this swap) no longer has anything
+        // meaningful selected there — the tile that was under it just moved.
+        // Cleared unconditionally rather than only for the mover: the `move`
+        // broadcast below already tells every connected client to drop these
+        // two cells from their local selection view (see the FE's
+        // `clearTileSelections`), so this just keeps the persisted picture
+        // (`readPublicState()`'s `selections`) in sync with that for anyone
+        // who reconnects afterward.
+        this.ctx.storage.sql.exec(
+            "UPDATE participants SET selected_cell = NULL WHERE selected_cell IN (?, ?)",
+            cellA,
+            cellB,
+        );
+
         const solved = board.every((tile, cell) => tile === cell);
 
         if (solved) {
@@ -343,13 +379,17 @@ export class PuzzleDO extends DurableObject<Env> {
         return {status: GameSessionStatus.Playing, board, solved: false, score: null};
     }
 
-    /** Broadcasts that a player has selected/highlighted a block, before
-     * they've picked its swap partner — purely a live UX cue (no swap
-     * happens here; see `swapTiles()` for the actual move), so other
+    /** Records and broadcasts that a player has selected/highlighted a
+     * block, before they've picked its swap partner — a live UX cue (no
+     * swap happens here; see `swapTiles()` for the actual move), so other
      * connected clients can see who's about to move which tile and in what
-     * color. Not persisted: a reconnecting client just won't see stale
-     * selections, which is preferable to a selection outliving the player's
-     * attention. */
+     * color. Persisted (`participants.selected_cell`), unlike the old
+     * HTTP-only version of this action, specifically so a client that
+     * reconnects (e.g. a page refresh) can restore the same picture from
+     * the next `state` snapshot instead of just missing it. A participant
+     * only ever has one active selection: picking a new cell while another
+     * is still selected replaces it, broadcasting a `tile_deselected` for
+     * the old one first so everyone else's view stays consistent. */
     async selectTile(
         participantId: string,
         token: string | null,
@@ -365,12 +405,33 @@ export class PuzzleDO extends DurableObject<Env> {
             throw new Error("invalid cell index");
         }
 
+        if (participant.selectedCell !== null && participant.selectedCell !== cell) {
+            this.broadcast({type: PuzzleWsEventType.TileDeselected, cell: participant.selectedCell});
+        }
+
+        this.ctx.storage.sql.exec("UPDATE participants SET selected_cell = ? WHERE id = ?", cell, participantId);
         this.broadcast({
             type: PuzzleWsEventType.TileSelected,
             cell,
             player: participant.name,
             color: participant.color
         });
+    }
+
+    /** The flip side of `selectTile()` — clears this participant's current
+     * selection (if any) and broadcasts a `tile_deselected` naming it, so
+     * every other connected client drops the highlight too. A no-op if
+     * nothing's currently selected, same idea as `webSocketClose()`
+     * tolerating a socket that was never really tracked. */
+    async deselectTile(participantId: string, token: string | null, userId: string | null): Promise<void> {
+        const participant = this.requireParticipant(participantId, token, userId);
+        const row = this.requireRow();
+        if (row.status !== GameSessionStatus.Playing) throw new Error("puzzle is not in progress");
+
+        if (participant.selectedCell === null) return;
+
+        this.ctx.storage.sql.exec("UPDATE participants SET selected_cell = NULL WHERE id = ?", participantId);
+        this.broadcast({type: PuzzleWsEventType.TileDeselected, cell: participant.selectedCell});
     }
 
     // --- RPC: player interaction ---------------------------------------------
@@ -440,7 +501,7 @@ export class PuzzleDO extends DurableObject<Env> {
                     return;
                 }
                 try {
-                    const joined = await this.join(identity.userId, player, identity.color);
+                    const joined = await this.join(identity.userId, player, identity.color, data.color ?? null);
                     this.send(ws, {type: PuzzleWsEventType.JoinResult, ...joined});
                 } catch (err) {
                     // join() only ever throws the "already started" case —
@@ -476,6 +537,16 @@ export class PuzzleDO extends DurableObject<Env> {
                 } catch (err) {
                     const errorMessage = err instanceof Error ? err.message : "select rejected";
                     this.send(ws, {type: PuzzleWsEventType.Error, action: "select", error: errorMessage});
+                }
+                return;
+            }
+            case PuzzleWsClientEventType.Deselect: {
+                const {participantId, token} = data;
+                try {
+                    await this.deselectTile(participantId, token ?? null, identity.userId);
+                } catch (err) {
+                    const errorMessage = err instanceof Error ? err.message : "deselect rejected";
+                    this.send(ws, {type: PuzzleWsEventType.Error, action: "deselect", error: errorMessage});
                 }
                 return;
             }
@@ -571,7 +642,9 @@ export class PuzzleDO extends DurableObject<Env> {
                 joined_at
                 INTEGER
                 NOT
-                NULL
+                NULL,
+                selected_cell
+                INTEGER
             );
         `);
         // `color` was added after some DO instances already had this table —
@@ -584,23 +657,34 @@ export class PuzzleDO extends DurableObject<Env> {
         } catch {
             // Column already exists on this instance — nothing to do.
         }
+        // Same story for `selected_cell`, added once selection started being
+        // persisted (see `selectTile()`/`deselectTile()`) instead of living
+        // purely in the broadcast. `NULL` default is implicit and correct
+        // here — a pre-existing participant obviously has nothing selected.
+        try {
+            this.ctx.storage.sql.exec("ALTER TABLE participants ADD COLUMN selected_cell INTEGER");
+        } catch {
+            // Column already exists on this instance — nothing to do.
+        }
     }
 
     /** Resolves and authorizes a participant: logged-in callers must be
      * signed in as the same user who joined; anonymous callers must present
      * the token issued at join time. Throws `Error("forbidden: ...")` for
      * either failure — `webSocketMessage()` (the sole caller, for `move`/
-     * `select` client messages) turns that into a `PuzzleWsErrorMessage`
-     * addressed to the sending socket, same idea as the `hostActionError`
-     * (shared/http-exceptions.ts) mapping to a 403 that the still-HTTP
-     * host-only actions below use — someone who never joined can still
-     * spectate, they just can't act. Returns the joined display name/color
-     * to record on the move and broadcast alongside it. */
+     * `select`/`deselect` client messages) turns that into a
+     * `PuzzleWsErrorMessage` addressed to the sending socket, same idea as
+     * the `hostActionError` (shared/http-exceptions.ts) mapping to a 403
+     * that the still-HTTP host-only actions below use — someone who never
+     * joined can still spectate, they just can't act. Returns the joined
+     * display name/color (to record on the move and broadcast alongside it)
+     * plus the cell they currently have selected, if any (see
+     * `selectTile()`/`deselectTile()`). */
     private requireParticipant(
         participantId: string,
         token: string | null,
         userId: string | null,
-    ): { name: string; color: string } {
+    ): { name: string; color: string; selectedCell: number | null } {
         const row = this.ctx.storage.sql
             .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
             .toArray()[0];
@@ -610,7 +694,7 @@ export class PuzzleDO extends DurableObject<Env> {
         } else if (!token || token !== row.token) {
             throw new Error("forbidden: invalid participant token");
         }
-        return {name: row.name, color: row.color};
+        return {name: row.name, color: row.color, selectedCell: row.selected_cell};
     }
 
     // --- internals -----------------------------------------------------------
@@ -676,6 +760,7 @@ export class PuzzleDO extends DurableObject<Env> {
                 solvedBy: null,
                 connectedPlayers: this.ctx.getWebSockets().length,
                 participants: [],
+                selections: [],
             };
         }
 
@@ -689,6 +774,14 @@ export class PuzzleDO extends DurableObject<Env> {
         // the lobby window.
         const participants = this.ctx.storage.sql
             .exec<ParticipantPublic>("SELECT name, color FROM participants ORDER BY joined_at ASC")
+            .toArray();
+        // Only ever non-empty while `playing` (selectTile()/deselectTile()
+        // both require it), but read unconditionally rather than gated on
+        // status — cheap, and one less thing that could drift out of sync.
+        const selections = this.ctx.storage.sql
+            .exec<SelectionRow>(
+                "SELECT selected_cell AS cell, id AS participant_id, name, color FROM participants WHERE selected_cell IS NOT NULL",
+            )
             .toArray();
 
         return {
@@ -708,6 +801,12 @@ export class PuzzleDO extends DurableObject<Env> {
             solvedBy: row.solved_by,
             connectedPlayers: this.ctx.getWebSockets().length,
             participants: participants.map((p) => ({name: p.name, color: p.color})),
+            selections: selections.map((s) => ({
+                cell: s.cell,
+                participantId: s.participant_id,
+                player: s.name,
+                color: s.color,
+            })),
         };
     }
 

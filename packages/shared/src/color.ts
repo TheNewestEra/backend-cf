@@ -4,6 +4,8 @@ export function generateColor(): string {
     return hslToHex(hue, 65, 55);
 }
 
+export const isValidHexColor = (color: string): boolean => /^#[0-9a-f]{6}$/i.test(color);
+
 function hslToHex(h: number, s: number, l: number): string {
     const sFrac = s / 100;
     const lFrac = l / 100;
