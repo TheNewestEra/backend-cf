@@ -12,12 +12,19 @@ import {
  * same enum object, so the two games' status values can't drift apart. */
 export const GameStatusSchema = z.nativeEnum(GameSessionStatus).openapi("GameStatus");
 
-/** A round's own progress, independent of the game's overall `status` —
- * see guess.model.ts's `ROUND_TERMINAL_STATUSES`. */
+/** A round's own progress, independent of the game's overall `status`.
+ * Rounds are played strictly sequentially once the game starts: `Ready`
+ * means the image finished generating but it isn't this round's turn yet
+ * (not guessable, no timer running); `Active` means it's the one current
+ * round open for guessing right now (see guess.model.ts's `activateRound`/
+ * `resolveCurrentRound` — at most one round is ever `Active` at a time).
+ * Full lifecycle: `Pending → Generating → Ready → Active → Complete|Timeout`,
+ * with `Error` as generation's own dead-end branch. */
 export const RoundStatus = {
   Pending: "pending",
   Generating: "generating",
   Ready: "ready",
+  Active: "active",
   Error: "error",
   Complete: "complete",
   Timeout: "timeout",
@@ -25,11 +32,27 @@ export const RoundStatus = {
 export type RoundStatus = (typeof RoundStatus)[keyof typeof RoundStatus];
 export const RoundStatusSchema = z.nativeEnum(RoundStatus).openapi("RoundStatus");
 
+/** Statuses at which a round's image/prompt are safe to expose — the
+ * spoiler gate: hidden while merely `Ready` (generated but not yet its
+ * turn), visible from the moment it goes `Active` and forever after once
+ * resolved, including for post-game review. Shared by guess.model.ts's
+ * `revealRound()` and guess.controller.ts's image route so the two can't
+ * drift on what counts as "visible". */
+export const ROUND_VISIBLE_STATUSES: readonly RoundStatus[] = [
+  RoundStatus.Active,
+  RoundStatus.Complete,
+  RoundStatus.Timeout,
+];
+
 export const RoundPublicSchema = z
   .object({
     index: z.number(),
     status: RoundStatusSchema,
     error: z.string().optional(),
+    remainingMs: z
+      .number()
+      .nullable()
+      .openapi({ description: "ms left to guess this round; null unless this is the currently `active` round" }),
   })
   .openapi("Round");
 
@@ -57,6 +80,10 @@ export const GamePublicSchema = z
     status: GameStatusSchema,
     error: z.string().optional(),
     rounds: z.array(RoundPublicSchema),
+    currentRound: z
+      .number()
+      .nullable()
+      .openapi({ description: "Index of the round currently open for guessing; null before play starts or after the game has finished" }),
     lobbyRemainingMs: z
       .number()
       .nullable()

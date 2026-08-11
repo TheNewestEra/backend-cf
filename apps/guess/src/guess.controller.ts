@@ -5,7 +5,7 @@ import { immutableImageResponse } from "@game-worker/shared/images";
 import { currentUser } from "./auth.middleware";
 import { HostBodySchema, imageKeyFor, MAX_PLAYER_LENGTH, MAX_THEME_LENGTH, ROUND_COUNT } from "./guess.constants";
 import type { GuessQueueMessage } from "./guess.queue";
-import { GamePublicSchema, GuessResultSchema, JoinResultSchema } from "./guess.schema";
+import { GamePublicSchema, GuessResultSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES } from "./guess.schema";
 
 export const guessRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -217,7 +217,10 @@ guessRoutes.openapi(
       200: { description: "Guess result", content: { "application/json": { schema: GuessResultSchema } } },
       400: { description: "Missing/invalid fields", content: { "application/json": { schema: ErrorSchema } } },
       403: { description: "Didn't join this game before it started", content: { "application/json": { schema: ErrorSchema } } },
-      409: { description: "Round not ready yet", content: { "application/json": { schema: ErrorSchema } } },
+      409: {
+        description: "Round isn't the currently active one, or you already answered it correctly",
+        content: { "application/json": { schema: ErrorSchema } },
+      },
     },
   }),
   async (c) => {
@@ -262,7 +265,7 @@ guessRoutes.openapi(
     responses: {
       200: { description: "Revealed prompt", content: { "application/json": { schema: z.object({ prompt: z.string() }) } } },
       403: { description: "Didn't join this game before it started", content: { "application/json": { schema: ErrorSchema } } },
-      409: { description: "Round not ready yet", content: { "application/json": { schema: ErrorSchema } } },
+      409: { description: "No such round, or it isn't visible yet (not the active round or a past one)", content: { "application/json": { schema: ErrorSchema } } },
     },
   }),
   async (c) => {
@@ -273,7 +276,7 @@ guessRoutes.openapi(
     const stub = c.env.GAME_DO.getByName(id);
     try {
       const prompt = await stub.revealRound(index, participantId, token ?? null, user?.id ?? null);
-      if (!prompt) return c.json({ error: "round not ready yet" }, 409);
+      if (!prompt) return c.json({ error: "round not visible yet" }, 409);
       return c.json({ prompt }, 200);
     } catch (err) {
       const { status, body } = hostActionError(err);
@@ -289,8 +292,11 @@ guessRoutes.openapi(
     tags: ["Guess the Prompt"],
     summary: "Get a round's generated image",
     description:
-      "Raw image bytes, not JSON — the same image a round's public state points at once it's `ready`. " +
-      "Immutable/long-cached once served, since a round's image never changes after it's generated.",
+      "Raw image bytes, not JSON — the same image a round's public state points at once that round becomes " +
+      "the active one. Spoiler-gated until then: a round not yet its turn 404s even once its image exists, " +
+      "same as one that hasn't generated yet — visible again once it's the current round, and stays visible " +
+      "forever after (including once the game finishes, for post-game review). Immutable/long-cached once " +
+      "served, since a round's image never changes after it's generated.",
     request: {
       params: z.object({
         id: z.string(),
@@ -306,13 +312,20 @@ guessRoutes.openapi(
         description: "Round image",
         content: { "image/png": { schema: z.string().openapi({ format: "binary" }) } },
       },
-      404: { description: "No such game/round, or the image hasn't generated yet" },
+      404: { description: "No such game/round, the image hasn't generated yet, or it isn't this round's turn yet" },
     },
   }),
   async (c) => {
     const { id: gameId, index: rawIndex } = c.req.valid("param");
     const index = Number(rawIndex);
     if (!Number.isInteger(index) || index < 0 || index >= ROUND_COUNT) return c.notFound();
+
+    // Spoiler gate: only serve a round's image once it's been played (the
+    // active round, or one that's already resolved) — never a round that's
+    // merely generated and waiting its turn. See ROUND_VISIBLE_STATUSES.
+    const state = await c.env.GAME_DO.getByName(gameId).getState();
+    const round = state.rounds[index];
+    if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return c.notFound();
 
     const object = await c.env.IMAGES.get(imageKeyFor(gameId, index));
     if (!object) return c.notFound();

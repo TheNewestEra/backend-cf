@@ -4,23 +4,22 @@ import { generateColor } from "@game-worker/shared/color";
 import { GameSessionStatus } from "@game-worker/shared/game-session-status";
 import { lobbyEndsAt, lobbyRemainingMs } from "@game-worker/shared/lobby";
 import { isGuessCorrect } from "./guess-matching";
-import { RoundStatus } from "./guess.schema";
+import { ROUND_VISIBLE_STATUSES, RoundStatus } from "./guess.schema";
 import type { GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema } from "./guess.schema";
-import { GUESS_MAX_SCORE, GUESS_MIN_SCORE, ROUND_COUNT, guessTimeLimitSeconds } from "./guess.constants";
+import {
+  DEFAULT_GUESS_TIME_LIMIT_SECONDS,
+  GUESS_MAX_SCORE,
+  GUESS_MIN_SCORE,
+  ROUND_COUNT,
+  guessTimeLimitSeconds,
+} from "./guess.constants";
 
-export { RoundStatus };
+export { ROUND_VISIBLE_STATUSES, RoundStatus };
 export type GameStatus = z.infer<typeof GamePublicSchema>["status"];
 export type GamePublic = z.infer<typeof GamePublicSchema>;
 export type GuessResult = z.infer<typeof GuessResultSchema>;
 export type GameResult = z.infer<typeof GameResultSchema>;
 export type GameWsMessage = z.infer<typeof GameWsMessageSchema>;
-
-/** Round statuses that no longer accept guesses — reached once a round's
- * own guess-timeout deadline passes (see `resolveDueRounds()`), never
- * reverted. A round can also stall in `error` (image generation failed),
- * but that always takes the whole game to `error` too (see guess.queue.ts),
- * so it's never in play long enough to need a deadline. */
-const ROUND_TERMINAL_STATUSES: readonly RoundStatus[] = [RoundStatus.Complete, RoundStatus.Timeout];
 
 // The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
 // requires its row type to satisfy.
@@ -40,6 +39,8 @@ interface RoundRow extends Record<string, SqlStorageValue> {
   status: RoundStatus;
   image_key: string | null;
   ready_at: number | null;
+  started_at: number | null;
+  time_limit_ms: number | null;
   error: string | null;
 }
 
@@ -76,6 +77,14 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * pushes live progress to every connected WebSocket as the queue consumer
  * calls its RPC methods.
  *
+ * Rounds are generated up front (all `ROUND_COUNT` in parallel — see
+ * guess.queue.ts) but played strictly sequentially: once play begins, round
+ * 0 is the only one `Active` (open for guessing); each subsequent round only
+ * opens once the previous one resolves, either because every joined
+ * participant answered it correctly (early advance) or its own guess-timeout
+ * fired — see `activateRound()`/`resolveCurrentRound()`. At most one round is
+ * ever `Active` at a time.
+ *
  * Mirrors `apps/puzzle`'s `PuzzleDO` lobby shape: once every round's image
  * is ready, the game sits in a `waiting` room (see `setReady()`) instead of
  * starting instantly, so players can gather before play begins — either
@@ -108,6 +117,8 @@ export class GameDO extends DurableObject<Env> {
         status TEXT NOT NULL DEFAULT 'pending',
         image_key TEXT,
         ready_at INTEGER,
+        started_at INTEGER,
+        time_limit_ms INTEGER,
         error TEXT
       );
       CREATE TABLE IF NOT EXISTS guesses (
@@ -140,6 +151,8 @@ export class GameDO extends DurableObject<Env> {
       "ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'",
       "ALTER TABLE guesses ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''",
       "ALTER TABLE guesses ADD COLUMN score INTEGER",
+      "ALTER TABLE rounds ADD COLUMN started_at INTEGER",
+      "ALTER TABLE rounds ADD COLUMN time_limit_ms INTEGER",
     ]) {
       try {
         this.ctx.storage.sql.exec(stmt);
@@ -210,6 +223,11 @@ export class GameDO extends DurableObject<Env> {
     this.broadcast({ type: "round_status", index, status, error });
   }
 
+  /** Image done generating — the round is now `ready`, i.e. queued up
+   * waiting its turn. Not guessable yet and no timer runs from here:
+   * `ready_at` is purely informational (when generation finished); the
+   * round only starts counting down once it actually becomes the current
+   * round (see `activateRound()`, which stamps `started_at`). */
   async setRoundImage(index: number, imageKey: string): Promise<void> {
     this.ctx.storage.sql.exec(
       "UPDATE rounds SET image_key = ?, status = 'ready', ready_at = ?, error = NULL WHERE idx = ?",
@@ -218,12 +236,6 @@ export class GameDO extends DurableObject<Env> {
       index,
     );
     this.broadcast({ type: "round_ready", index });
-    // A round's guess-timeout deadline is measured from its own `ready_at`
-    // (same clock `scoreForGuess()` decays against), so it starts counting
-    // the instant this round is guessable — independent of whether the
-    // game itself has left `generating` yet. Rearm in case this is now the
-    // soonest pending deadline.
-    await this.scheduleNextAlarm();
   }
 
   /** Every round's image is ready — open the waiting room rather than
@@ -334,10 +346,16 @@ export class GameDO extends DurableObject<Env> {
    * per player as a single total when the game finishes (see
    * `finalizeGame()`) rather than per guess. `participantId`/`token` prove
    * the caller joined before the game started — see `join()` and
-   * `requireParticipant()`. Rejects once the round has resolved to
-   * `complete`/`timeout` (its guess-timeout deadline passed — see
-   * `resolveDueRounds()`), same "round not ready" error a pre-generation
-   * guess would get. */
+   * `requireParticipant()`. Only the current round (`RoundStatus.Active`)
+   * accepts guesses — a not-yet-active, already-resolved, or unknown index
+   * all reject the same way. Wrong guesses can be resubmitted any number of
+   * times; a correct one locks the participant out of guessing this round
+   * again (enforced below) — once every joined participant has answered
+   * correctly, the round advances immediately via `resolveCurrentRound()`
+   * rather than waiting out its timer. Scores off `round.time_limit_ms` —
+   * the limit stamped by `activateRound()` when this round began, not
+   * whatever Flagship says right now — so a flag flip mid-round can't
+   * retroactively change what this guess is worth. */
   async submitGuess(
     index: number,
     participantId: string,
@@ -347,15 +365,27 @@ export class GameDO extends DurableObject<Env> {
   ): Promise<GuessResult> {
     const participant = this.requireParticipant(participantId, token, userId);
 
+    const gameRow = this.requireGameRow();
     const round = this.ctx.storage.sql
       .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
       .toArray()[0];
-    if (!round || round.status !== RoundStatus.Ready || !round.prompt) {
-      throw new Error("round not ready");
+    if (!round || round.status !== RoundStatus.Active || !round.prompt) {
+      throw new Error("round not active");
+    }
+
+    const alreadyCorrect = this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND participant_id = ? AND correct = 1",
+        index,
+        participantId,
+      )
+      .toArray()[0]?.n;
+    if (alreadyCorrect && alreadyCorrect > 0) {
+      throw new Error("you already answered this round correctly");
     }
 
     const correct = isGuessCorrect(guess, round.prompt);
-    const score = correct ? scoreForGuess(round.ready_at, await guessTimeLimitSeconds(this.env)) : null;
+    const score = correct ? scoreForGuess(round.started_at, round.time_limit_ms) : null;
 
     this.ctx.storage.sql.exec(
       "INSERT INTO guesses (round_idx, participant_id, player, guess, correct, score, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -377,16 +407,37 @@ export class GameDO extends DurableObject<Env> {
       score,
     });
 
+    if (correct) {
+      const participantCount = this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM participants")
+        .toArray()[0]?.n ?? 0;
+      const correctCount = this.ctx.storage.sql
+        .exec<{ n: number }>(
+          "SELECT COUNT(DISTINCT participant_id) AS n FROM guesses WHERE round_idx = ? AND correct = 1",
+          index,
+        )
+        .toArray()[0]?.n ?? 0;
+      if (participantCount > 0 && correctCount >= participantCount) {
+        // Everyone's answered correctly — advance now rather than waiting
+        // out the timer.
+        await this.resolveCurrentRound(gameRow.id, index);
+      }
+    }
+
     return { correct, prompt: correct ? round.prompt : null, score };
   }
 
+  /** Reveals a round's prompt without guessing — gated the same as guessing
+   * itself against spoilers (see `ROUND_VISIBLE_STATUSES`): only the
+   * current round or one that's already resolved can be revealed, never a
+   * round still queued up waiting its turn. */
   async revealRound(index: number, participantId: string, token: string | null, userId: string | null): Promise<string | null> {
     const participant = this.requireParticipant(participantId, token, userId);
 
     const round = this.ctx.storage.sql
       .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
       .toArray()[0];
-    if (!round?.prompt) return null;
+    if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return null;
     this.broadcast({ type: "revealed", index, prompt: round.prompt, player: participant.name, color: participant.color });
     return round.prompt;
   }
@@ -412,15 +463,15 @@ export class GameDO extends DurableObject<Env> {
     this.broadcast({ type: "player_typing", index, player: row.name, color: row.color });
   }
 
-  // --- alarm: drives the lobby's auto-start, then every round's own
-  // guess-timeout -----------------------------------------------------------
+  // --- alarm: drives the lobby's auto-start, then the current round's own
+  // guess-timeout -------------------------------------------------------------
 
   /** A DO has exactly one alarm slot, shared here by two different
    * deadlines: the lobby countdown (`waiting` → `playing`) and, once
-   * playable, each round's own guess-timeout — `scheduleNextAlarm()`
-   * always arms it for whichever is soonest, so a single firing only ever
-   * needs to handle the one thing that's actually due; anything else
-   * still pending gets rearmed at the end. */
+   * playing, the single current round's own guess-timeout — at most one
+   * round is ever `Active` at a time (see the class doc comment), so
+   * there's only ever one round deadline to consider. `scheduleNextAlarm()`
+   * always arms it for whichever deadline is soonest. */
   async alarm(): Promise<void> {
     const row = this.requireGameRow();
 
@@ -429,13 +480,27 @@ export class GameDO extends DurableObject<Env> {
       return;
     }
 
-    if (row.status !== GameSessionStatus.Waiting && row.status !== GameSessionStatus.Playing) {
-      // Game already moved on to a terminal status (error, or resolved by
-      // an earlier tick) before this stale alarm fired — nothing to do.
+    if (row.status !== GameSessionStatus.Playing) {
+      // Game already moved on to a terminal status (error, resolved by an
+      // earlier tick, or still waiting on a lobby deadline that isn't due
+      // yet) before this stale alarm fired — nothing to do.
       return;
     }
 
-    await this.resolveDueRounds(row.id);
+    const active = this.ctx.storage.sql
+      .exec<RoundRow>("SELECT * FROM rounds WHERE status = 'active' LIMIT 1")
+      .toArray()[0];
+    if (!active) return; // shouldn't happen while playing, but nothing to resolve
+
+    const limitMs = active.time_limit_ms ?? (await guessTimeLimitSeconds(this.env)) * 1000;
+    if (active.started_at === null || Date.now() < active.started_at + limitMs) {
+      // Stale/early firing (e.g. rearmed to a later deadline since this
+      // alarm was set) — rearm rather than resolving early.
+      await this.scheduleNextAlarm();
+      return;
+    }
+
+    await this.resolveCurrentRound(row.id, active.idx);
   }
 
   // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
@@ -484,14 +549,13 @@ export class GameDO extends DurableObject<Env> {
   // --- internals -----------------------------------------------------------
 
   /** Shared by the host's "start now" and the lobby alarm's auto-start.
-   * Mirrors `PuzzleDO.beginPlaying()`. */
+   * Mirrors `PuzzleDO.beginPlaying()`. Activates round 0 — the only round
+   * that's ever open for guessing the instant play begins; every round
+   * after it opens only once its predecessor resolves (see
+   * `resolveCurrentRound()`). */
   private async beginPlaying(gameId: string): Promise<void> {
     this.ctx.storage.sql.exec("UPDATE game SET status = 'playing', lobby_ends_at = NULL");
-    // The lobby alarm just consumed itself firing — rearm for whatever
-    // round guess-timeout is soonest now that the game is `playing` (some
-    // may already be overdue if the lobby ran long, which resolves them
-    // on the very next tick rather than losing the deadline).
-    await this.scheduleNextAlarm();
+    await this.activateRound(0);
     this.broadcast({ type: "state", ...this.readPublicState() });
     // Distinct write from markCatalogReady (already fired back in
     // setReady()'s caller, guess.queue.ts) — see that RPC's own doc
@@ -504,36 +568,69 @@ export class GameDO extends DurableObject<Env> {
     );
   }
 
-  /** Closes out every round whose own guess-timeout deadline has passed:
-   * `complete` if it got at least one correct guess, `timeout` if it got
-   * none. Once every round has reached one of those two terminal states
-   * (see `ROUND_TERMINAL_STATUSES`), the game itself is decided —
-   * `finalizeGame()` handles that; otherwise just rearms for whatever's
-   * still pending. */
-  private async resolveDueRounds(gameId: string): Promise<void> {
-    const limitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
-    const now = Date.now();
+  /** Marks round `index` as the current round: stamps `started_at` and
+   * `time_limit_ms` (the scoring/deadline/remaining-time anchor — see
+   * `scoreForGuess()` and `readPublicState()`'s `remainingMs`), flips its
+   * status to `Active`, arms the alarm for its own guess-timeout deadline,
+   * and broadcasts the transition. The limit is read from Flagship once
+   * here and stuck to for this round's whole lifetime, rather than
+   * re-fetched on every later use — so a flag flip mid-round can't leave
+   * the armed alarm, the eventual score, and the displayed countdown
+   * disagreeing with each other. Every round is guaranteed `ready` by the
+   * time this is ever called — generation fully gates `waiting`/`playing`
+   * (see guess.queue.ts) — so there's no status check to make first. Shared
+   * by `beginPlaying()` (round 0) and `resolveCurrentRound()` (every round
+   * after). */
+  private async activateRound(index: number): Promise<void> {
+    const startedAt = Date.now();
+    const timeLimitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
+    this.ctx.storage.sql.exec(
+      "UPDATE rounds SET status = 'active', started_at = ?, time_limit_ms = ? WHERE idx = ?",
+      startedAt,
+      timeLimitMs,
+      index,
+    );
+    this.broadcast({ type: "round_status", index, status: RoundStatus.Active });
+    await this.scheduleNextAlarm();
+  }
 
-    const rounds = this.ctx.storage.sql.exec<RoundRow>("SELECT * FROM rounds ORDER BY idx ASC").toArray();
-    for (const round of rounds) {
-      if (round.status !== RoundStatus.Ready || round.ready_at === null || round.ready_at + limitMs > now) continue;
-      const correct = this.ctx.storage.sql
-        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND correct = 1", round.idx)
-        .toArray()[0]?.n;
-      const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
-      this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, round.idx);
-      this.broadcast({ type: "round_status", index: round.idx, status });
-    }
+  /** Closes out the current round (`complete` if it got at least one
+   * correct guess, `timeout` if none), then either activates the next round
+   * or — once the last round resolves — finalizes the game. Called from two
+   * independent triggers: `alarm()` once a round's own deadline passes, and
+   * `submitGuess()` the instant every joined participant has answered
+   * correctly (early advance, before the timer). Because those two triggers
+   * can interleave around an `await` (Durable Objects can process another
+   * incoming call while one is awaiting a binding, e.g.
+   * `guessTimeLimitSeconds()`), this re-checks the round is still `Active`
+   * as its very first, synchronous step — whichever trigger gets here
+   * first wins and the other is a clean no-op instead of double-advancing. */
+  private async resolveCurrentRound(gameId: string, index: number): Promise<void> {
+    const still = this.ctx.storage.sql
+      .exec<{ status: RoundStatus }>("SELECT status FROM rounds WHERE idx = ?", index)
+      .toArray()[0];
+    if (still?.status !== RoundStatus.Active) return; // already resolved by the other trigger
 
-    const statuses = this.ctx.storage.sql.exec<{ status: RoundStatus }>("SELECT status FROM rounds").toArray();
-    if (statuses.every((r) => ROUND_TERMINAL_STATUSES.includes(r.status))) {
-      const gameStatus = statuses.some((r) => r.status === RoundStatus.Complete)
-        ? GameSessionStatus.Solved
-        : GameSessionStatus.Timeout;
-      await this.finalizeGame(gameId, gameStatus);
+    const correct = this.ctx.storage.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND correct = 1", index)
+      .toArray()[0]?.n;
+    const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
+    this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, index);
+    this.broadcast({ type: "round_status", index, status });
+
+    const nextIndex = index + 1;
+    if (nextIndex < ROUND_COUNT) {
+      await this.activateRound(nextIndex);
       return;
     }
-    await this.scheduleNextAlarm();
+
+    // Every round has now resolved — same "solved if anyone ever completed
+    // a round, timeout only if none were ever completed" rule as before.
+    const anyComplete = this.ctx.storage.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM rounds WHERE status = 'complete'")
+      .toArray()[0]?.n;
+    const gameStatus = anyComplete && anyComplete > 0 ? GameSessionStatus.Solved : GameSessionStatus.Timeout;
+    await this.finalizeGame(gameId, gameStatus);
   }
 
   /** Every round has resolved — decide the game (`solved` if at least one
@@ -582,33 +679,34 @@ export class GameDO extends DurableObject<Env> {
     );
   }
 
-  /** Recomputes and (re)arms the single DO alarm to the earliest pending
-   * deadline across the lobby countdown and every still-`ready` round's own
-   * guess-timeout (each measured from that round's `ready_at`, matching the
-   * time-weighted scoring in `scoreForGuess()`). A DO only has one alarm
-   * slot, so whichever deadline is soonest wins and gets rearmed again once
-   * it fires (see `alarm()`). Deletes the alarm entirely once nothing is
-   * pending. */
+  /** Recomputes and (re)arms the single DO alarm to whichever is next: the
+   * lobby countdown while `waiting`, or the current round's own
+   * guess-timeout (measured from its `started_at` — matching the
+   * time-weighted scoring in `scoreForGuess()`) while `playing` — there's
+   * at most one `active` round at a time (see `activateRound()`/
+   * `resolveCurrentRound()`), so no scanning multiple rounds' deadlines the
+   * way this used to. Deletes the alarm entirely once nothing is pending. */
   private async scheduleNextAlarm(): Promise<void> {
     const row = this.requireGameRow();
-    const candidates: number[] = [];
+
     if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null) {
-      candidates.push(row.lobby_ends_at);
-    }
-
-    const limitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
-    const readyRounds = this.ctx.storage.sql
-      .exec<Pick<RoundRow, "ready_at">>("SELECT ready_at FROM rounds WHERE status = 'ready'")
-      .toArray();
-    for (const round of readyRounds) {
-      if (round.ready_at !== null) candidates.push(round.ready_at + limitMs);
-    }
-
-    if (candidates.length === 0) {
-      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.setAlarm(row.lobby_ends_at);
       return;
     }
-    await this.ctx.storage.setAlarm(Math.min(...candidates));
+
+    if (row.status === GameSessionStatus.Playing) {
+      const active = this.ctx.storage.sql
+        .exec<Pick<RoundRow, "started_at" | "time_limit_ms">>(
+          "SELECT started_at, time_limit_ms FROM rounds WHERE status = 'active' LIMIT 1",
+        )
+        .toArray()[0];
+      if (active?.started_at != null && active.time_limit_ms != null) {
+        await this.ctx.storage.setAlarm(active.started_at + active.time_limit_ms);
+        return;
+      }
+    }
+
+    await this.ctx.storage.deleteAlarm();
   }
 
   private assertHost(row: GameRow, hostToken: string): void {
@@ -655,7 +753,20 @@ export class GameDO extends DurableObject<Env> {
         index: r.idx,
         status: r.status,
         error: r.error ?? undefined,
+        // Mirrors PuzzleDO's `remainingMs`: only ever ticking for the one
+        // round that's currently open for guessing (see `activateRound()`'s
+        // "at most one round is ever `Active`" invariant) — null for every
+        // other round, whether it hasn't had its turn yet or has already
+        // resolved.
+        remainingMs:
+          r.status === RoundStatus.Active && r.started_at !== null
+            ? Math.max(0, (r.time_limit_ms ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.started_at))
+            : null,
       })),
+      // At most one round is ever `Active` at a time (see `activateRound()`/
+      // `resolveCurrentRound()`) — null before play starts and after the
+      // game finishes, since nothing stays `Active` in either case.
+      currentRound: rounds.find((r) => r.status === RoundStatus.Active)?.idx ?? null,
       lobbyRemainingMs: game ? lobbyRemainingMs(game.lobby_ends_at) : null,
       connectedPlayers: this.ctx.getWebSockets().length,
       participants: participants.map((p) => ({ name: p.name, color: p.color })),
@@ -683,12 +794,17 @@ export class GameDO extends DurableObject<Env> {
 }
 
 /** See guessTimeLimitSeconds(): linear falloff from GUESS_MAX_SCORE at 0
- * elapsed to GUESS_MIN_SCORE at the limit or beyond. `readyAt` is only null
- * for a round created before this column existed; treated as "just became
- * ready" (max score) rather than throwing. */
-function scoreForGuess(readyAt: number | null, limitSeconds: number): number {
-  const elapsedMs = Date.now() - (readyAt ?? Date.now());
-  const limitMs = limitSeconds * 1000;
-  const remainingMs = Math.max(0, limitMs - elapsedMs);
-  return Math.max(GUESS_MIN_SCORE, Math.round((remainingMs / limitMs) * GUESS_MAX_SCORE));
+ * elapsed (the instant a round became the current one — `started_at`,
+ * stamped by `activateRound()`) to GUESS_MIN_SCORE at the limit or beyond.
+ * `startedAt` is only null for a round that's somehow being scored before
+ * `activateRound()` ran; treated as "just started" (max score) rather than
+ * throwing. `limitMs` is likewise only null for a round some already-live
+ * DO instance had mid-flight when the `time_limit_ms` column was added —
+ * falls back to the same default `guessTimeLimitSeconds()` itself falls
+ * back to, rather than throwing. */
+function scoreForGuess(startedAt: number | null, limitMs: number | null): number {
+  const elapsedMs = Date.now() - (startedAt ?? Date.now());
+  const effectiveLimitMs = limitMs ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000;
+  const remainingMs = Math.max(0, effectiveLimitMs - elapsedMs);
+  return Math.max(GUESS_MIN_SCORE, Math.round((remainingMs / effectiveLimitMs) * GUESS_MAX_SCORE));
 }

@@ -24,7 +24,7 @@ export const GUESS_MIN_SCORE = 10;
 // binding misconfigured, etc.) — kept in sync by hand with the flags'
 // own default variation, set via `wrangler flagship flags create/update`
 // (see the "timer" app referenced by env.FLAGS in wrangler.jsonc).
-const DEFAULT_GUESS_TIME_LIMIT_SECONDS = 60;
+export const DEFAULT_GUESS_TIME_LIMIT_SECONDS = 60;
 const DEFAULT_GUESS_TIME_OVERRIDE_SECONDS = 15;
 
 /** The guess round time limit, in seconds, sourced from Cloudflare
