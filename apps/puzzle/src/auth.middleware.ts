@@ -4,4 +4,4 @@
 
 import {accountsAuthMiddleware} from "@game-worker/shared/session";
 
-export const {currentUser, logIn, logOut} = accountsAuthMiddleware<Env>();
+export const {currentUser, currentUserFromRequest, logIn, logOut} = accountsAuthMiddleware<Env>();

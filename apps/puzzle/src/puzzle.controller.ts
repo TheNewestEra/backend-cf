@@ -3,19 +3,17 @@ import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
-import {currentUser} from "./auth.middleware";
 import {
     DEFAULT_GRID_SIZE,
     HostBodySchema,
     MAX_GRID_SIZE,
-    MAX_PLAYER_LENGTH,
     MAX_THEME_LENGTH,
     MIN_GRID_SIZE,
     puzzleImageKeyFor,
     puzzleTimeLimitMs,
 } from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
-import {JoinResultSchema, MoveResultSchema, PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
+import {PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
 
 export const puzzleRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -81,7 +79,11 @@ puzzleRoutes.openapi(
 );
 
 // Not OpenAPI-documented: this is a WebSocket upgrade, not a request/response
-// JSON endpoint — OpenAPI 3 has no representation for it.
+// JSON endpoint — OpenAPI 3 has no representation for it. Carries more than
+// broadcasts out — joining, moving, and selecting a tile are all sent as
+// messages over this same connection now (see puzzle.schema.ts's
+// `PuzzleWsClientMessageSchema` and puzzle.model.ts's `webSocketMessage()`);
+// there's no separate POST for any of them any more.
 puzzleRoutes.get("/puzzles/:id/ws", async (c) => {
     if (c.req.header("Upgrade") !== "websocket") {
         return c.text("Expected WebSocket", 426);
@@ -207,164 +209,6 @@ puzzleRoutes.openapi(
         await c.env.BROWSE.markCatalogReady(puzzleId, puzzleImageKeyFor(puzzleId));
 
         return c.json({puzzleId, hostToken}, 201);
-    },
-);
-
-puzzleRoutes.openapi(
-    createRoute({
-        method: "post",
-        path: "/puzzles/{id}/join",
-        tags: ["Piece Puzzle"],
-        summary: "Join a puzzle as a player before it starts",
-        description:
-            "Must be called (and must succeed) before submitting any move — it's what distinguishes a player " +
-            "from a spectator. Only possible while the lobby is open (or generation is still running); once " +
-            "the puzzle is `playing` this returns 409 and late arrivals can only spectate over the WebSocket. " +
-            "Logged-in players are identified by their session and keep their account color; `player` is only " +
-            "used for anonymous guests, who get back a `token` they must resend with every move, plus a " +
-            "freshly generated `color`.",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {
-                content: {
-                    "application/json": {schema: z.object({player: z.string().max(MAX_PLAYER_LENGTH).optional()})},
-                },
-                required: false,
-            },
-        },
-        responses: {
-            200: {description: "Joined", content: {"application/json": {schema: JoinResultSchema}}},
-            400: {description: "Missing player name", content: {"application/json": {schema: ErrorSchema}}},
-            409: {description: "Puzzle has already started", content: {"application/json": {schema: ErrorSchema}}},
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const player = user ? user.username : (body.player?.trim().slice(0, MAX_PLAYER_LENGTH) ?? "");
-
-        if (!player) return c.json({error: "player is required"}, 400);
-
-        const stub = c.env.PUZZLE_DO.getByName(id);
-        try {
-            return c.json(await stub.join(user?.id ?? null, player, user?.color ?? null), 200);
-        } catch (err) {
-            // join() only ever throws the "already started" case (never a
-            // "forbidden: ..." one), so this is always a 409 — unlike the
-            // participant-gated actions below, there's no host/participant
-            // check to fail here.
-            const message = err instanceof Error ? err.message : "unable to join";
-            return c.json({error: message}, 409);
-        }
-    },
-);
-
-puzzleRoutes.openapi(
-    createRoute({
-        method: "post",
-        path: "/puzzles/{id}/move",
-        tags: ["Piece Puzzle"],
-        summary: "Swap two tiles",
-        description: "Requires having joined via POST /puzzles/{id}/join first — see that endpoint for why.",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {
-                content: {
-                    "application/json": {
-                        schema: z.object({
-                            cellA: z.number().int(),
-                            cellB: z.number().int(),
-                            participantId: z.string(),
-                            token: z.string().optional(),
-                        }),
-                    },
-                },
-            },
-        },
-        responses: {
-            200: {description: "Move applied", content: {"application/json": {schema: MoveResultSchema}}},
-            400: {description: "Missing/invalid fields", content: {"application/json": {schema: ErrorSchema}}},
-            403: {
-                description: "Didn't join this puzzle before it started",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-            409: {
-                description: "Move rejected (not playing, invalid cells, etc.)",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const {cellA, cellB, participantId, token} = c.req.valid("json");
-        const user = await currentUser(c);
-
-        if (cellA === cellB) {
-            return c.json({error: "cellA and cellB must be different"}, 400);
-        }
-
-        const stub = c.env.PUZZLE_DO.getByName(id);
-        try {
-            return c.json(await stub.swapTiles(participantId, token ?? null, cellA, cellB, user?.id ?? null), 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
-            return c.json(body, status);
-        }
-    },
-);
-
-puzzleRoutes.openapi(
-    createRoute({
-        method: "post",
-        path: "/puzzles/{id}/select",
-        tags: ["Piece Puzzle"],
-        summary: "Broadcast that a player selected a block",
-        description:
-            "Purely a live cue for other connected clients — who's about to move which tile, and in what " +
-            "color — before they've picked its swap partner; it doesn't move anything itself, see " +
-            "POST /puzzles/{id}/move for the actual swap. Requires having joined via POST /puzzles/{id}/join " +
-            "first — see that endpoint for why.",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {
-                content: {
-                    "application/json": {
-                        schema: z.object({
-                            cell: z.number().int(),
-                            participantId: z.string(),
-                            token: z.string().optional(),
-                        }),
-                    },
-                },
-            },
-        },
-        responses: {
-            200: {description: "Broadcast", content: {"application/json": {schema: OkSchema}}},
-            400: {description: "Invalid cell index", content: {"application/json": {schema: ErrorSchema}}},
-            403: {
-                description: "Didn't join this puzzle before it started",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-            409: {
-                description: "Puzzle is not in progress",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const {cell, participantId, token} = c.req.valid("json");
-        const user = await currentUser(c);
-
-        const stub = c.env.PUZZLE_DO.getByName(id);
-        try {
-            await stub.selectTile(participantId, token ?? null, cell, user?.id ?? null);
-            return c.json({ok: true as const}, 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
-            return c.json(body, status);
-        }
     },
 );
 

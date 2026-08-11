@@ -3,15 +3,28 @@ import type {z} from "@hono/zod-openapi";
 import {generateColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
+import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
-import {PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE} from "./puzzle.constants";
+import {MAX_PLAYER_LENGTH, PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE} from "./puzzle.constants";
 import type {MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
-import {PuzzleWsEventType} from "./puzzle.schema";
+import {PuzzleWsClientEventType, PuzzleWsClientMessageSchema, PuzzleWsEventType} from "./puzzle.schema";
 
 export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
 export type PuzzlePublic = z.infer<typeof PuzzlePublicSchema>;
 export type MoveResult = z.infer<typeof MoveResultSchema>;
 export type PuzzleWsMessage = z.infer<typeof PuzzleWsMessageSchema>;
+
+/** What a connected socket knows about who it's speaking for — resolved
+ * once at `fetch()`/upgrade time (the only point a WS connection carries
+ * the session cookie) and kept on the socket itself via
+ * `serializeAttachment`/`deserializeAttachment` for the rest of its
+ * lifetime, since individual WS messages don't carry cookies the way HTTP
+ * requests did. `null`/`null` for an anonymous connection — same as
+ * `currentUser(c)` returning `null` used to mean over HTTP. */
+interface ConnectionIdentity {
+    userId: string | null;
+    color: string | null;
+}
 
 // The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
 // requires its row type to satisfy.
@@ -209,14 +222,16 @@ export class PuzzleDO extends DurableObject<Env> {
     /** Registers a player as allowed to move tiles in this puzzle, only
      * while it hasn't started (see JOINABLE_STATUSES) — once it's `playing`
      * this throws, so late arrivals can still spectate over the
-     * WebSocket/`getState()` but can't play. Logged-in users are upserted by
-     * `userId` (idempotent across reconnects/tab refreshes, no token needed
-     * since the session re-proves identity on every request) and keep their
-     * account color; anonymous guests get a fresh bearer token they must
-     * resend with every move (since a free-text name alone isn't a real
-     * identity) and a freshly generated color. Either way, the color is
-     * returned so the caller's own client knows what to render before the
-     * next broadcast. */
+     * WebSocket/`getState()` but can't play. Called from `webSocketMessage()`
+     * for a `join` client message, using the identity resolved once at that
+     * socket's `fetch()`/upgrade time (see `ConnectionIdentity`). Logged-in
+     * users are upserted by `userId` (idempotent across reconnects/tab
+     * refreshes) and keep their account color; anonymous guests get a fresh
+     * bearer token they must resend with every `move`/`select` message
+     * (since a free-text name alone isn't a real identity, and a new
+     * WebSocket connection has no memory of a previous one's identity) and a
+     * freshly generated color. Either way, the color is returned so the
+     * caller's own client knows what to render before the next broadcast. */
     async join(
         userId: string | null,
         playerName: string,
@@ -379,8 +394,13 @@ export class PuzzleDO extends DurableObject<Env> {
         if (request.headers.get("Upgrade") !== "websocket") {
             return new Response("Expected WebSocket", {status: 426});
         }
+        // Resolved once, here, because this is the only point a WS
+        // connection ever carries the session cookie — see
+        // `ConnectionIdentity`'s doc comment.
+        const user = await currentUserFromRequestVia(request, this.env.ACCOUNTS);
         const pair = new WebSocketPair();
         this.ctx.acceptWebSocket(pair[1]);
+        pair[1].serializeAttachment({userId: user?.id ?? null, color: user?.color ?? null} satisfies ConnectionIdentity);
         this.send(pair[1], {type: PuzzleWsEventType.State, ...this.readPublicState()});
         // Let every other connected client know the player count changed.
         this.broadcast({type: WsEventType.Presence, connectedPlayers: this.ctx.getWebSockets().length});
@@ -390,8 +410,75 @@ export class PuzzleDO extends DurableObject<Env> {
     // --- alarm: drives both the lobby auto-start and the countdown timeout --
 
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-        if (typeof message === "string" && message === "ping") {
+        if (typeof message !== "string") return;
+        if (message === "ping") {
             this.send(ws, {type: WsEventType.Pong});
+            return;
+        }
+
+        let json: unknown;
+        try {
+            json = JSON.parse(message);
+        } catch {
+            this.send(ws, {type: PuzzleWsEventType.Error, action: "unknown", error: "malformed message"});
+            return;
+        }
+        const parsed = PuzzleWsClientMessageSchema.safeParse(json);
+        if (!parsed.success) {
+            this.send(ws, {type: PuzzleWsEventType.Error, action: "unknown", error: "invalid message"});
+            return;
+        }
+
+        const identity = (ws.deserializeAttachment() as ConnectionIdentity | null) ?? {userId: null, color: null};
+        const data = parsed.data;
+
+        switch (data.type) {
+            case PuzzleWsClientEventType.Join: {
+                const player = data.player?.trim().slice(0, MAX_PLAYER_LENGTH) ?? "";
+                if (!player) {
+                    this.send(ws, {type: PuzzleWsEventType.Error, action: "join", error: "player is required"});
+                    return;
+                }
+                try {
+                    const joined = await this.join(identity.userId, player, identity.color);
+                    this.send(ws, {type: PuzzleWsEventType.JoinResult, ...joined});
+                } catch (err) {
+                    // join() only ever throws the "already started" case —
+                    // see puzzle.controller.ts's old POST .../join handler,
+                    // which this mirrors.
+                    const errorMessage = err instanceof Error ? err.message : "unable to join";
+                    this.send(ws, {type: PuzzleWsEventType.Error, action: "join", error: errorMessage});
+                }
+                return;
+            }
+            case PuzzleWsClientEventType.Move: {
+                const {cellA, cellB, participantId, token} = data;
+                if (cellA === cellB) {
+                    this.send(ws, {
+                        type: PuzzleWsEventType.Error,
+                        action: "move",
+                        error: "cellA and cellB must be different",
+                    });
+                    return;
+                }
+                try {
+                    await this.swapTiles(participantId, token ?? null, cellA, cellB, identity.userId);
+                } catch (err) {
+                    const errorMessage = err instanceof Error ? err.message : "move rejected";
+                    this.send(ws, {type: PuzzleWsEventType.Error, action: "move", error: errorMessage});
+                }
+                return;
+            }
+            case PuzzleWsClientEventType.Select: {
+                const {cell, participantId, token} = data;
+                try {
+                    await this.selectTile(participantId, token ?? null, cell, identity.userId);
+                } catch (err) {
+                    const errorMessage = err instanceof Error ? err.message : "select rejected";
+                    this.send(ws, {type: PuzzleWsEventType.Error, action: "select", error: errorMessage});
+                }
+                return;
+            }
         }
     }
 
@@ -502,10 +589,13 @@ export class PuzzleDO extends DurableObject<Env> {
     /** Resolves and authorizes a participant: logged-in callers must be
      * signed in as the same user who joined; anonymous callers must present
      * the token issued at join time. Throws `Error("forbidden: ...")` for
-     * either failure, which `hostActionError` (shared/http-exceptions.ts)
-     * maps to a 403 — someone who never joined can still spectate, they just
-     * can't act. Returns the joined display name/color to record on the
-     * move and broadcast alongside it. */
+     * either failure — `webSocketMessage()` (the sole caller, for `move`/
+     * `select` client messages) turns that into a `PuzzleWsErrorMessage`
+     * addressed to the sending socket, same idea as the `hostActionError`
+     * (shared/http-exceptions.ts) mapping to a 403 that the still-HTTP
+     * host-only actions below use — someone who never joined can still
+     * spectate, they just can't act. Returns the joined display name/color
+     * to record on the move and broadcast alongside it. */
     private requireParticipant(
         participantId: string,
         token: string | null,

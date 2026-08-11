@@ -68,7 +68,8 @@ POST /games or /puzzles  →  DO.init()  →  BROWSE.insertCatalogEntry()  →  
                                                         queue consumer (same Worker as the DO)
                                                         Workers AI (text + image) → R2.put() → DO.set*() → BROWSE.markCatalog*()
 
-Browser  ──WebSocket──►  DO  (broadcasts every state change to all connected clients)
+Browser  ◄─WebSocket──►  DO  (broadcasts every state change out; Piece Puzzle
+                              also takes join/move/select in — see below)
 Browser  ──fetch────────►  each service's own /docs, /openapi.json, and routes
 ```
 
@@ -162,27 +163,42 @@ Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
   this through the `PuzzleService.getLobbyStatus` RPC call rather than a
   direct binding to this service's Durable Object namespace. Guess the
   Prompt is gated the same way now, via its own `GuessService.getStatus`.
-- **Joining**: `POST /puzzles/:id/join` registers a player — required
-  before any `move` call, and only possible pre-start
-  (`queued`/`generating`/`waiting`). Once the puzzle is `playing` this
-  throws, so late arrivals can still spectate over the WebSocket but can't
-  join in. Logged-in players are identified by their session from then on
-  and keep their account color; anonymous guests get back a one-time
-  `token` they must resend with every move (since a free-text name alone
-  isn't a real identity) and a freshly generated color.
-- **Moves**: click a tile, then another, to swap them — free swap, not a
-  classic sliding-15-puzzle, so any arrangement is trivially solvable and
-  two players can never block each other on an empty-slot constraint.
-  Every move is server-authoritative: `PuzzleDO.swapTiles()` checks the
-  caller joined before start, then persists the swap and broadcasts it to
-  *every* connected client (including the mover), tagged with the mover's
-  name and color.
-- **Block selection**: `POST /puzzles/:id/select` broadcasts a
-  `tile_selected` event (`cell`, `player`, `color`) the instant a joined
-  player picks a block, *before* they've picked its swap partner — a pure
-  UX cue, not persisted anywhere and not itself a move (see `PuzzleDO.
-  selectTile()`), so every other connected client can highlight what's
-  about to move and in whose color.
+- **Joining, moving, selecting — all over the WebSocket.** Unlike Guess the
+  Prompt, Piece Puzzle's `join`/`move`/`select` aren't HTTP calls at all —
+  they're JSON messages sent over the same `GET /puzzles/:id/ws` connection
+  used for broadcasts (see `PuzzleDO.webSocketMessage()` and puzzle.schema.ts's
+  `PuzzleWsClientMessageSchema`), since a player is already holding that
+  connection open for the whole time they'd otherwise be polling/mutating
+  over HTTP. Identity is resolved once, from the session cookie present at
+  the WebSocket *upgrade* request (individual WS messages don't carry
+  cookies), and kept on the connection via `serializeAttachment` for its
+  lifetime.
+  - **Joining**: send `{type: "join", player}` — required before any `move`,
+    and only possible pre-start (`queued`/`generating`/`waiting`). Once the
+    puzzle is `playing` this errors back (`PuzzleWsErrorMessage`), so late
+    arrivals can still spectate but can't join in. Logged-in players are
+    identified by the session resolved at connect time and keep their
+    account color; anonymous guests get back a one-time `token` (in a
+    `PuzzleWsJoinResultMessage`, addressed only to them) they must resend
+    with every `move`/`select` message (since a free-text name alone isn't
+    a real identity, and a fresh WebSocket connection has no memory of a
+    previous one's identity) plus a freshly generated color.
+  - **Moves**: click a tile, then another, to send `{type: "move", cellA,
+    cellB, participantId, token}` — free swap, not a classic sliding-15-
+    puzzle, so any arrangement is trivially solvable and two players can
+    never block each other on an empty-slot constraint. Every move is
+    server-authoritative: `PuzzleDO.swapTiles()` checks the caller joined
+    before start, then persists the swap and broadcasts it to *every*
+    connected client (including the mover, who observes their own move
+    through that same broadcast rather than a direct reply), tagged with
+    the mover's name and color. A rejected move comes back as a
+    `PuzzleWsErrorMessage` to the sender only.
+  - **Block selection**: `{type: "select", cell, participantId, token}`
+    broadcasts a `tile_selected` event (`cell`, `player`, `color`) the
+    instant a joined player picks a block, *before* they've picked its swap
+    partner — a pure UX cue, not persisted anywhere and not itself a move
+    (see `PuzzleDO.selectTile()`), so every other connected client can
+    highlight what's about to move and in whose color.
 - **Timer**: same DO alarm mechanism as the lobby, just re-armed for
   `startedAt + timeLimitMs` once play begins. On solve, the alarm is
   cancelled; on expiry, the puzzle ends `timeout` with score 0.
@@ -204,11 +220,10 @@ Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
 - **Rating**: shown once solved/timed out, same star widget/mechanism as
   Guess the Prompt.
 
-Routes: `POST /puzzles`, `GET /puzzles/:id`, `GET /puzzles/:id/ws`,
-`POST /puzzles/:id/join`, `POST /puzzles/:id/move`,
-`POST /puzzles/:id/select`, `POST /puzzles/:id/start`,
-`POST /puzzles/:id/replay`, `POST /puzzles/:id/regenerate`,
-`GET /puzzles/:id/image`.
+Routes: `POST /puzzles`, `GET /puzzles/:id`, `GET /puzzles/:id/ws` (also
+carries the `join`/`move`/`select` client messages — see above),
+`POST /puzzles/:id/start`, `POST /puzzles/:id/replay`,
+`POST /puzzles/:id/regenerate`, `GET /puzzles/:id/image`.
 
 ### Browse & ratings (`apps/browse`)
 
