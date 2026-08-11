@@ -34,10 +34,10 @@ const DEFAULT_GUESS_TIME_OVERRIDE_SECONDS = 15;
  * its score falloff) quickly without waiting out the real limit. No
  * redeploy needed for either flag to take effect. */
 export async function guessTimeLimitSeconds(env: Env): Promise<number> {
-  const devMode = await env.FLAGS.getBooleanValue("dev-mode", false);
-  return devMode
-    ? env.FLAGS.getNumberValue("guess-time-override-seconds", DEFAULT_GUESS_TIME_OVERRIDE_SECONDS)
-    : env.FLAGS.getNumberValue("guess-time-seconds", DEFAULT_GUESS_TIME_LIMIT_SECONDS);
+    const devMode = await env.FLAGS.getBooleanValue("dev-mode", false);
+    return devMode
+        ? env.FLAGS.getNumberValue("guess-time-override-seconds", DEFAULT_GUESS_TIME_OVERRIDE_SECONDS)
+        : env.FLAGS.getNumberValue("guess-time-seconds", DEFAULT_GUESS_TIME_LIMIT_SECONDS);
 }
 
 /** R2 key for a guess-game round's image. Must match the image model's
@@ -45,5 +45,5 @@ export async function guessTimeLimitSeconds(env: Env): Promise<number> {
  * place so the writer (queue consumer) and reader (image route) can't
  * drift apart. */
 export function imageKeyFor(gameId: string, index: number): string {
-  return `games/${gameId}/${index}.png`;
+    return `games/${gameId}/${index}.png`;
 }

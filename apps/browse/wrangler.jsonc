@@ -1,112 +1,116 @@
 {
-	"$schema": "../../node_modules/wrangler/config-schema.json",
-	"name": "game-browse-worker",
-	"main": "src/index.ts",
-	"compatibility_date": "2026-05-25",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
-	"observability": {
-		"enabled": true,
-		"head_sampling_rate": 1
-	},
-	// Custom Domain per environment — see apps/accounts/wrangler.jsonc for
-	// the naming scheme and the session-cookie caveat.
-	"routes": [
-		{
-			"pattern": "dev.api.browse.ryanb.co.za",
-			"custom_domain": true
-		}
-	],
-	// Owns `catalog` + `ratings` — the cross-game index used by the browse
-	// page and post-session ratings. The `guess` and `puzzle` Workers write
-	// to it through the `CatalogService` RPC entrypoint (see src/index.ts)
-	// rather than binding this database directly, since a Durable Object
-	// can't be listed/queried across instances but this table can.
-	// Unnamed/top-level config == "dev" (deployed as `game-browse-worker`,
-	// no --env flag needed).
-	"d1_databases": [
-		{
-			"binding": "DB",
-			"database_name": "game-worker-catalog",
-			"database_id": "cd1e3d8e-eec2-4020-91b6-7adf07247d06",
-			"migrations_dir": "../../migrations"
-		}
-	],
-	// Same bucket `guess`/`puzzle` write their images to (see their
-	// wrangler.jsonc). Browse never writes here — it only reads back
-	// whatever `thumbnail_key` those services recorded via
-	// `markCatalogReady`, to serve GET /api/catalog/{id}/thumbnail.
-	"r2_buckets": [
-		{
-			"binding": "IMAGES",
-			"bucket_name": "game-guess-images"
-		}
-	],
-	// See apps/accounts/wrangler.jsonc for why binding arrays are fully
-	// re-declared per named environment rather than inherited.
-	"env": {
-		"staging": {
-			"name": "game-browse-worker-staging",
-			"routes": [
-				{
-					"pattern": "staging.api.browse.ryanb.co.za",
-					"custom_domain": true
-				}
-			],
-			"d1_databases": [
-				{
-					"binding": "DB",
-					"database_name": "game-worker-catalog-staging",
-					"database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
-					"migrations_dir": "../../migrations"
-				}
-			],
-			"r2_buckets": [
-				{
-					"binding": "IMAGES",
-					"bucket_name": "game-guess-images-staging"
-				}
-			]
-		},
-		"production": {
-			"name": "game-browse-worker-prod",
-			// Prod-only OTel export — see apps/accounts/wrangler.jsonc for what
-			// "k8s-logs"/"k8s" are and why this only appears here.
-			"observability": {
-				"enabled": true,
-				"head_sampling_rate": 1,
-				"logs": {
-					"enabled": true,
-					"destinations": ["k8s-logs"],
-					"head_sampling_rate": 1
-				},
-				"traces": {
-					"enabled": true,
-					"destinations": ["k8s"],
-					"head_sampling_rate": 1
-				}
-			},
-			"routes": [
-				{
-					"pattern": "api.browse.ryanb.co.za",
-					"custom_domain": true
-				}
-			],
-			"d1_databases": [
-				{
-					"binding": "DB",
-					"database_name": "game-worker-catalog-prod",
-					"database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
-					"migrations_dir": "../../migrations"
-				}
-			],
-			"r2_buckets": [
-				{
-					"binding": "IMAGES",
-					"bucket_name": "game-guess-images-prod"
-				}
-			]
-		}
-	}
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "game-browse-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-25",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  // Custom Domain per environment — see apps/accounts/wrangler.jsonc for
+  // the naming scheme and the session-cookie caveat.
+  "routes": [
+    {
+      "pattern": "dev.api.browse.ryanb.co.za",
+      "custom_domain": true
+    }
+  ],
+  // Owns `catalog` + `ratings` — the cross-game index used by the browse
+  // page and post-session ratings. The `guess` and `puzzle` Workers write
+  // to it through the `CatalogService` RPC entrypoint (see src/index.ts)
+  // rather than binding this database directly, since a Durable Object
+  // can't be listed/queried across instances but this table can.
+  // Unnamed/top-level config == "dev" (deployed as `game-browse-worker`,
+  // no --env flag needed).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "game-worker-catalog",
+      "database_id": "cd1e3d8e-eec2-4020-91b6-7adf07247d06",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  // Same bucket `guess`/`puzzle` write their images to (see their
+  // wrangler.jsonc). Browse never writes here — it only reads back
+  // whatever `thumbnail_key` those services recorded via
+  // `markCatalogReady`, to serve GET /api/catalog/{id}/thumbnail.
+  "r2_buckets": [
+    {
+      "binding": "IMAGES",
+      "bucket_name": "game-guess-images"
+    }
+  ],
+  // See apps/accounts/wrangler.jsonc for why binding arrays are fully
+  // re-declared per named environment rather than inherited.
+  "env": {
+    "staging": {
+      "name": "game-browse-worker-staging",
+      "routes": [
+        {
+          "pattern": "staging.api.browse.ryanb.co.za",
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "game-worker-catalog-staging",
+          "database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
+          "migrations_dir": "../../migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "IMAGES",
+          "bucket_name": "game-guess-images-staging"
+        }
+      ]
+    },
+    "production": {
+      "name": "game-browse-worker-prod",
+      // Prod-only OTel export — see apps/accounts/wrangler.jsonc for what
+      // "k8s-logs"/"k8s" are and why this only appears here.
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "enabled": true,
+          "destinations": [
+            "k8s-logs"
+          ],
+          "head_sampling_rate": 1
+        },
+        "traces": {
+          "enabled": true,
+          "destinations": [
+            "k8s"
+          ],
+          "head_sampling_rate": 1
+        }
+      },
+      "routes": [
+        {
+          "pattern": "api.browse.ryanb.co.za",
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "game-worker-catalog-prod",
+          "database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
+          "migrations_dir": "../../migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "IMAGES",
+          "bucket_name": "game-guess-images-prod"
+        }
+      ]
+    }
+  }
 }

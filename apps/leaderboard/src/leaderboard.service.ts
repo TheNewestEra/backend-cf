@@ -19,20 +19,20 @@ export type LeaderboardKind = GameKind;
 export type {LeaderboardPeriod};
 
 const PERIOD_MS: Record<Exclude<LeaderboardPeriod, "all">, number> = {
-  [LeaderboardPeriod.Day]: 24 * 60 * 60 * 1000,
-  [LeaderboardPeriod.Week]: 7 * 24 * 60 * 60 * 1000,
-  [LeaderboardPeriod.Month]: 30 * 24 * 60 * 60 * 1000,
+    [LeaderboardPeriod.Day]: 24 * 60 * 60 * 1000,
+    [LeaderboardPeriod.Week]: 7 * 24 * 60 * 60 * 1000,
+    [LeaderboardPeriod.Month]: 30 * 24 * 60 * 60 * 1000,
 };
 
 function cutoffFor(period: LeaderboardPeriod): number | null {
-  return period === LeaderboardPeriod.All ? null : Date.now() - PERIOD_MS[period];
+    return period === LeaderboardPeriod.All ? null : Date.now() - PERIOD_MS[period];
 }
 
 export interface RecordScoreInput {
-  userId: string;
-  kind: LeaderboardKind;
-  sessionId: string;
-  score: number;
+    userId: string;
+    kind: LeaderboardKind;
+    sessionId: string;
+    score: number;
 }
 
 /** Logs one scoring event. Called from `LeaderboardService.recordScore`
@@ -42,81 +42,81 @@ export interface RecordScoreInput {
  * controller. A non-positive score (a wrong guess) is a no-op rather than
  * an error, so callers don't need to guard the call themselves. */
 export async function recordScore(db: Database, input: RecordScoreInput): Promise<void> {
-  if (input.score <= 0) return;
-  await db
-    .prepare(
-      `INSERT INTO leaderboard_entries (id, user_id, kind, session_id, score, created_at)
+    if (input.score <= 0) return;
+    await db
+        .prepare(
+            `INSERT INTO leaderboard_entries (id, user_id, kind, session_id, score, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(crypto.randomUUID(), input.userId, input.kind, input.sessionId, input.score, Date.now())
-    .run();
+        )
+        .bind(crypto.randomUUID(), input.userId, input.kind, input.sessionId, input.score, Date.now())
+        .run();
 }
 
 export interface LeaderboardQuery {
-  kind: LeaderboardKind | null;
-  period: LeaderboardPeriod;
+    kind: LeaderboardKind | null;
+    period: LeaderboardPeriod;
 }
 
 /** Builds the `kind`/`period` half of a WHERE clause against `leaderboard_entries
  * e` — shared by every query below so the two filters can't drift apart. */
 function filtersFor(query: LeaderboardQuery): { conditions: string[]; binds: unknown[] } {
-  const conditions: string[] = [];
-  const binds: unknown[] = [];
+    const conditions: string[] = [];
+    const binds: unknown[] = [];
 
-  if (query.kind) {
-    conditions.push("e.kind = ?");
-    binds.push(query.kind);
-  }
-  const cutoff = cutoffFor(query.period);
-  if (cutoff !== null) {
-    conditions.push("e.created_at >= ?");
-    binds.push(cutoff);
-  }
-  return { conditions, binds };
+    if (query.kind) {
+        conditions.push("e.kind = ?");
+        binds.push(query.kind);
+    }
+    const cutoff = cutoffFor(query.period);
+    if (cutoff !== null) {
+        conditions.push("e.created_at >= ?");
+        binds.push(cutoff);
+    }
+    return {conditions, binds};
 }
 
 interface TotalRow {
-  user_id: string;
-  username: string;
-  color: string;
-  total_score: number;
+    user_id: string;
+    username: string;
+    color: string;
+    total_score: number;
 }
 
 export interface LeaderboardEntry {
-  rank: number;
-  userId: string;
-  username: string;
-  color: string;
-  score: number;
+    rank: number;
+    userId: string;
+    username: string;
+    color: string;
+    score: number;
 }
 
 const TOP_N = 10;
 
 /** Top 10 users by summed score in the given window. */
 export async function topScores(db: Database, query: LeaderboardQuery): Promise<LeaderboardEntry[]> {
-  const { conditions, binds } = filtersFor(query);
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const {conditions, binds} = filtersFor(query);
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
-  const { results } = await db
-    .prepare(
-      `SELECT e.user_id AS user_id, u.username AS username, u.color AS color, SUM(e.score) AS total_score
-       FROM leaderboard_entries e
-       JOIN users u ON u.id = e.user_id
-       ${where}
-       GROUP BY e.user_id
-       ORDER BY total_score DESC
-       LIMIT ?`,
-    )
-    .bind(...binds, TOP_N)
-    .all<TotalRow>();
+    const {results} = await db
+        .prepare(
+            `SELECT e.user_id AS user_id, u.username AS username, u.color AS color, SUM(e.score) AS total_score
+             FROM leaderboard_entries e
+                      JOIN users u ON u.id = e.user_id
+                 ${where}
+             GROUP BY e.user_id
+             ORDER BY total_score DESC
+                 LIMIT ?`,
+        )
+        .bind(...binds, TOP_N)
+        .all<TotalRow>();
 
-  return results.map((row, i) => ({
-    rank: i + 1,
-    userId: row.user_id,
-    username: row.username,
-    color: row.color,
-    score: row.total_score,
-  }));
+    return results.map((row, i) => ({
+        rank: i + 1,
+        userId: row.user_id,
+        username: row.username,
+        color: row.color,
+        score: row.total_score,
+    }));
 }
 
 export const FRIENDS_PAGE_SIZE = 10;
@@ -125,16 +125,16 @@ export const FRIENDS_PAGE_SIZE = 10;
  * read against the `friendships` table owned by the `friends` Worker, the
  * same pragmatic cross-app read this file already does against `users`. */
 async function friendIds(db: Database, userId: string): Promise<string[]> {
-  const { results } = await db
-    .prepare("SELECT friend_id FROM friendships WHERE user_id = ?")
-    .bind(userId)
-    .all<{ friend_id: string }>();
-  return results.map((r) => r.friend_id);
+    const {results} = await db
+        .prepare("SELECT friend_id FROM friendships WHERE user_id = ?")
+        .bind(userId)
+        .all<{ friend_id: string }>();
+    return results.map((r) => r.friend_id);
 }
 
 export interface FriendLeaderboardPage {
-  entries: LeaderboardEntry[];
-  hasMore: boolean;
+    entries: LeaderboardEntry[];
+    hasMore: boolean;
 }
 
 /** Leaderboard scoped to `userId` and their friends, 10 to a page —
@@ -145,48 +145,48 @@ export interface FriendLeaderboardPage {
  * Fetches one row past the page boundary instead of a separate COUNT(*)
  * to learn whether another page exists. */
 export async function friendScores(
-  db: Database,
-  userId: string,
-  query: LeaderboardQuery,
-  page: number,
+    db: Database,
+    userId: string,
+    query: LeaderboardQuery,
+    page: number,
 ): Promise<FriendLeaderboardPage> {
-  const ids = [userId, ...(await friendIds(db, userId))];
-  const { conditions, binds } = filtersFor(query);
-  const idPlaceholders = ids.map(() => "?").join(", ");
-  const where = [`e.user_id IN (${idPlaceholders})`, ...conditions].join(" AND ");
-  const offset = (page - 1) * FRIENDS_PAGE_SIZE;
+    const ids = [userId, ...(await friendIds(db, userId))];
+    const {conditions, binds} = filtersFor(query);
+    const idPlaceholders = ids.map(() => "?").join(", ");
+    const where = [`e.user_id IN (${idPlaceholders})`, ...conditions].join(" AND ");
+    const offset = (page - 1) * FRIENDS_PAGE_SIZE;
 
-  const { results } = await db
-    .prepare(
-      `SELECT e.user_id AS user_id, u.username AS username, u.color AS color, SUM(e.score) AS total_score
-       FROM leaderboard_entries e
-       JOIN users u ON u.id = e.user_id
-       WHERE ${where}
-       GROUP BY e.user_id
-       ORDER BY total_score DESC
-       LIMIT ? OFFSET ?`,
-    )
-    .bind(...ids, ...binds, FRIENDS_PAGE_SIZE + 1, offset)
-    .all<TotalRow>();
+    const {results} = await db
+        .prepare(
+            `SELECT e.user_id AS user_id, u.username AS username, u.color AS color, SUM(e.score) AS total_score
+             FROM leaderboard_entries e
+                      JOIN users u ON u.id = e.user_id
+             WHERE ${where}
+             GROUP BY e.user_id
+             ORDER BY total_score DESC LIMIT ?
+             OFFSET ?`,
+        )
+        .bind(...ids, ...binds, FRIENDS_PAGE_SIZE + 1, offset)
+        .all<TotalRow>();
 
-  const hasMore = results.length > FRIENDS_PAGE_SIZE;
-  const entries = results.slice(0, FRIENDS_PAGE_SIZE).map((row, i) => ({
-    rank: offset + i + 1,
-    userId: row.user_id,
-    username: row.username,
-    color: row.color,
-    score: row.total_score,
-  }));
+    const hasMore = results.length > FRIENDS_PAGE_SIZE;
+    const entries = results.slice(0, FRIENDS_PAGE_SIZE).map((row, i) => ({
+        rank: offset + i + 1,
+        userId: row.user_id,
+        username: row.username,
+        color: row.color,
+        score: row.total_score,
+    }));
 
-  return { entries, hasMore };
+    return {entries, hasMore};
 }
 
 export interface MyScore {
-  userId: string;
-  username: string;
-  color: string;
-  score: number;
-  rank: number | null;
+    userId: string;
+    username: string;
+    color: string;
+    score: number;
+    rank: number | null;
 }
 
 /** The given user's total score (0 if they have none in this window) and
@@ -195,38 +195,38 @@ export interface MyScore {
  * (nothing to rank them against). Returns null only if `userId` doesn't
  * resolve to an account at all. */
 export async function myScore(db: Database, userId: string, query: LeaderboardQuery): Promise<MyScore | null> {
-  const user = await db
-    .prepare("SELECT username, color FROM users WHERE id = ?")
-    .bind(userId)
-    .first<{ username: string; color: string }>();
-  if (!user) return null;
+    const user = await db
+        .prepare("SELECT username, color FROM users WHERE id = ?")
+        .bind(userId)
+        .first<{ username: string; color: string }>();
+    if (!user) return null;
 
-  const { conditions, binds } = filtersFor(query);
+    const {conditions, binds} = filtersFor(query);
 
-  const mine = await db
-    .prepare(
-      `SELECT COALESCE(SUM(e.score), 0) AS total
-       FROM leaderboard_entries e
-       WHERE ${[...conditions, "e.user_id = ?"].join(" AND ")}`,
-    )
-    .bind(...binds, userId)
-    .first<{ total: number }>();
-  const score = mine?.total ?? 0;
-  if (score === 0) return { userId, username: user.username, color: user.color, score: 0, rank: null };
+    const mine = await db
+        .prepare(
+            `SELECT COALESCE(SUM(e.score), 0) AS total
+             FROM leaderboard_entries e
+             WHERE ${[...conditions, "e.user_id = ?"].join(" AND ")}`,
+        )
+        .bind(...binds, userId)
+        .first<{ total: number }>();
+    const score = mine?.total ?? 0;
+    if (score === 0) return {userId, username: user.username, color: user.color, score: 0, rank: null};
 
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const ranked = await db
-    .prepare(
-      `SELECT COUNT(*) + 1 AS rank FROM (
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const ranked = await db
+        .prepare(
+            `SELECT COUNT(*) + 1 AS rank FROM (
          SELECT e.user_id AS user_id, SUM(e.score) AS total_score
          FROM leaderboard_entries e
          ${where}
          GROUP BY e.user_id
        ) t
        WHERE t.total_score > ?`,
-    )
-    .bind(...binds, score)
-    .first<{ rank: number }>();
+        )
+        .bind(...binds, score)
+        .first<{ rank: number }>();
 
-  return { userId, username: user.username, color: user.color, score, rank: ranked?.rank ?? 1 };
+    return {userId, username: user.username, color: user.color, score, rank: ranked?.rank ?? 1};
 }

@@ -167,7 +167,10 @@ puzzleRoutes.openapi(
             "invite their own friends to the new lobby without disrupting anyone still viewing the original.",
         request: {params: z.object({id: z.string()})},
         responses: {
-            201: {description: "New puzzle created, waiting in its lobby", content: {"application/json": {schema: ReplayResultSchema}}},
+            201: {
+                description: "New puzzle created, waiting in its lobby",
+                content: {"application/json": {schema: ReplayResultSchema}}
+            },
             409: {
                 description: "Source puzzle isn't finished yet, or has no image",
                 content: {"application/json": {schema: ErrorSchema}}
@@ -282,7 +285,10 @@ puzzleRoutes.openapi(
         responses: {
             200: {description: "Move applied", content: {"application/json": {schema: MoveResultSchema}}},
             400: {description: "Missing/invalid fields", content: {"application/json": {schema: ErrorSchema}}},
-            403: {description: "Didn't join this puzzle before it started", content: {"application/json": {schema: ErrorSchema}}},
+            403: {
+                description: "Didn't join this puzzle before it started",
+                content: {"application/json": {schema: ErrorSchema}}
+            },
             409: {
                 description: "Move rejected (not playing, invalid cells, etc.)",
                 content: {"application/json": {schema: ErrorSchema}}
@@ -336,7 +342,10 @@ puzzleRoutes.openapi(
         responses: {
             200: {description: "Broadcast", content: {"application/json": {schema: OkSchema}}},
             400: {description: "Invalid cell index", content: {"application/json": {schema: ErrorSchema}}},
-            403: {description: "Didn't join this puzzle before it started", content: {"application/json": {schema: ErrorSchema}}},
+            403: {
+                description: "Didn't join this puzzle before it started",
+                content: {"application/json": {schema: ErrorSchema}}
+            },
             409: {
                 description: "Puzzle is not in progress",
                 content: {"application/json": {schema: ErrorSchema}}

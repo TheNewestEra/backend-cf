@@ -9,19 +9,24 @@
 import type {AccountsRpc, GuessRpc, PuzzleRpc} from "@game-worker/shared/rpc-types";
 
 interface __BaseEnv_Env {
-	DB: D1Database;
-	ACCOUNTS: AccountsRpc;
-	PUZZLE: PuzzleRpc;
-	GUESS: GuessRpc;
-	USER_DO: DurableObjectNamespace<import("./src/index").UserDO>;
+    DB: D1Database;
+    ACCOUNTS: AccountsRpc;
+    PUZZLE: PuzzleRpc;
+    GUESS: GuessRpc;
+    USER_DO: DurableObjectNamespace<import("./src/index").UserDO>;
 }
+
 declare global {
-	namespace Cloudflare {
-		interface GlobalProps {
-			mainModule: typeof import("./src/index");
-			durableNamespaces: "UserDO";
-		}
-		interface Env extends __BaseEnv_Env {}
-	}
-	interface Env extends __BaseEnv_Env {}
+    namespace Cloudflare {
+        interface GlobalProps {
+            mainModule: typeof import("./src/index");
+            durableNamespaces: "UserDO";
+        }
+
+        interface Env extends __BaseEnv_Env {
+        }
+    }
+
+    interface Env extends __BaseEnv_Env {
+    }
 }

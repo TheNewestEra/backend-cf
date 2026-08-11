@@ -1,107 +1,111 @@
 {
-	"$schema": "../../node_modules/wrangler/config-schema.json",
-	"name": "game-accounts-worker",
-	"main": "src/index.ts",
-	"compatibility_date": "2026-05-25",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
-	"observability": {
-		"enabled": true,
-		"head_sampling_rate": 1
-	},
-	// Custom Domain, one whole subdomain per service per environment:
-	// dev.api.accounts.ryanb.co.za here, {env}.api.accounts.ryanb.co.za in
-	// each named env below, and the bare api.accounts.ryanb.co.za for
-	// production (no env prefix). `custom_domain: true` auto-provisions the
-	// DNS record + edge cert for this exact hostname against the account's
-	// ryanb.co.za zone — see the README's "Environments" section, including
-	// the session-cookie caveat that comes with each service keeping its
-	// own origin under this scheme.
-	"routes": [
-		{
-			"pattern": "dev.api.accounts.ryanb.co.za",
-			"custom_domain": true
-		}
-	],
-	// Owns `users` + `sessions` — the only Worker that ever writes either
-	// table. Every other service reaches these through the `AccountsService`
-	// RPC entrypoint (see src/index.ts) rather than binding this database
-	// directly for those two tables. (Some services still bind this same
-	// database directly for their *own* tables, and may read — never write —
-	// `users` for display-name joins; see each service's own wrangler.jsonc.)
-	// Unnamed/top-level config == "dev" (deployed as `game-accounts-worker`,
-	// no --env flag needed — this is today's already-deployed environment).
-	"d1_databases": [
-		{
-			"binding": "DB",
-			"database_name": "game-worker-catalog",
-			"database_id": "cd1e3d8e-eec2-4020-91b6-7adf07247d06",
-			"migrations_dir": "../../migrations"
-		}
-	],
-	// Named environments each get their own physical D1 database and a
-	// name-suffixed Worker script, deployed with `wrangler deploy --env
-	// <name>`. NOTE: per Wrangler's config schema, binding arrays (d1, r2,
-	// queues, services, durable_objects, ai, ...) are NOT inherited from the
-	// top level into a named environment — each env below re-declares
-	// everything it needs from scratch.
-	"env": {
-		"staging": {
-			"name": "game-accounts-worker-staging",
-			"routes": [
-				{
-					"pattern": "staging.api.accounts.ryanb.co.za",
-					"custom_domain": true
-				}
-			],
-			"d1_databases": [
-				{
-					"binding": "DB",
-					"database_name": "game-worker-catalog-staging",
-					"database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
-					"migrations_dir": "../../migrations"
-				}
-			]
-		},
-		"production": {
-			"name": "game-accounts-worker-prod",
-			// Prod-only OTel export, layered on top of the inherited top-level
-			// `observability` block above (enabled/head_sampling_rate still
-			// apply to Cloudflare's own dashboard view). "k8s-logs" and "k8s"
-			// are dashboard-configured Workers Observability destinations
-			// (Destination Type "Logs" / "Traces") pointing at the OTLP
-			// endpoint of the collector running in the k8s cluster — see
-			// https://developers.cloudflare.com/workers/observability/exporting-opentelemetry-data/.
-			// Dev/staging deliberately keep plain Cloudflare-only logging.
-			"observability": {
-				"enabled": true,
-				"head_sampling_rate": 1,
-				"logs": {
-					"enabled": true,
-					"destinations": ["k8s-logs"],
-					"head_sampling_rate": 1
-				},
-				"traces": {
-					"enabled": true,
-					"destinations": ["k8s"],
-					"head_sampling_rate": 1
-				}
-			},
-			"routes": [
-				{
-					"pattern": "api.accounts.ryanb.co.za",
-					"custom_domain": true
-				}
-			],
-			"d1_databases": [
-				{
-					"binding": "DB",
-					"database_name": "game-worker-catalog-prod",
-					"database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
-					"migrations_dir": "../../migrations"
-				}
-			]
-		}
-	}
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "game-accounts-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-25",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  // Custom Domain, one whole subdomain per service per environment:
+  // dev.api.accounts.ryanb.co.za here, {env}.api.accounts.ryanb.co.za in
+  // each named env below, and the bare api.accounts.ryanb.co.za for
+  // production (no env prefix). `custom_domain: true` auto-provisions the
+  // DNS record + edge cert for this exact hostname against the account's
+  // ryanb.co.za zone — see the README's "Environments" section, including
+  // the session-cookie caveat that comes with each service keeping its
+  // own origin under this scheme.
+  "routes": [
+    {
+      "pattern": "dev.api.accounts.ryanb.co.za",
+      "custom_domain": true
+    }
+  ],
+  // Owns `users` + `sessions` — the only Worker that ever writes either
+  // table. Every other service reaches these through the `AccountsService`
+  // RPC entrypoint (see src/index.ts) rather than binding this database
+  // directly for those two tables. (Some services still bind this same
+  // database directly for their *own* tables, and may read — never write —
+  // `users` for display-name joins; see each service's own wrangler.jsonc.)
+  // Unnamed/top-level config == "dev" (deployed as `game-accounts-worker`,
+  // no --env flag needed — this is today's already-deployed environment).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "game-worker-catalog",
+      "database_id": "cd1e3d8e-eec2-4020-91b6-7adf07247d06",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  // Named environments each get their own physical D1 database and a
+  // name-suffixed Worker script, deployed with `wrangler deploy --env
+  // <name>`. NOTE: per Wrangler's config schema, binding arrays (d1, r2,
+  // queues, services, durable_objects, ai, ...) are NOT inherited from the
+  // top level into a named environment — each env below re-declares
+  // everything it needs from scratch.
+  "env": {
+    "staging": {
+      "name": "game-accounts-worker-staging",
+      "routes": [
+        {
+          "pattern": "staging.api.accounts.ryanb.co.za",
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "game-worker-catalog-staging",
+          "database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
+          "migrations_dir": "../../migrations"
+        }
+      ]
+    },
+    "production": {
+      "name": "game-accounts-worker-prod",
+      // Prod-only OTel export, layered on top of the inherited top-level
+      // `observability` block above (enabled/head_sampling_rate still
+      // apply to Cloudflare's own dashboard view). "k8s-logs" and "k8s"
+      // are dashboard-configured Workers Observability destinations
+      // (Destination Type "Logs" / "Traces") pointing at the OTLP
+      // endpoint of the collector running in the k8s cluster — see
+      // https://developers.cloudflare.com/workers/observability/exporting-opentelemetry-data/.
+      // Dev/staging deliberately keep plain Cloudflare-only logging.
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "enabled": true,
+          "destinations": [
+            "k8s-logs"
+          ],
+          "head_sampling_rate": 1
+        },
+        "traces": {
+          "enabled": true,
+          "destinations": [
+            "k8s"
+          ],
+          "head_sampling_rate": 1
+        }
+      },
+      "routes": [
+        {
+          "pattern": "api.accounts.ryanb.co.za",
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "game-worker-catalog-prod",
+          "database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
+          "migrations_dir": "../../migrations"
+        }
+      ]
+    }
+  }
 }

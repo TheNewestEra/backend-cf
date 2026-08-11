@@ -1,16 +1,4 @@
-// Workers AI calls shared by both games: a text model invents prompts
-// (one per round for "guess the prompt", one for a theme-less puzzle
-// image), an image model renders each into a picture. Kept isolated here,
-// with no dependency on any service, so it's shared source between the
-// `guess` and `puzzle` Workers — each binds its own `AI` and passes it in,
-// so this file itself has no binding of its own.
-
 const PROMPT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
-
-// SDXL-Lightning: distilled for a handful of steps, good quality/speed
-// trade-off for generating several images per game. Swap to
-// "@cf/stabilityai/stable-diffusion-xl-base-1.0" (and raise IMAGE_STEPS,
-// e.g. 20) for higher fidelity at the cost of noticeably slower rounds.
 const IMAGE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0" as const;
 const IMAGE_STEPS = 8;
 

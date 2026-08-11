@@ -1,10 +1,10 @@
 import {z} from "@hono/zod-openapi";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {
-    WsPlayerJoinedMessageSchema,
-    WsPongMessageSchema,
-    WsPresenceMessageSchema,
-    WsStatusMessageSchema,
+        WsPlayerJoinedMessageSchema,
+        WsPongMessageSchema,
+        WsPresenceMessageSchema,
+        WsStatusMessageSchema,
 } from "@game-worker/shared/ws-messages";
 
 /** Sourced from `@game-worker/shared/game-session-status` — Guess the
@@ -84,17 +84,32 @@ export const ReplayResultSchema = z
 // named components — and therefore as generated model types — in this
 // service's spec/client for the FE to import and use.
 
+/** The `type` discriminator values for this game's own WS events — the
+ * shared ones (`status`, `player_joined`, `presence`, `pong`) live in
+ * `@game-worker/shared/ws-messages`'s `WsEventType` instead, since those are
+ * byte-for-byte identical to Guess the Prompt's. Together the two enums
+ * cover every member of `PuzzleWsMessageSchema` below, and `puzzle.model.ts`
+ * broadcasts using these same values rather than raw string literals. */
+export const PuzzleWsEventType = {
+    State: "state",
+    Solved: "solved",
+    Move: "move",
+    TileSelected: "tile_selected",
+    Timeout: "timeout",
+} as const;
+export type PuzzleWsEventType = (typeof PuzzleWsEventType)[keyof typeof PuzzleWsEventType];
+
 /** A full state snapshot — sent on connect and after any status-changing
  * RPC. `.extend()` on an already-`.openapi()`-named schema (`Puzzle`) makes
  * zod-to-openapi generate this as a composition over that component rather
  * than flattening/duplicating its fields. */
-export const PuzzleWsStateMessageSchema = PuzzlePublicSchema.extend({type: z.literal("state")}).openapi(
-    "PuzzleWsStateMessage",
-);
+export const PuzzleWsStateMessageSchema = PuzzlePublicSchema.extend({
+    type: z.literal(PuzzleWsEventType.State),
+}).openapi("PuzzleWsStateMessage");
 
 export const PuzzleWsSolvedMessageSchema = z
     .object({
-        type: z.literal("solved"),
+        type: z.literal(PuzzleWsEventType.Solved),
         board: z.array(z.number()),
         score: z.number(),
         solvedBy: z.string(),
@@ -105,7 +120,7 @@ export const PuzzleWsSolvedMessageSchema = z
 
 export const PuzzleWsMoveMessageSchema = z
     .object({
-        type: z.literal("move"),
+        type: z.literal(PuzzleWsEventType.Move),
         cellA: z.number(),
         cellB: z.number(),
         by: z.string(),
@@ -117,7 +132,7 @@ export const PuzzleWsMoveMessageSchema = z
  * `selectTile`. */
 export const PuzzleWsTileSelectedMessageSchema = z
     .object({
-        type: z.literal("tile_selected"),
+        type: z.literal(PuzzleWsEventType.TileSelected),
         cell: z.number(),
         player: z.string(),
         color: z.string(),
@@ -125,7 +140,7 @@ export const PuzzleWsTileSelectedMessageSchema = z
     .openapi("PuzzleWsTileSelectedMessage");
 
 export const PuzzleWsTimeoutMessageSchema = z
-    .object({type: z.literal("timeout")})
+    .object({type: z.literal(PuzzleWsEventType.Timeout)})
     .openapi("PuzzleWsTimeoutMessage");
 
 /** Every message shape `PuzzleDO` ever sends over its WebSocket,

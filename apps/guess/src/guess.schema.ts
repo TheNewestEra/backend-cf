@@ -1,10 +1,10 @@
-import { z } from "@hono/zod-openapi";
-import { GameSessionStatus } from "@game-worker/shared/game-session-status";
+import {z} from "@hono/zod-openapi";
+import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {
-  WsPlayerJoinedMessageSchema,
-  WsPongMessageSchema,
-  WsPresenceMessageSchema,
-  WsStatusMessageSchema,
+    WsPlayerJoinedMessageSchema,
+    WsPongMessageSchema,
+    WsPresenceMessageSchema,
+    WsStatusMessageSchema,
 } from "@game-worker/shared/ws-messages";
 
 /** Sourced from `@game-worker/shared/game-session-status` — Piece Puzzle's
@@ -21,13 +21,13 @@ export const GameStatusSchema = z.nativeEnum(GameSessionStatus).openapi("GameSta
  * Full lifecycle: `Pending → Generating → Ready → Active → Complete|Timeout`,
  * with `Error` as generation's own dead-end branch. */
 export const RoundStatus = {
-  Pending: "pending",
-  Generating: "generating",
-  Ready: "ready",
-  Active: "active",
-  Error: "error",
-  Complete: "complete",
-  Timeout: "timeout",
+    Pending: "pending",
+    Generating: "generating",
+    Ready: "ready",
+    Active: "active",
+    Error: "error",
+    Complete: "complete",
+    Timeout: "timeout",
 } as const;
 export type RoundStatus = (typeof RoundStatus)[keyof typeof RoundStatus];
 export const RoundStatusSchema = z.nativeEnum(RoundStatus).openapi("RoundStatus");
@@ -39,22 +39,22 @@ export const RoundStatusSchema = z.nativeEnum(RoundStatus).openapi("RoundStatus"
  * `revealRound()` and guess.controller.ts's image route so the two can't
  * drift on what counts as "visible". */
 export const ROUND_VISIBLE_STATUSES: readonly RoundStatus[] = [
-  RoundStatus.Active,
-  RoundStatus.Complete,
-  RoundStatus.Timeout,
+    RoundStatus.Active,
+    RoundStatus.Complete,
+    RoundStatus.Timeout,
 ];
 
 export const RoundPublicSchema = z
-  .object({
-    index: z.number(),
-    status: RoundStatusSchema,
-    error: z.string().optional(),
-    remainingMs: z
-      .number()
-      .nullable()
-      .openapi({ description: "ms left to guess this round; null unless this is the currently `active` round" }),
-  })
-  .openapi("Round");
+    .object({
+        index: z.number(),
+        status: RoundStatusSchema,
+        error: z.string().optional(),
+        remainingMs: z
+            .number()
+            .nullable()
+            .openapi({description: "ms left to guess this round; null unless this is the currently `active` round"}),
+    })
+    .openapi("Round");
 
 /** A single participant's running total across every `correct` guess this
  * game — sorted highest-first, so index 0 is always the leader. Present
@@ -62,47 +62,47 @@ export const RoundPublicSchema = z
  * client can render it as a scoreboard at any point, but it's only the
  * *final* standings once `status` reaches `solved`/`timeout`. */
 export const GameResultSchema = z
-  .object({ name: z.string(), color: z.string(), score: z.number() })
-  .openapi("GameResult");
+    .object({name: z.string(), color: z.string(), score: z.number()})
+    .openapi("GameResult");
 
 /** A joined player's public roster entry — just enough to render an avatar
  * list in the lobby/play page. No id/token here; those stay private to the
  * participant who owns them (see JoinResultSchema). Mirrors Piece Puzzle's
  * own participant roster entry. */
 export const ParticipantPublicSchema = z
-  .object({ name: z.string(), color: z.string() })
-  .openapi("Participant");
+    .object({name: z.string(), color: z.string()})
+    .openapi("Participant");
 
 export const GamePublicSchema = z
-  .object({
-    id: z.string(),
-    theme: z.string().nullable(),
-    status: GameStatusSchema,
-    error: z.string().optional(),
-    rounds: z.array(RoundPublicSchema),
-    currentRound: z
-      .number()
-      .nullable()
-      .openapi({ description: "Index of the round currently open for guessing; null before play starts or after the game has finished" }),
-    lobbyRemainingMs: z
-      .number()
-      .nullable()
-      .openapi({ description: "ms left in the waiting room; null outside the `waiting` status" }),
-    connectedPlayers: z.number().openapi({ description: "Live WebSocket connection count (players + spectators)" }),
-    participants: z.array(ParticipantPublicSchema).openapi({ description: "Everyone who has joined, in join order" }),
-    results: z
-      .array(GameResultSchema)
-      .openapi({ description: "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`" }),
-  })
-  .openapi("Game");
+    .object({
+        id: z.string(),
+        theme: z.string().nullable(),
+        status: GameStatusSchema,
+        error: z.string().optional(),
+        rounds: z.array(RoundPublicSchema),
+        currentRound: z
+            .number()
+            .nullable()
+            .openapi({description: "Index of the round currently open for guessing; null before play starts or after the game has finished"}),
+        lobbyRemainingMs: z
+            .number()
+            .nullable()
+            .openapi({description: "ms left in the waiting room; null outside the `waiting` status"}),
+        connectedPlayers: z.number().openapi({description: "Live WebSocket connection count (players + spectators)"}),
+        participants: z.array(ParticipantPublicSchema).openapi({description: "Everyone who has joined, in join order"}),
+        results: z
+            .array(GameResultSchema)
+            .openapi({description: "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`"}),
+    })
+    .openapi("Game");
 
 export const GuessResultSchema = z
-  .object({
-    correct: z.boolean(),
-    prompt: z.string().nullable(),
-    score: z.number().nullable().openapi({ description: "Time-weighted points earned; null when the guess was wrong" }),
-  })
-  .openapi("GuessResult");
+    .object({
+        correct: z.boolean(),
+        prompt: z.string().nullable(),
+        score: z.number().nullable().openapi({description: "Time-weighted points earned; null when the guess was wrong"}),
+    })
+    .openapi("GuessResult");
 
 /** `token` is only present for anonymous guests — it's the bearer secret
  * they must resend with every guess/reveal (see guess.model.ts's
@@ -112,12 +112,12 @@ export const GuessResultSchema = z
  * a fresh one generated at join time — returned so the caller's own client
  * knows what to render immediately, without waiting on a broadcast. */
 export const JoinResultSchema = z
-  .object({
-    participantId: z.string(),
-    token: z.string().nullable(),
-    color: z.string(),
-  })
-  .openapi("JoinResult");
+    .object({
+        participantId: z.string(),
+        token: z.string().nullable(),
+        color: z.string(),
+    })
+    .openapi("JoinResult");
 
 // --- WebSocket message shapes ---------------------------------------------
 //
@@ -132,72 +132,72 @@ export const JoinResultSchema = z
  * RPC. `.extend()` on an already-`.openapi()`-named schema (`Game`) makes
  * zod-to-openapi generate this as a composition over that component rather
  * than flattening/duplicating its fields. */
-export const GameWsStateMessageSchema = GamePublicSchema.extend({ type: z.literal("state") }).openapi(
-  "GameWsStateMessage",
+export const GameWsStateMessageSchema = GamePublicSchema.extend({type: z.literal("state")}).openapi(
+    "GameWsStateMessage",
 );
 
 export const GameWsPromptsReadyMessageSchema = z
-  .object({ type: z.literal("prompts_ready"), count: z.number() })
-  .openapi("GameWsPromptsReadyMessage");
+    .object({type: z.literal("prompts_ready"), count: z.number()})
+    .openapi("GameWsPromptsReadyMessage");
 
 export const GameWsRoundStatusMessageSchema = z
-  .object({
-    type: z.literal("round_status"),
-    index: z.number(),
-    status: RoundPublicSchema.shape.status,
-    error: z.string().optional(),
-  })
-  .openapi("GameWsRoundStatusMessage");
+    .object({
+        type: z.literal("round_status"),
+        index: z.number(),
+        status: RoundPublicSchema.shape.status,
+        error: z.string().optional(),
+    })
+    .openapi("GameWsRoundStatusMessage");
 
 export const GameWsRoundReadyMessageSchema = z
-  .object({ type: z.literal("round_ready"), index: z.number() })
-  .openapi("GameWsRoundReadyMessage");
+    .object({type: z.literal("round_ready"), index: z.number()})
+    .openapi("GameWsRoundReadyMessage");
 
 export const GameWsGuessMessageSchema = z
-  .object({
-    type: z.literal("guess"),
-    index: z.number(),
-    player: z.string(),
-    color: z.string(),
-    correct: z.boolean(),
-    score: z.number().nullable(),
-  })
-  .openapi("GameWsGuessMessage");
+    .object({
+        type: z.literal("guess"),
+        index: z.number(),
+        player: z.string(),
+        color: z.string(),
+        correct: z.boolean(),
+        score: z.number().nullable(),
+    })
+    .openapi("GameWsGuessMessage");
 
 export const GameWsRevealedMessageSchema = z
-  .object({
-    type: z.literal("revealed"),
-    index: z.number(),
-    prompt: z.string(),
-    player: z.string(),
-    color: z.string(),
-  })
-  .openapi("GameWsRevealedMessage");
+    .object({
+        type: z.literal("revealed"),
+        index: z.number(),
+        prompt: z.string(),
+        player: z.string(),
+        color: z.string(),
+    })
+    .openapi("GameWsRevealedMessage");
 
 /** Purely a live typing indicator — see guess.model.ts's `broadcastTyping`. */
 export const GameWsPlayerTypingMessageSchema = z
-  .object({
-    type: z.literal("player_typing"),
-    index: z.number(),
-    player: z.string(),
-    color: z.string(),
-  })
-  .openapi("GameWsPlayerTypingMessage");
+    .object({
+        type: z.literal("player_typing"),
+        index: z.number(),
+        player: z.string(),
+        color: z.string(),
+    })
+    .openapi("GameWsPlayerTypingMessage");
 
 /** Every message shape `GameDO` ever sends over its WebSocket, discriminated
  * by `type` — see guess.model.ts's `broadcast()`/`send()`. */
 export const GameWsMessageSchema = z
-  .discriminatedUnion("type", [
-    GameWsStateMessageSchema,
-    WsStatusMessageSchema,
-    GameWsPromptsReadyMessageSchema,
-    GameWsRoundStatusMessageSchema,
-    GameWsRoundReadyMessageSchema,
-    WsPlayerJoinedMessageSchema,
-    GameWsGuessMessageSchema,
-    GameWsRevealedMessageSchema,
-    GameWsPlayerTypingMessageSchema,
-    WsPresenceMessageSchema,
-    WsPongMessageSchema,
-  ])
-  .openapi("GameWsMessage");
+    .discriminatedUnion("type", [
+        GameWsStateMessageSchema,
+        WsStatusMessageSchema,
+        GameWsPromptsReadyMessageSchema,
+        GameWsRoundStatusMessageSchema,
+        GameWsRoundReadyMessageSchema,
+        WsPlayerJoinedMessageSchema,
+        GameWsGuessMessageSchema,
+        GameWsRevealedMessageSchema,
+        GameWsPlayerTypingMessageSchema,
+        WsPresenceMessageSchema,
+        WsPongMessageSchema,
+    ])
+    .openapi("GameWsMessage");

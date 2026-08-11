@@ -12,9 +12,22 @@
 import { z } from "@hono/zod-openapi";
 import { GameSessionStatus } from "./game-session-status";
 
+/** The `type` discriminator values shared by every game's WS union — see
+ * this file's header for why these particular shapes live here instead of
+ * per-game. Each game's own schema (guess.schema.ts's `GameWsEventType` /
+ * puzzle.schema.ts's `PuzzleWsEventType`) covers the rest of its union with
+ * the same pattern. */
+export const WsEventType = {
+  Status: "status",
+  PlayerJoined: "player_joined",
+  Presence: "presence",
+  Pong: "pong",
+} as const;
+export type WsEventType = (typeof WsEventType)[keyof typeof WsEventType];
+
 export const WsStatusMessageSchema = z
   .object({
-    type: z.literal("status"),
+    type: z.literal(WsEventType.Status),
     status: z.nativeEnum(GameSessionStatus),
     error: z.string().optional(),
   })
@@ -22,15 +35,15 @@ export const WsStatusMessageSchema = z
 
 /** Broadcast whenever someone joins — see each DO's `join()`. */
 export const WsPlayerJoinedMessageSchema = z
-  .object({ type: z.literal("player_joined"), name: z.string(), color: z.string() })
+  .object({ type: z.literal(WsEventType.PlayerJoined), name: z.string(), color: z.string() })
   .openapi("WsPlayerJoinedMessage");
 
 /** Broadcast whenever the live WebSocket connection count changes — see each
  * DO's `fetch()`/`webSocketClose()`. */
 export const WsPresenceMessageSchema = z
-  .object({ type: z.literal("presence"), connectedPlayers: z.number() })
+  .object({ type: z.literal(WsEventType.Presence), connectedPlayers: z.number() })
   .openapi("WsPresenceMessage");
 
 /** Reply to a client's `"ping"` — sent directly to the asking socket, never
  * broadcast to everyone else. */
-export const WsPongMessageSchema = z.object({ type: z.literal("pong") }).openapi("WsPongMessage");
+export const WsPongMessageSchema = z.object({ type: z.literal(WsEventType.Pong) }).openapi("WsPongMessage");

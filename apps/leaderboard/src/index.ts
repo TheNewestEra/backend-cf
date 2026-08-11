@@ -3,7 +3,7 @@ import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {leaderboardRoutes} from "./leaderboard.controller";
-import {type RecordScoreInput, recordScore} from "./leaderboard.service";
+import {recordScore, type RecordScoreInput} from "./leaderboard.service";
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 

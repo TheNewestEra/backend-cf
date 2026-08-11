@@ -20,7 +20,11 @@ type ActionResult = { ok: true } | { ok: false; error: string };
  * pragmatic pattern `leaderboard` uses for display-name joins. Kept local
  * rather than imported across the app boundary since apps/accounts is a
  * separately deployed Worker, not a shared package. */
-async function findUserByUsername(db: Database, username: string): Promise<{ id: string; username: string; color: string } | null> {
+async function findUserByUsername(db: Database, username: string): Promise<{
+    id: string;
+    username: string;
+    color: string
+} | null> {
     const row = await db
         .prepare("SELECT id, username, color FROM users WHERE username_lower = ?")
         .bind(username.trim().toLowerCase())

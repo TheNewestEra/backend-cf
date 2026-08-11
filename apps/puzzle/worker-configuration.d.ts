@@ -9,22 +9,27 @@
 import type {AccountsRpc, CatalogRpc, LeaderboardRpc} from "@game-worker/shared/rpc-types";
 
 interface __BaseEnv_Env {
-	IMAGES: R2Bucket;
-	PUZZLE_QUEUE: Queue;
-	FLAGS: Flagship;
-	AI: Ai;
-	ACCOUNTS: AccountsRpc;
-	BROWSE: CatalogRpc;
-	LEADERBOARD: LeaderboardRpc;
-	PUZZLE_DO: DurableObjectNamespace<import("./src/index").PuzzleDO>;
+    IMAGES: R2Bucket;
+    PUZZLE_QUEUE: Queue;
+    FLAGS: Flagship;
+    AI: Ai;
+    ACCOUNTS: AccountsRpc;
+    BROWSE: CatalogRpc;
+    LEADERBOARD: LeaderboardRpc;
+    PUZZLE_DO: DurableObjectNamespace<import("./src/index").PuzzleDO>;
 }
+
 declare global {
-	namespace Cloudflare {
-		interface GlobalProps {
-			mainModule: typeof import("./src/index");
-			durableNamespaces: "PuzzleDO";
-		}
-		interface Env extends __BaseEnv_Env {}
-	}
-	interface Env extends __BaseEnv_Env {}
+    namespace Cloudflare {
+        interface GlobalProps {
+            mainModule: typeof import("./src/index");
+            durableNamespaces: "PuzzleDO";
+        }
+
+        interface Env extends __BaseEnv_Env {
+        }
+    }
+
+    interface Env extends __BaseEnv_Env {
+    }
 }

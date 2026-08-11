@@ -3,8 +3,14 @@ import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {accountRoutes} from "./account.controller";
-import {findUserByUsername, getUserById, type UserRecord} from "./account.service";
-import {createSession, deleteSession, getUserBySession} from "./account.service";
+import {
+    createSession,
+    deleteSession,
+    findUserByUsername,
+    getUserById,
+    getUserBySession,
+    type UserRecord
+} from "./account.service";
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
