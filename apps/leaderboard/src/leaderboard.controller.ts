@@ -4,7 +4,9 @@ import { GameKindSchema } from "@game-worker/shared/game";
 import { currentUser } from "./auth.middleware";
 import {
   LeaderboardEntrySchema,
+  LeaderboardPeriod,
   LeaderboardPeriodSchema,
+  LeaderboardScope,
   LeaderboardScopeSchema,
   MyLeaderboardScoreSchema,
 } from "./leaderboard.schema";
@@ -61,10 +63,10 @@ leaderboardRoutes.openapi(
   }),
   async (c) => {
     const { kind, period, scope, page } = c.req.valid("query");
-    const query: LeaderboardQuery = { kind: kind ?? null, period: period ?? "all" };
+    const query: LeaderboardQuery = { kind: kind ?? null, period: period ?? LeaderboardPeriod.All };
     const user = await currentUser(c);
 
-    if (scope === "friends" && !user) {
+    if (scope === LeaderboardScope.Friends && !user) {
       return c.json({ error: "log in to see the friends leaderboard" }, 401);
     }
 
@@ -73,12 +75,12 @@ leaderboardRoutes.openapi(
     // Independent reads — the current user's standing doesn't depend on
     // the entries list or vice versa — so fetch them concurrently.
     const [{ entries, hasMore }, me] = await Promise.all([
-      scope === "friends" && user
+      scope === LeaderboardScope.Friends && user
         ? friendScores(c.env.DB, user.id, query, pageNum)
         : topScores(c.env.DB, query).then((entries) => ({ entries, hasMore: false })),
       user ? myScore(c.env.DB, user.id, query) : Promise.resolve(null),
     ]);
 
-    return c.json({ entries, me, page: scope === "friends" ? pageNum : 1, hasMore }, 200);
+    return c.json({ entries, me, page: scope === LeaderboardScope.Friends ? pageNum : 1, hasMore }, 200);
   },
 );

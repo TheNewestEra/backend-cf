@@ -1,5 +1,6 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
+import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {currentUser} from "./auth.middleware";
@@ -176,7 +177,7 @@ puzzleRoutes.openapi(
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
         const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
-        if (source.status !== "solved" && source.status !== "timeout") {
+        if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
             return c.json({error: "puzzle must be finished before replaying"}, 409);
         }
         if (!source.prompt) {

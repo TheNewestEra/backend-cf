@@ -1,9 +1,34 @@
 import { z } from "@hono/zod-openapi";
+import { GameSessionStatus } from "@game-worker/shared/game-session-status";
+import {
+  WsPlayerJoinedMessageSchema,
+  WsPongMessageSchema,
+  WsPresenceMessageSchema,
+  WsStatusMessageSchema,
+} from "@game-worker/shared/ws-messages";
+
+/** Sourced from `@game-worker/shared/game-session-status` — Piece Puzzle's
+ * own `PuzzleStatusSchema` (see puzzle.schema.ts) is built off the exact
+ * same enum object, so the two games' status values can't drift apart. */
+export const GameStatusSchema = z.nativeEnum(GameSessionStatus).openapi("GameStatus");
+
+/** A round's own progress, independent of the game's overall `status` —
+ * see guess.model.ts's `ROUND_TERMINAL_STATUSES`. */
+export const RoundStatus = {
+  Pending: "pending",
+  Generating: "generating",
+  Ready: "ready",
+  Error: "error",
+  Complete: "complete",
+  Timeout: "timeout",
+} as const;
+export type RoundStatus = (typeof RoundStatus)[keyof typeof RoundStatus];
+export const RoundStatusSchema = z.nativeEnum(RoundStatus).openapi("RoundStatus");
 
 export const RoundPublicSchema = z
   .object({
     index: z.number(),
-    status: z.enum(["pending", "generating", "ready", "error", "complete", "timeout"]),
+    status: RoundStatusSchema,
     error: z.string().optional(),
   })
   .openapi("Round");
@@ -29,7 +54,7 @@ export const GamePublicSchema = z
   .object({
     id: z.string(),
     theme: z.string().nullable(),
-    status: z.enum(["queued", "generating", "waiting", "playing", "solved", "timeout", "error"]),
+    status: GameStatusSchema,
     error: z.string().optional(),
     rounds: z.array(RoundPublicSchema),
     lobbyRemainingMs: z
@@ -66,3 +91,86 @@ export const JoinResultSchema = z
     color: z.string(),
   })
   .openapi("JoinResult");
+
+// --- WebSocket message shapes ---------------------------------------------
+//
+// `GameDO` (see guess.model.ts) pushes each of these to connected clients.
+// The WS upgrade route itself has no OpenAPI 3 representation (see
+// index.ts's doc description), but `GameWsMessageSchema` is registered
+// directly on the OpenAPI registry so its member shapes still show up as
+// named components — and therefore as generated model types — in this
+// service's spec/client for the FE to import and use.
+
+/** A full state snapshot — sent on connect and after any status-changing
+ * RPC. `.extend()` on an already-`.openapi()`-named schema (`Game`) makes
+ * zod-to-openapi generate this as a composition over that component rather
+ * than flattening/duplicating its fields. */
+export const GameWsStateMessageSchema = GamePublicSchema.extend({ type: z.literal("state") }).openapi(
+  "GameWsStateMessage",
+);
+
+export const GameWsPromptsReadyMessageSchema = z
+  .object({ type: z.literal("prompts_ready"), count: z.number() })
+  .openapi("GameWsPromptsReadyMessage");
+
+export const GameWsRoundStatusMessageSchema = z
+  .object({
+    type: z.literal("round_status"),
+    index: z.number(),
+    status: RoundPublicSchema.shape.status,
+    error: z.string().optional(),
+  })
+  .openapi("GameWsRoundStatusMessage");
+
+export const GameWsRoundReadyMessageSchema = z
+  .object({ type: z.literal("round_ready"), index: z.number() })
+  .openapi("GameWsRoundReadyMessage");
+
+export const GameWsGuessMessageSchema = z
+  .object({
+    type: z.literal("guess"),
+    index: z.number(),
+    player: z.string(),
+    color: z.string(),
+    correct: z.boolean(),
+    score: z.number().nullable(),
+  })
+  .openapi("GameWsGuessMessage");
+
+export const GameWsRevealedMessageSchema = z
+  .object({
+    type: z.literal("revealed"),
+    index: z.number(),
+    prompt: z.string(),
+    player: z.string(),
+    color: z.string(),
+  })
+  .openapi("GameWsRevealedMessage");
+
+/** Purely a live typing indicator — see guess.model.ts's `broadcastTyping`. */
+export const GameWsPlayerTypingMessageSchema = z
+  .object({
+    type: z.literal("player_typing"),
+    index: z.number(),
+    player: z.string(),
+    color: z.string(),
+  })
+  .openapi("GameWsPlayerTypingMessage");
+
+/** Every message shape `GameDO` ever sends over its WebSocket, discriminated
+ * by `type` — see guess.model.ts's `broadcast()`/`send()`. */
+export const GameWsMessageSchema = z
+  .discriminatedUnion("type", [
+    GameWsStateMessageSchema,
+    WsStatusMessageSchema,
+    GameWsPromptsReadyMessageSchema,
+    GameWsRoundStatusMessageSchema,
+    GameWsRoundReadyMessageSchema,
+    WsPlayerJoinedMessageSchema,
+    GameWsGuessMessageSchema,
+    GameWsRevealedMessageSchema,
+    GameWsPlayerTypingMessageSchema,
+    WsPresenceMessageSchema,
+    WsPongMessageSchema,
+  ])
+  .openapi("GameWsMessage");

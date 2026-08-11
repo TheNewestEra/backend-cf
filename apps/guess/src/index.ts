@@ -4,6 +4,7 @@ import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {guessRoutes} from "./guess.controller";
 import {GameDO, type GameStatus} from "./guess.model";
+import {GameWsMessageSchema} from "./guess.schema";
 import {type GuessQueueMessage, processGuessGame} from "./guess.queue";
 
 export {GameDO};
@@ -13,6 +14,8 @@ const app = new OpenAPIHono<{ Bindings: Env }>();
 app.use("*", corsMiddleware);
 app.route("/", guessRoutes);
 
+app.openAPIRegistry.register("GameWsMessage", GameWsMessageSchema);
+
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {
@@ -21,7 +24,8 @@ app.doc("/openapi.json", {
         description:
             "Guess the Prompt: 5 AI-generated image rounds per game, players guess the prompt behind each. The " +
             "WebSocket upgrade endpoint (`/games/{id}/ws`) isn't representable in OpenAPI 3 and is omitted " +
-            "from this spec, though it's a real, functioning route.",
+            "from this spec, though it's a real, functioning route — its message payloads are still registered " +
+            "as the `GameWsMessage` component below, so the generated client has typed models for them.",
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));

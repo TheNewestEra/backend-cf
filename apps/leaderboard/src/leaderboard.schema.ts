@@ -1,10 +1,22 @@
 import { z } from "@hono/zod-openapi";
 
-export const LeaderboardPeriodSchema = z.enum(["all", "day", "week", "month"]).openapi("LeaderboardPeriod");
+export const LeaderboardPeriod = {
+  All: "all",
+  Day: "day",
+  Week: "week",
+  Month: "month",
+} as const;
+export type LeaderboardPeriod = (typeof LeaderboardPeriod)[keyof typeof LeaderboardPeriod];
+export const LeaderboardPeriodSchema = z.nativeEnum(LeaderboardPeriod).openapi("LeaderboardPeriod");
 
 /** `global` (the default) is everyone; `friends` restricts the list to the
  * signed-in user and their friends and requires being logged in. */
-export const LeaderboardScopeSchema = z.enum(["global", "friends"]).openapi("LeaderboardScope");
+export const LeaderboardScope = {
+  Global: "global",
+  Friends: "friends",
+} as const;
+export type LeaderboardScope = (typeof LeaderboardScope)[keyof typeof LeaderboardScope];
+export const LeaderboardScopeSchema = z.nativeEnum(LeaderboardScope).openapi("LeaderboardScope");
 
 export const LeaderboardEntrySchema = z
   .object({

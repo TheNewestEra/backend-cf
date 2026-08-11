@@ -4,7 +4,9 @@
 // Worker's `queue()` handler in index.ts.
 
 import {generateImage, generateRoundPrompts} from "@game-worker/shared/ai";
+import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {imageKeyFor, ROUND_COUNT} from "./guess.constants";
+import {RoundStatus} from "./guess.schema";
 
 export interface GuessQueueMessage {
     gameId: string;
@@ -15,7 +17,7 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     const {gameId, theme} = message;
     const stub = env.GAME_DO.getByName(gameId);
 
-    await stub.setStatus("generating");
+    await stub.setStatus(GameSessionStatus.Generating);
     await env.BROWSE.markCatalogGenerating(gameId);
     const prompts = await generateRoundPrompts(env.AI, theme, ROUND_COUNT);
     await stub.setPrompts(prompts);
@@ -41,7 +43,7 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
         await env.BROWSE.markCatalogReady(gameId, imageKeyFor(gameId, 0));
     } else {
         await stub.setStatus(
-            "error",
+            GameSessionStatus.Error,
             `${failures} of ${ROUND_COUNT} images failed to generate. Start a new game to try again.`,
         );
         await env.BROWSE.markCatalogError(gameId);
@@ -55,7 +57,7 @@ async function generateAndStoreImage(
     prompt: string,
 ): Promise<void> {
     const stub = env.GAME_DO.getByName(gameId);
-    await stub.setRoundStatus(index, "generating");
+    await stub.setRoundStatus(index, RoundStatus.Generating);
     try {
         const stream = await generateImage(env.AI, prompt);
         const key = imageKeyFor(gameId, index);
@@ -63,7 +65,7 @@ async function generateAndStoreImage(
         await stub.setRoundImage(index, key);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        await stub.setRoundStatus(index, "error", message);
+        await stub.setRoundStatus(index, RoundStatus.Error, message);
         throw err;
     }
 }

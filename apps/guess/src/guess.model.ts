@@ -1,23 +1,26 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "@hono/zod-openapi";
 import { generateColor } from "@game-worker/shared/color";
+import { GameSessionStatus } from "@game-worker/shared/game-session-status";
 import { lobbyEndsAt, lobbyRemainingMs } from "@game-worker/shared/lobby";
 import { isGuessCorrect } from "./guess-matching";
-import type { GamePublicSchema, GameResultSchema, GuessResultSchema, RoundPublicSchema } from "./guess.schema";
+import { RoundStatus } from "./guess.schema";
+import type { GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema } from "./guess.schema";
 import { GUESS_MAX_SCORE, GUESS_MIN_SCORE, ROUND_COUNT, guessTimeLimitSeconds } from "./guess.constants";
 
-export type RoundStatus = z.infer<typeof RoundPublicSchema>["status"];
+export { RoundStatus };
 export type GameStatus = z.infer<typeof GamePublicSchema>["status"];
 export type GamePublic = z.infer<typeof GamePublicSchema>;
 export type GuessResult = z.infer<typeof GuessResultSchema>;
 export type GameResult = z.infer<typeof GameResultSchema>;
+export type GameWsMessage = z.infer<typeof GameWsMessageSchema>;
 
 /** Round statuses that no longer accept guesses — reached once a round's
  * own guess-timeout deadline passes (see `resolveDueRounds()`), never
  * reverted. A round can also stall in `error` (image generation failed),
  * but that always takes the whole game to `error` too (see guess.queue.ts),
  * so it's never in play long enough to need a deadline. */
-const ROUND_TERMINAL_STATUSES: readonly RoundStatus[] = ["complete", "timeout"];
+const ROUND_TERMINAL_STATUSES: readonly RoundStatus[] = [RoundStatus.Complete, RoundStatus.Timeout];
 
 // The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
 // requires its row type to satisfy.
@@ -61,7 +64,11 @@ interface ParticipantPublic extends Record<string, SqlStorageValue> {
  * lobby itself, still open to joiners same as Piece Puzzle's; `error` is a
  * dead end with nothing left to join (replay creates a fresh instance
  * instead). */
-const JOINABLE_STATUSES: readonly GameStatus[] = ["queued", "generating", "waiting"];
+const JOINABLE_STATUSES: readonly GameStatus[] = [
+  GameSessionStatus.Queued,
+  GameSessionStatus.Generating,
+  GameSessionStatus.Waiting,
+];
 
 /**
  * One instance per game (routed via `env.GAME_DO.getByName(gameId)`).
@@ -181,7 +188,7 @@ export class GameDO extends DurableObject<Env> {
   async setStatus(status: GameStatus, error?: string): Promise<void> {
     // `error` is terminal (see guess.queue.ts) — drop any armed round-
     // timeout/lobby alarm so a stale one can't fire against a dead game.
-    if (status === "error") await this.ctx.storage.deleteAlarm();
+    if (status === GameSessionStatus.Error) await this.ctx.storage.deleteAlarm();
     this.ctx.storage.sql.exec("UPDATE game SET status = ?, error = ?", status, error ?? null);
     this.broadcast({ type: "status", status, error });
   }
@@ -239,7 +246,7 @@ export class GameDO extends DurableObject<Env> {
   async startNow(hostToken: string): Promise<void> {
     const row = this.requireGameRow();
     this.assertHost(row, hostToken);
-    if (row.status !== "waiting") throw new Error("game is not waiting to start");
+    if (row.status !== GameSessionStatus.Waiting) throw new Error("game is not waiting to start");
     await this.beginPlaying(row.id);
   }
 
@@ -343,7 +350,7 @@ export class GameDO extends DurableObject<Env> {
     const round = this.ctx.storage.sql
       .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
       .toArray()[0];
-    if (!round || round.status !== "ready" || !round.prompt) {
+    if (!round || round.status !== RoundStatus.Ready || !round.prompt) {
       throw new Error("round not ready");
     }
 
@@ -417,12 +424,12 @@ export class GameDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const row = this.requireGameRow();
 
-    if (row.status === "waiting" && row.lobby_ends_at !== null && Date.now() >= row.lobby_ends_at) {
+    if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null && Date.now() >= row.lobby_ends_at) {
       await this.beginPlaying(row.id);
       return;
     }
 
-    if (row.status !== "waiting" && row.status !== "playing") {
+    if (row.status !== GameSessionStatus.Waiting && row.status !== GameSessionStatus.Playing) {
       // Game already moved on to a terminal status (error, or resolved by
       // an earlier tick) before this stale alarm fired — nothing to do.
       return;
@@ -439,7 +446,7 @@ export class GameDO extends DurableObject<Env> {
     }
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    pair[1].send(JSON.stringify({ type: "state", ...this.readPublicState() }));
+    this.send(pair[1], { type: "state", ...this.readPublicState() });
     // Let every other connected client know the spectator/player count
     // changed — mirrors PuzzleDO's presence broadcast.
     this.broadcast({ type: "presence", connectedPlayers: this.ctx.getWebSockets().length });
@@ -449,7 +456,7 @@ export class GameDO extends DurableObject<Env> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return;
     if (message === "ping") {
-      ws.send(JSON.stringify({ type: "pong" }));
+      this.send(ws, { type: "pong" });
       return;
     }
     // Anything else must be a small JSON envelope — currently only
@@ -509,18 +516,20 @@ export class GameDO extends DurableObject<Env> {
 
     const rounds = this.ctx.storage.sql.exec<RoundRow>("SELECT * FROM rounds ORDER BY idx ASC").toArray();
     for (const round of rounds) {
-      if (round.status !== "ready" || round.ready_at === null || round.ready_at + limitMs > now) continue;
+      if (round.status !== RoundStatus.Ready || round.ready_at === null || round.ready_at + limitMs > now) continue;
       const correct = this.ctx.storage.sql
         .exec<{ n: number }>("SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND correct = 1", round.idx)
         .toArray()[0]?.n;
-      const status: RoundStatus = correct && correct > 0 ? "complete" : "timeout";
+      const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
       this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, round.idx);
       this.broadcast({ type: "round_status", index: round.idx, status });
     }
 
     const statuses = this.ctx.storage.sql.exec<{ status: RoundStatus }>("SELECT status FROM rounds").toArray();
     if (statuses.every((r) => ROUND_TERMINAL_STATUSES.includes(r.status))) {
-      const gameStatus = statuses.some((r) => r.status === "complete") ? "solved" : "timeout";
+      const gameStatus = statuses.some((r) => r.status === RoundStatus.Complete)
+        ? GameSessionStatus.Solved
+        : GameSessionStatus.Timeout;
       await this.finalizeGame(gameId, gameStatus);
       return;
     }
@@ -583,7 +592,7 @@ export class GameDO extends DurableObject<Env> {
   private async scheduleNextAlarm(): Promise<void> {
     const row = this.requireGameRow();
     const candidates: number[] = [];
-    if (row.status === "waiting" && row.lobby_ends_at !== null) {
+    if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null) {
       candidates.push(row.lobby_ends_at);
     }
 
@@ -640,7 +649,7 @@ export class GameDO extends DurableObject<Env> {
     return {
       id: game?.id ?? "",
       theme: game?.theme ?? null,
-      status: game?.status ?? "queued",
+      status: game?.status ?? GameSessionStatus.Queued,
       error: game?.error ?? undefined,
       rounds: rounds.map((r) => ({
         index: r.idx,
@@ -654,7 +663,7 @@ export class GameDO extends DurableObject<Env> {
     };
   }
 
-  private broadcast(payload: Record<string, unknown>): void {
+  private broadcast(payload: GameWsMessage): void {
     const message = JSON.stringify(payload);
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -663,6 +672,13 @@ export class GameDO extends DurableObject<Env> {
         // Dead socket — hibernation cleans it up on close, nothing to do here.
       }
     }
+  }
+
+  /** Same message shapes as `broadcast()`, but to a single socket — used for
+   * the initial state-on-connect and the `pong` reply, neither of which
+   * should go to every other connected client. */
+  private send(ws: WebSocket, payload: GameWsMessage): void {
+    ws.send(JSON.stringify(payload));
   }
 }
 

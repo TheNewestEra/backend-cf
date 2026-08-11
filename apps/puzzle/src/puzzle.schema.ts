@@ -1,7 +1,18 @@
 import {z} from "@hono/zod-openapi";
+import {GameSessionStatus} from "@game-worker/shared/game-session-status";
+import {
+    WsPlayerJoinedMessageSchema,
+    WsPongMessageSchema,
+    WsPresenceMessageSchema,
+    WsStatusMessageSchema,
+} from "@game-worker/shared/ws-messages";
 
+/** Sourced from `@game-worker/shared/game-session-status` — Guess the
+ * Prompt's own `GameStatusSchema` (see guess.schema.ts) is built off the
+ * exact same enum object, so the two games' status values can't drift
+ * apart. */
 export const PuzzleStatusSchema = z
-    .enum(["queued", "generating", "waiting", "playing", "solved", "timeout", "error"])
+    .nativeEnum(GameSessionStatus)
     .openapi("PuzzleStatus");
 
 /** A joined player's public roster entry — just enough to render an avatar
@@ -63,3 +74,72 @@ export const ReplayResultSchema = z
         hostToken: z.string(),
     })
     .openapi("ReplayResult");
+
+// --- WebSocket message shapes ---------------------------------------------
+//
+// `PuzzleDO` (see puzzle.model.ts) pushes each of these to connected
+// clients. The WS upgrade route itself has no OpenAPI 3 representation (see
+// index.ts's doc description), but `PuzzleWsMessageSchema` is registered
+// directly on the OpenAPI registry so its member shapes still show up as
+// named components — and therefore as generated model types — in this
+// service's spec/client for the FE to import and use.
+
+/** A full state snapshot — sent on connect and after any status-changing
+ * RPC. `.extend()` on an already-`.openapi()`-named schema (`Puzzle`) makes
+ * zod-to-openapi generate this as a composition over that component rather
+ * than flattening/duplicating its fields. */
+export const PuzzleWsStateMessageSchema = PuzzlePublicSchema.extend({type: z.literal("state")}).openapi(
+    "PuzzleWsStateMessage",
+);
+
+export const PuzzleWsSolvedMessageSchema = z
+    .object({
+        type: z.literal("solved"),
+        board: z.array(z.number()),
+        score: z.number(),
+        solvedBy: z.string(),
+        solvedByColor: z.string(),
+        remainingMs: z.number(),
+    })
+    .openapi("PuzzleWsSolvedMessage");
+
+export const PuzzleWsMoveMessageSchema = z
+    .object({
+        type: z.literal("move"),
+        cellA: z.number(),
+        cellB: z.number(),
+        by: z.string(),
+        color: z.string(),
+    })
+    .openapi("PuzzleWsMoveMessage");
+
+/** Purely a live "about to move this tile" cue — see puzzle.model.ts's
+ * `selectTile`. */
+export const PuzzleWsTileSelectedMessageSchema = z
+    .object({
+        type: z.literal("tile_selected"),
+        cell: z.number(),
+        player: z.string(),
+        color: z.string(),
+    })
+    .openapi("PuzzleWsTileSelectedMessage");
+
+export const PuzzleWsTimeoutMessageSchema = z
+    .object({type: z.literal("timeout")})
+    .openapi("PuzzleWsTimeoutMessage");
+
+/** Every message shape `PuzzleDO` ever sends over its WebSocket,
+ * discriminated by `type` — see puzzle.model.ts's `broadcast()`/`send()`. */
+export const PuzzleWsMessageSchema = z
+    .discriminatedUnion("type", [
+        PuzzleWsStateMessageSchema,
+        WsStatusMessageSchema,
+        WsPlayerJoinedMessageSchema,
+        PuzzleWsSolvedMessageSchema,
+        PuzzleWsMoveMessageSchema,
+        PuzzleWsTileSelectedMessageSchema,
+        PuzzleWsTimeoutMessageSchema,
+        WsPresenceMessageSchema,
+        WsPongMessageSchema,
+    ])
+    .openapi("PuzzleWsMessage");

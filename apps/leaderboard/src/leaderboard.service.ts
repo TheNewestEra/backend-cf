@@ -13,18 +13,19 @@
 
 import type {Database} from "@game-worker/shared/db";
 import type {GameKind} from "@game-worker/shared/game";
+import {LeaderboardPeriod} from "./leaderboard.schema";
 
 export type LeaderboardKind = GameKind;
-export type LeaderboardPeriod = "all" | "day" | "week" | "month";
+export type {LeaderboardPeriod};
 
 const PERIOD_MS: Record<Exclude<LeaderboardPeriod, "all">, number> = {
-  day: 24 * 60 * 60 * 1000,
-  week: 7 * 24 * 60 * 60 * 1000,
-  month: 30 * 24 * 60 * 60 * 1000,
+  [LeaderboardPeriod.Day]: 24 * 60 * 60 * 1000,
+  [LeaderboardPeriod.Week]: 7 * 24 * 60 * 60 * 1000,
+  [LeaderboardPeriod.Month]: 30 * 24 * 60 * 60 * 1000,
 };
 
 function cutoffFor(period: LeaderboardPeriod): number | null {
-  return period === "all" ? null : Date.now() - PERIOD_MS[period];
+  return period === LeaderboardPeriod.All ? null : Date.now() - PERIOD_MS[period];
 }
 
 export interface RecordScoreInput {

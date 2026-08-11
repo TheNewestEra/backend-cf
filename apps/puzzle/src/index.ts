@@ -4,6 +4,7 @@ import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {puzzleRoutes} from "./puzzle.controller";
 import {PuzzleDO, type PuzzleStatus} from "./puzzle.model";
+import {PuzzleWsMessageSchema} from "./puzzle.schema";
 import {processPuzzle, type PuzzleQueueMessage} from "./puzzle.queue";
 
 export {PuzzleDO};
@@ -13,6 +14,8 @@ const app = new OpenAPIHono<{ Bindings: Env }>();
 app.use("*", corsMiddleware);
 app.route("/", puzzleRoutes);
 
+app.openAPIRegistry.register("PuzzleWsMessage", PuzzleWsMessageSchema);
+
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {
@@ -21,7 +24,9 @@ app.doc("/openapi.json", {
         description:
             "Piece Puzzle: one AI-generated image, sliding-tile gameplay over a Durable Object per puzzle. " +
             "The WebSocket upgrade endpoint (`/puzzles/{id}/ws`) isn't representable in OpenAPI 3 and is " +
-            "omitted from this spec, though it's a real, functioning route.",
+            "omitted from this spec, though it's a real, functioning route — its message payloads are still " +
+            "registered as the `PuzzleWsMessage` component below, so the generated client has typed models " +
+            "for them.",
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));

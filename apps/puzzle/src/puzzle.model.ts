@@ -1,13 +1,20 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "@hono/zod-openapi";
 import { generateColor } from "@game-worker/shared/color";
+import { GameSessionStatus } from "@game-worker/shared/game-session-status";
 import { lobbyEndsAt, lobbyRemainingMs } from "@game-worker/shared/lobby";
 import { PUZZLE_MAX_SCORE, PUZZLE_MIN_SOLVED_SCORE } from "./puzzle.constants";
-import type { MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema } from "./puzzle.schema";
+import type {
+  MoveResultSchema,
+  PuzzlePublicSchema,
+  PuzzleStatusSchema,
+  PuzzleWsMessageSchema,
+} from "./puzzle.schema";
 
 export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
 export type PuzzlePublic = z.infer<typeof PuzzlePublicSchema>;
 export type MoveResult = z.infer<typeof MoveResultSchema>;
+export type PuzzleWsMessage = z.infer<typeof PuzzleWsMessageSchema>;
 
 // The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
 // requires its row type to satisfy.
@@ -47,7 +54,11 @@ interface ParticipantPublic extends Record<string, SqlStorageValue> {
  * joining (and, separately, the host's "regenerate") is allowed. Once a
  * puzzle is `playing` it's in progress, so letting someone join then would
  * let them play a match already underway rather than just spectate it. */
-const JOINABLE_STATUSES: readonly PuzzleStatus[] = ["queued", "generating", "waiting"];
+const JOINABLE_STATUSES: readonly PuzzleStatus[] = [
+  GameSessionStatus.Queued,
+  GameSessionStatus.Generating,
+  GameSessionStatus.Waiting,
+];
 
 /**
  * One instance per puzzle (routed via `env.PUZZLE_DO.getByName(puzzleId)`).
@@ -178,12 +189,12 @@ export class PuzzleDO extends DurableObject<Env> {
 
   async setGenerating(): Promise<void> {
     this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'generating'");
-    this.broadcast({ type: "status", status: "generating" });
+    this.broadcast({ type: "status", status: GameSessionStatus.Generating });
   }
 
   async setError(message: string): Promise<void> {
     this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'error', error = ?", message);
-    this.broadcast({ type: "status", status: "error", error: message });
+    this.broadcast({ type: "status", status: GameSessionStatus.Error, error: message });
   }
 
   /** Image is ready — enter the waiting room rather than starting instantly,
@@ -226,7 +237,7 @@ export class PuzzleDO extends DurableObject<Env> {
   async startNow(hostToken: string): Promise<void> {
     const row = this.requireRow();
     this.assertHost(row, hostToken);
-    if (row.status !== "waiting") throw new Error("puzzle is not waiting to start");
+    if (row.status !== GameSessionStatus.Waiting) throw new Error("puzzle is not waiting to start");
     await this.beginPlaying(row.id, row.grid_size, row.time_limit_ms);
   }
 
@@ -322,7 +333,7 @@ export class PuzzleDO extends DurableObject<Env> {
   ): Promise<MoveResult> {
     const participant = this.requireParticipant(participantId, token, userId);
     const row = this.requireRow();
-    if (row.status !== "playing") throw new Error("puzzle is not in progress");
+    if (row.status !== GameSessionStatus.Playing) throw new Error("puzzle is not in progress");
 
     const cellCount = row.grid_size * row.grid_size;
     if (
@@ -369,12 +380,12 @@ export class PuzzleDO extends DurableObject<Env> {
       });
       this.updateCatalogPlayStatus(row.id, "finished");
       if (userId) await this.env.LEADERBOARD.recordScore({ userId, kind: "puzzle", sessionId: row.id, score });
-      return { status: "solved", board, solved: true, score };
+      return { status: GameSessionStatus.Solved, board, solved: true, score };
     }
 
     this.ctx.storage.sql.exec("UPDATE puzzle SET board = ?", JSON.stringify(board));
     this.broadcast({ type: "move", cellA, cellB, by: participant.name, color: participant.color });
-    return { status: "playing", board, solved: false, score: null };
+    return { status: GameSessionStatus.Playing, board, solved: false, score: null };
   }
 
   /** Broadcasts that a player has selected/highlighted a block, before
@@ -392,7 +403,7 @@ export class PuzzleDO extends DurableObject<Env> {
   ): Promise<void> {
     const participant = this.requireParticipant(participantId, token, userId);
     const row = this.requireRow();
-    if (row.status !== "playing") throw new Error("puzzle is not in progress");
+    if (row.status !== GameSessionStatus.Playing) throw new Error("puzzle is not in progress");
 
     const cellCount = row.grid_size * row.grid_size;
     if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount) {
@@ -406,11 +417,11 @@ export class PuzzleDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const row = this.requireRow();
-    if (row.status === "waiting") {
+    if (row.status === GameSessionStatus.Waiting) {
       await this.beginPlaying(row.id, row.grid_size, row.time_limit_ms);
       return;
     }
-    if (row.status === "playing") {
+    if (row.status === GameSessionStatus.Playing) {
       this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'timeout', ended_at = ?, score = 0", Date.now());
       this.broadcast({ type: "timeout" });
       this.updateCatalogPlayStatus(row.id, "finished");
@@ -427,7 +438,7 @@ export class PuzzleDO extends DurableObject<Env> {
     }
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    pair[1].send(JSON.stringify({ type: "state", ...this.readPublicState() }));
+    this.send(pair[1], { type: "state", ...this.readPublicState() });
     // Let every other connected client know the player count changed.
     this.broadcast({ type: "presence", connectedPlayers: this.ctx.getWebSockets().length });
     return new Response(null, { status: 101, webSocket: pair[0] });
@@ -435,7 +446,7 @@ export class PuzzleDO extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message === "string" && message === "ping") {
-      ws.send(JSON.stringify({ type: "pong" }));
+      this.send(ws, { type: "pong" });
     }
   }
 
@@ -498,7 +509,7 @@ export class PuzzleDO extends DurableObject<Env> {
         id: "",
         theme: null,
         prompt: null,
-        status: "queued",
+        status: GameSessionStatus.Queued,
         gridSize: 0,
         board: [],
         timeLimitMs: 0,
@@ -514,7 +525,7 @@ export class PuzzleDO extends DurableObject<Env> {
     }
 
     const remainingMs =
-      row.status === "playing" && row.started_at !== null
+      row.status === GameSessionStatus.Playing && row.started_at !== null
         ? Math.max(0, row.time_limit_ms - (Date.now() - row.started_at))
         : null;
     // `row.status === "waiting"` isn't checked separately here — `lobby_ends_at`
@@ -545,7 +556,7 @@ export class PuzzleDO extends DurableObject<Env> {
     };
   }
 
-  private broadcast(payload: Record<string, unknown>): void {
+  private broadcast(payload: PuzzleWsMessage): void {
     const message = JSON.stringify(payload);
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -554,6 +565,13 @@ export class PuzzleDO extends DurableObject<Env> {
         // Dead socket — hibernation cleans it up on close, nothing to do here.
       }
     }
+  }
+
+  /** Same message shapes as `broadcast()`, but to a single socket — used for
+   * the initial state-on-connect and the `pong` reply, neither of which
+   * should go to every other connected client. */
+  private send(ws: WebSocket, payload: PuzzleWsMessage): void {
+    ws.send(JSON.stringify(payload));
   }
 }
 

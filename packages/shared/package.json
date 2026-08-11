@@ -16,6 +16,8 @@
     "./lobby": "./src/lobby.ts",
     "./game": "./src/game.ts",
     "./game-session": "./src/game-session.ts",
+    "./game-session-status": "./src/game-session-status.ts",
+    "./ws-messages": "./src/ws-messages.ts",
     "./images": "./src/images.ts"
   },
   "dependencies": {

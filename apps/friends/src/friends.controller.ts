@@ -1,6 +1,7 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {GameKindSchema, playUrlFor} from "@game-worker/shared/game";
+import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {actionResponse} from "@game-worker/shared/http-exceptions";
 import {currentUser} from "./auth.middleware";
 import {
@@ -367,12 +368,20 @@ friendsRoutes.openapi(
         // since each game's DO namespace belongs to a different Worker.
         if (kind === "puzzle") {
             const {status} = await c.env.PUZZLE.getLobbyStatus(sessionId);
-            if (status !== "waiting" && status !== "queued" && status !== "generating") {
+            if (
+                status !== GameSessionStatus.Waiting &&
+                status !== GameSessionStatus.Queued &&
+                status !== GameSessionStatus.Generating
+            ) {
                 return c.json({error: "Invites are only open before the puzzle starts."}, 409);
             }
         } else {
             const {status} = await c.env.GUESS.getStatus(sessionId);
-            if (status !== "queued" && status !== "generating" && status !== "waiting") {
+            if (
+                status !== GameSessionStatus.Queued &&
+                status !== GameSessionStatus.Generating &&
+                status !== GameSessionStatus.Waiting
+            ) {
                 return c.json({error: "Invites are only open before the game starts."}, 409);
             }
         }
