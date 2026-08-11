@@ -6,12 +6,13 @@ import {lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
-import {GameWsEventType, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
+import {GameWsEventType, ROUND_RESOLVED_STATUSES, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
 import {
   DEFAULT_GUESS_TIME_LIMIT_SECONDS,
   GUESS_MAX_SCORE,
   GUESS_MIN_SCORE,
   guessTimeLimitSeconds,
+  POST_ROUND_SECONDS,
   ROUND_COUNT,
 } from "./guess.constants";
 
@@ -31,6 +32,11 @@ interface GameRow extends Record<string, SqlStorageValue> {
     error: string | null;
     host_token: string;
     lobby_ends_at: number | null;
+    // Set together, by resolveCurrentRound(), while the just-resolved round
+    // sits in its post-round reveal pause; both cleared together, by
+    // advanceAfterPostRound(), once that pause ends. See POST_ROUND_SECONDS.
+    post_round_index: number | null;
+    post_round_ends_at: number | null;
     created_at: number;
 }
 
@@ -109,11 +115,13 @@ export class GameDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec("DELETE FROM rounds");
         this.ctx.storage.sql.exec("DELETE FROM participants");
         this.ctx.storage.sql.exec(
-            `INSERT INTO game (id, theme, status, error, host_token, lobby_ends_at, created_at)
-             VALUES (?, ?, 'queued', NULL, ?, NULL, ?) ON CONFLICT(id) DO
+            `INSERT INTO game (id, theme, status, error, host_token, lobby_ends_at, post_round_index,
+                                post_round_ends_at, created_at)
+             VALUES (?, ?, 'queued', NULL, ?, NULL, NULL, NULL, ?) ON CONFLICT(id) DO
             UPDATE SET
                 theme = excluded.theme, status = 'queued', error = NULL,
-                host_token = excluded.host_token, lobby_ends_at = NULL`,
+                host_token = excluded.host_token, lobby_ends_at = NULL,
+                post_round_index = NULL, post_round_ends_at = NULL`,
             gameId,
             theme,
             hostToken,
@@ -385,6 +393,16 @@ export class GameDO extends DurableObject<Env> {
             return;
         }
 
+        if (row.post_round_index !== null) {
+            if (row.post_round_ends_at === null || Date.now() < row.post_round_ends_at) {
+                // Stale/early firing — rearm rather than advancing early.
+                await this.scheduleNextAlarm();
+                return;
+            }
+            await this.advanceAfterPostRound(row.id, row.post_round_index);
+            return;
+        }
+
         const active = this.ctx.storage.sql
             .exec<RoundRow>("SELECT * FROM rounds WHERE status = 'active' LIMIT 1")
             .toArray()[0];
@@ -578,6 +596,8 @@ export class GameDO extends DurableObject<Env> {
         for (const stmt of [
             "ALTER TABLE game ADD COLUMN host_token TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE game ADD COLUMN lobby_ends_at INTEGER",
+            "ALTER TABLE game ADD COLUMN post_round_index INTEGER",
+            "ALTER TABLE game ADD COLUMN post_round_ends_at INTEGER",
             "ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'",
             "ALTER TABLE guesses ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE guesses ADD COLUMN score INTEGER",
@@ -691,16 +711,17 @@ export class GameDO extends DurableObject<Env> {
     }
 
     /** Closes out the current round (`complete` if it got at least one
-     * correct guess, `timeout` if none), then either activates the next round
-     * or — once the last round resolves — finalizes the game. Called from two
-     * independent triggers: `alarm()` once a round's own deadline passes, and
-     * `submitGuess()` the instant every joined participant has answered
-     * correctly (early advance, before the timer). Because those two triggers
-     * can interleave around an `await` (Durable Objects can process another
-     * incoming call while one is awaiting a binding, e.g.
+     * correct guess, `timeout` if none), then opens its post-round reveal
+     * pause (see `POST_ROUND_SECONDS`) rather than immediately moving on —
+     * `advanceAfterPostRound()` does that once the pause elapses. Called from
+     * two independent triggers: `alarm()` once a round's own deadline
+     * passes, and `submitGuess()` the instant every joined participant has
+     * answered correctly (early advance, before the timer). Because those
+     * two triggers can interleave around an `await` (Durable Objects can
+     * process another incoming call while one is awaiting a binding, e.g.
      * `guessTimeLimitSeconds()`), this re-checks the round is still `Active`
      * as its very first, synchronous step — whichever trigger gets here
-     * first wins and the other is a clean no-op instead of double-advancing. */
+     * first wins and the other is a clean no-op instead of double-resolving. */
     private async resolveCurrentRound(gameId: string, index: number): Promise<void> {
         const still = this.ctx.storage.sql
             .exec<{ status: RoundStatus }>("SELECT status FROM rounds WHERE idx = ?", index)
@@ -713,6 +734,27 @@ export class GameDO extends DurableObject<Env> {
         const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
         this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, index);
         this.broadcast({type: GameWsEventType.RoundStatus, index, status});
+
+        const postRoundEndsAt = Date.now() + POST_ROUND_SECONDS * 1000;
+        this.ctx.storage.sql.exec(
+            "UPDATE game SET post_round_index = ?, post_round_ends_at = ?",
+            index,
+            postRoundEndsAt,
+        );
+        // Full state push (not just the RoundStatus one above) so clients pick
+        // up postRoundIndex/postRoundRemainingMs and this round's now-visible
+        // `prompt` (see ROUND_RESOLVED_STATUSES) together in one message.
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
+        await this.scheduleNextAlarm();
+    }
+
+    /** Ends round `index`'s post-round reveal pause: either activates the
+     * next round or, once the last round's pause elapses, finalizes the
+     * game. Split out from `resolveCurrentRound()` so the reveal pause is a
+     * real wait — driven by `alarm()` — rather than something clients only
+     * see for an instant. */
+    private async advanceAfterPostRound(gameId: string, index: number): Promise<void> {
+        this.ctx.storage.sql.exec("UPDATE game SET post_round_index = NULL, post_round_ends_at = NULL");
 
         const nextIndex = index + 1;
         if (nextIndex < ROUND_COUNT) {
@@ -776,12 +818,13 @@ export class GameDO extends DurableObject<Env> {
     }
 
     /** Recomputes and (re)arms the single DO alarm to whichever is next: the
-     * lobby countdown while `waiting`, or the current round's own
-     * guess-timeout (measured from its `started_at` — matching the
-     * time-weighted scoring in `scoreForGuess()`) while `playing` — there's
-     * at most one `active` round at a time (see `activateRound()`/
-     * `resolveCurrentRound()`), so no scanning multiple rounds' deadlines the
-     * way this used to. Deletes the alarm entirely once nothing is pending. */
+     * lobby countdown while `waiting`; while `playing`, either the current
+     * round's own guess-timeout (measured from its `started_at` — matching
+     * the time-weighted scoring in `scoreForGuess()`) or, if a round just
+     * resolved, the post-round reveal pause's own deadline instead — the two
+     * never overlap (see `resolveCurrentRound()`/`advanceAfterPostRound()`),
+     * so there's still only ever one deadline to arm for. Deletes the alarm
+     * entirely once nothing is pending. */
     private async scheduleNextAlarm(): Promise<void> {
         const row = this.requireGameRow();
 
@@ -791,6 +834,11 @@ export class GameDO extends DurableObject<Env> {
         }
 
         if (row.status === GameSessionStatus.Playing) {
+            if (row.post_round_index !== null && row.post_round_ends_at !== null) {
+                await this.ctx.storage.setAlarm(row.post_round_ends_at);
+                return;
+            }
+
             const active = this.ctx.storage.sql
                 .exec<Pick<RoundRow, "started_at" | "time_limit_ms">>(
                     "SELECT started_at, time_limit_ms FROM rounds WHERE status = 'active' LIMIT 1",
@@ -859,11 +907,20 @@ export class GameDO extends DurableObject<Env> {
                     r.status === RoundStatus.Active && r.started_at !== null
                         ? Math.max(0, (r.time_limit_ms ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.started_at))
                         : null,
+                // Only once a round is fully resolved — never for the still-
+                // guessable `active` round, which stays spoiler-gated behind the
+                // deliberate `revealRound()` give-up path. See
+                // ROUND_RESOLVED_STATUSES.
+                prompt: ROUND_RESOLVED_STATUSES.includes(r.status) ? r.prompt : null,
             })),
             // At most one round is ever `Active` at a time (see `activateRound()`/
-            // `resolveCurrentRound()`) — null before play starts and after the
-            // game finishes, since nothing stays `Active` in either case.
+            // `resolveCurrentRound()`) — null before play starts, during a
+            // post-round reveal pause, and after the game finishes, since
+            // nothing stays `Active` in any of those cases.
             currentRound: rounds.find((r) => r.status === RoundStatus.Active)?.idx ?? null,
+            postRoundIndex: game?.post_round_index ?? null,
+            postRoundRemainingMs:
+                game?.post_round_ends_at != null ? Math.max(0, game.post_round_ends_at - Date.now()) : null,
             lobbyRemainingMs: game ? lobbyRemainingMs(game.lobby_ends_at) : null,
             connectedPlayers: this.ctx.getWebSockets().length,
             participants: participants.map((p) => ({name: p.name, color: p.color})),

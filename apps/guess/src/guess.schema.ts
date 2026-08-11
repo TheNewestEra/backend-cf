@@ -44,6 +44,15 @@ export const ROUND_VISIBLE_STATUSES: readonly RoundStatus[] = [
     RoundStatus.Timeout,
 ];
 
+/** Statuses at which a round is fully over — unlike `ROUND_VISIBLE_STATUSES`
+ * (which also covers the still-being-guessed `Active` round, visible there
+ * only via the deliberate, broadcast-to-everyone `revealRound()` give-up
+ * action), these are the ones whose `prompt` is safe to include directly in
+ * `RoundPublicSchema`/state pushes without spoiling anything — the round is
+ * no longer guessable either way, so there's no give-up action left to
+ * short-circuit. Drives the post-round reveal (see `POST_ROUND_SECONDS`). */
+export const ROUND_RESOLVED_STATUSES: readonly RoundStatus[] = [RoundStatus.Complete, RoundStatus.Timeout];
+
 export const RoundPublicSchema = z
     .object({
         index: z.number(),
@@ -53,6 +62,15 @@ export const RoundPublicSchema = z
             .number()
             .nullable()
             .openapi({description: "ms left to guess this round; null unless this is the currently `active` round"}),
+        prompt: z
+            .string()
+            .nullable()
+            .openapi({
+                description:
+                    "This round's real prompt; null until the round is fully resolved (`complete`/`timeout`) — " +
+                    "see ROUND_RESOLVED_STATUSES. Never present early for the still-guessable `active` round; use " +
+                    "POST /games/{id}/reveal for that give-up path instead.",
+            }),
     })
     .openapi("Round");
 
@@ -84,6 +102,24 @@ export const GamePublicSchema = z
             .number()
             .nullable()
             .openapi({description: "Index of the round currently open for guessing; null before play starts or after the game has finished"}),
+        postRoundIndex: z
+            .number()
+            .nullable()
+            .openapi({
+                description:
+                    "Index of the round currently in its post-round reveal pause (see postRoundRemainingMs); " +
+                    "null outside that window. Never set at the same time as currentRound — see " +
+                    "guess.model.ts's resolveCurrentRound/advanceAfterPostRound.",
+            }),
+        postRoundRemainingMs: z
+            .number()
+            .nullable()
+            .openapi({
+                description:
+                    "ms left in the post-round reveal pause for postRoundIndex — that round's real prompt is " +
+                    "already visible (rounds[postRoundIndex].prompt) for the client to display alongside whether " +
+                    "the current player got it right; null unless postRoundIndex is set.",
+            }),
         lobbyRemainingMs: z
             .number()
             .nullable()

@@ -27,6 +27,15 @@ export const GUESS_MIN_SCORE = 10;
 export const DEFAULT_GUESS_TIME_LIMIT_SECONDS = 60;
 const DEFAULT_GUESS_TIME_OVERRIDE_SECONDS = 15;
 
+/** How long the "post round" reveal pause lasts once a round resolves
+ * (everyone's answered correctly or its timer ran out), before the next
+ * round opens — or, on the last round, before the game finalizes. Long
+ * enough for players to see the round's real prompt and whether they
+ * personally got it right (see guess.model.ts's `resolveCurrentRound`/
+ * `advanceAfterPostRound` and guess.schema.ts's `postRoundIndex`/
+ * `postRoundRemainingMs`) before things move on. */
+export const POST_ROUND_SECONDS = 5;
+
 /** The guess round time limit, in seconds, sourced from Cloudflare
  * Flagship: normally the "guess-time-seconds" flag, or
  * "guess-time-override-seconds" instead whenever the "dev-mode" flag is on
