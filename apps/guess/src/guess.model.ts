@@ -1,11 +1,14 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
+import {and, asc, desc, eq, sql} from "drizzle-orm";
 import {err, ok, type Result} from "neverthrow";
 import {generateColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {toRpcResult, type RpcResult} from "@game-worker/shared/rpc-result";
 import {WsEventType} from "@game-worker/shared/ws-messages";
+import {createDb, type Db} from "./db/client";
+import {game, guesses, participants, rounds} from "./db/schema";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
 import {GameWsEventType, ROUND_RESOLVED_STATUSES, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
@@ -27,64 +30,12 @@ export type GuessResult = z.infer<typeof GuessResultSchema>;
 export type GameResult = z.infer<typeof GameResultSchema>;
 export type GameWsMessage = z.infer<typeof GameWsMessageSchema>;
 
-// The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
-// requires its row type to satisfy.
-interface GameRow extends Record<string, SqlStorageValue> {
-    id: string;
-    theme: string | null;
-    status: GameStatus;
-    error: string | null;
-    host_token: string;
-    // Origin (scheme+host) this game was created against — captured once,
-    // from the creating request (see guess.controller.ts's `origin`), and
-    // reused for every round's `imageUrl` for the rest of this game's
-    // lifetime (readPublicState()). Broadcasts fired off the queue
-    // consumer/alarm have no request of their own to derive an origin
-    // from, so it can't just be recomputed per read like browse's
-    // `thumbnailUrl` does — capturing it once at creation is the closest
-    // equivalent. Empty string (pre-migration rows) means "unknown", which
-    // readPublicState() treats as no imageUrl rather than a broken one.
-    origin: string;
-    lobby_ends_at: number | null;
-    // Set together, by resolveCurrentRound(), while the just-resolved round
-    // sits in its post-round reveal pause; both cleared together, by
-    // advanceAfterPostRound(), once that pause ends. See postRoundSeconds().
-    post_round_index: number | null;
-    post_round_ends_at: number | null;
-    // Resolved once, by init(), from Flagship's "round-count" flag (see
-    // guess.constants.ts's roundCount()) and never re-read after — the
-    // authoritative "how many rounds does this game have" for its entire
-    // lifetime, so a flag flip mid-game can't leave the `rounds` table and
-    // this game's own advancing logic disagreeing with each other.
-    round_count: number;
-    created_at: number;
-}
-
-interface RoundRow extends Record<string, SqlStorageValue> {
-    idx: number;
-    prompt: string | null;
-    status: RoundStatus;
-    image_key: string | null;
-    ready_at: number | null;
-    started_at: number | null;
-    time_limit_ms: number | null;
-    error: string | null;
-}
-
-interface ParticipantRow extends Record<string, SqlStorageValue> {
-    id: string;
-    name: string;
-    user_id: string | null;
-    token: string | null;
-    color: string;
-    joined_at: number;
-}
-
-interface ParticipantPublic extends Record<string, SqlStorageValue> {
-    id: string;
-    name: string;
-    color: string;
-}
+// Row types inferred straight off the Drizzle schema (see ./db/schema.ts)
+// rather than hand-maintained interfaces — same transition
+// apps/browse/src/catalog.service.ts made for its own `CatalogRow`.
+type GameRow = typeof game.$inferSelect;
+type RoundRow = typeof rounds.$inferSelect;
+type ParticipantRow = typeof participants.$inferSelect;
 
 /** Statuses in which a game hasn't started yet — the only window during
  * which joining is allowed. Once a game reaches `playing` its rounds are
@@ -106,8 +57,8 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * calls its RPC methods.
  *
  * Rounds are generated up front (all of them, in parallel — see
- * guess.queue.ts and `round_count` on `GameRow`) but played strictly
- * sequentially: once play begins, round
+ * guess.queue.ts and `round_count` on the `game` table) but played
+ * strictly sequentially: once play begins, round
  * 0 is the only one `Active` (open for guessing); each subsequent round only
  * opens once the previous one resolves, either because every joined
  * participant answered it correctly (early advance) or its own guess-timeout
@@ -125,43 +76,68 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * `PuzzleDO`'s `host_token`.
  */
 export class GameDO extends DurableObject<Env> {
+    // Threaded through as a class field (rather than a parameter, unlike
+    // the D1 apps' module-level functions) since every method already has
+    // `this.ctx` available. `drizzle-orm/durable-sqlite` wraps `ctx.storage`
+    // directly and stays SYNCHRONOUS — see ./db/client.ts's doc comment.
+    private readonly db: Db;
+
     constructor(ctx: DurableObjectState, env: Env) {
         super(ctx, env);
         ctx.blockConcurrencyWhile(async () => this.migrate());
+        this.db = createDb(ctx.storage);
     }
 
     // `origin` is the scheme+host the creating request came in on (see
     // guess.controller.ts — `new URL(c.req.url).origin`, same technique
     // `browse`'s catalog.service.ts uses for `thumbnailUrl`), persisted on
     // the game row and reused for every round's `imageUrl` thereafter — see
-    // the `origin` field's doc comment on `GameRow`.
+    // the `origin` field's doc comment on ./db/schema.ts's `game` table.
     async init(gameId: string, theme: string | null, origin: string): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         const now = Date.now();
         // Resolved once, here, and persisted on the game row — see the
-        // `round_count` field's doc comment on `GameRow`.
-        const rounds = await roundCount(this.env);
-        this.ctx.storage.sql.exec("DELETE FROM guesses");
-        this.ctx.storage.sql.exec("DELETE FROM rounds");
-        this.ctx.storage.sql.exec("DELETE FROM participants");
-        this.ctx.storage.sql.exec(
-            `INSERT INTO game (id, theme, status, error, host_token, origin, lobby_ends_at, post_round_index,
-                                post_round_ends_at, round_count, created_at)
-             VALUES (?, ?, 'queued', NULL, ?, ?, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO
-            UPDATE SET
-                theme = excluded.theme, status = 'queued', error = NULL,
-                host_token = excluded.host_token, origin = excluded.origin, lobby_ends_at = NULL,
-                post_round_index = NULL, post_round_ends_at = NULL, round_count = excluded.round_count`,
-            gameId,
-            theme,
-            hostToken,
-            origin,
-            rounds,
-            now,
-        );
-        for (let i = 0; i < rounds; i++) {
-            this.ctx.storage.sql.exec("INSERT INTO rounds (idx, status) VALUES (?, 'pending')", i);
+        // `round_count` field's doc comment on ./db/schema.ts's `game` table.
+        const roundsCount = await roundCount(this.env);
+        this.db.delete(guesses).run();
+        this.db.delete(rounds).run();
+        this.db.delete(participants).run();
+        this.db
+            .insert(game)
+            .values({
+                id: gameId,
+                theme,
+                status: "queued",
+                error: null,
+                hostToken,
+                origin,
+                lobbyEndsAt: null,
+                postRoundIndex: null,
+                postRoundEndsAt: null,
+                roundCount: roundsCount,
+                createdAt: now,
+            })
+            // Mixes `excluded.col` references with literal constants
+            // ('queued', NULL) — same SET clause as the raw SQL this
+            // replaced.
+            .onConflictDoUpdate({
+                target: game.id,
+                set: {
+                    theme: sql`excluded.theme`,
+                    status: "queued",
+                    error: null,
+                    hostToken: sql`excluded.host_token`,
+                    origin: sql`excluded.origin`,
+                    lobbyEndsAt: null,
+                    postRoundIndex: null,
+                    postRoundEndsAt: null,
+                    roundCount: sql`excluded.round_count`,
+                },
+            })
+            .run();
+        for (let i = 0; i < roundsCount; i++) {
+            this.db.insert(rounds).values({idx: i, status: "pending"}).run();
         }
         this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
         return hostToken;
@@ -180,7 +156,7 @@ export class GameDO extends DurableObject<Env> {
         // `error` is terminal (see guess.queue.ts) — drop any armed round-
         // timeout/lobby alarm so a stale one can't fire against a dead game.
         if (status === GameSessionStatus.Error) await this.ctx.storage.deleteAlarm();
-        this.ctx.storage.sql.exec("UPDATE game SET status = ?, error = ?", status, error ?? null);
+        this.db.update(game).set({status, error: error ?? null}).run();
         this.broadcast({type: WsEventType.Status, status, error});
     }
 
@@ -188,18 +164,17 @@ export class GameDO extends DurableObject<Env> {
 
     async setPrompts(prompts: string[]): Promise<void> {
         prompts.forEach((prompt, idx) => {
-            this.ctx.storage.sql.exec("UPDATE rounds SET prompt = ? WHERE idx = ?", prompt, idx);
+            this.db.update(rounds).set({prompt}).where(eq(rounds.idx, idx)).run();
         });
         this.broadcast({type: GameWsEventType.PromptsReady, count: prompts.length});
     }
 
     async setRoundStatus(index: number, status: RoundStatus, error?: string): Promise<void> {
-        this.ctx.storage.sql.exec(
-            "UPDATE rounds SET status = ?, error = ? WHERE idx = ?",
-            status,
-            error ?? null,
-            index,
-        );
+        this.db
+            .update(rounds)
+            .set({status, error: error ?? null})
+            .where(eq(rounds.idx, index))
+            .run();
         this.broadcast({type: GameWsEventType.RoundStatus, index, status, error});
     }
 
@@ -209,24 +184,20 @@ export class GameDO extends DurableObject<Env> {
      * round only starts counting down once it actually becomes the current
      * round (see `activateRound()`, which stamps `started_at`). */
     async setRoundImage(index: number, imageKey: string): Promise<void> {
-        this.ctx.storage.sql.exec(
-            "UPDATE rounds SET image_key = ?, status = 'ready', ready_at = ?, error = NULL WHERE idx = ?",
-            imageKey,
-            Date.now(),
-            index,
-        );
+        this.db
+            .update(rounds)
+            .set({imageKey, status: "ready", readyAt: Date.now(), error: null})
+            .where(eq(rounds.idx, index))
+            .run();
         this.broadcast({type: GameWsEventType.RoundReady, index});
     }
 
     /** Every round's image is ready — open the waiting room rather than
-     * starting instantly, so players can gather (see the class doc comment).
-     * Mirrors `PuzzleDO.setReady()`. */
+     * starting instantly (see the class doc comment). Mirrors
+     * `PuzzleDO.setReady()`. */
     async setReady(): Promise<void> {
         const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
-        this.ctx.storage.sql.exec(
-            "UPDATE game SET status = 'waiting', error = NULL, lobby_ends_at = ?",
-            endsAt,
-        );
+        this.db.update(game).set({status: "waiting", error: null, lobbyEndsAt: endsAt}).run();
         await this.scheduleNextAlarm();
         this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
     }
@@ -272,30 +243,24 @@ export class GameDO extends DurableObject<Env> {
         const color = userColor ?? generateColor();
 
         if (userId) {
-            this.ctx.storage.sql.exec(
-                `INSERT INTO participants (id, name, user_id, token, color, joined_at)
-                 VALUES (?, ?, ?, NULL, ?, ?) ON CONFLICT(id) DO
-                UPDATE SET name = excluded.name, color = excluded.color`,
-                userId,
-                playerName,
-                userId,
-                color,
-                Date.now(),
-            );
+            this.db
+                .insert(participants)
+                .values({id: userId, name: playerName, userId, token: null, color, joinedAt: Date.now()})
+                .onConflictDoUpdate({
+                    target: participants.id,
+                    set: {name: sql`excluded.name`, color: sql`excluded.color`},
+                })
+                .run();
             this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId: userId});
             return toRpcResult(ok({participantId: userId, token: null, color}));
         }
 
         const participantId = crypto.randomUUID();
         const token = crypto.randomUUID();
-        this.ctx.storage.sql.exec(
-            "INSERT INTO participants (id, name, user_id, token, color, joined_at) VALUES (?, ?, NULL, ?, ?, ?)",
-            participantId,
-            playerName,
-            token,
-            color,
-            Date.now(),
-        );
+        this.db
+            .insert(participants)
+            .values({id: participantId, name: playerName, userId: null, token, color, joinedAt: Date.now()})
+            .run();
         this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId});
         return toRpcResult(ok({participantId, token, color}));
     }
@@ -314,7 +279,7 @@ export class GameDO extends DurableObject<Env> {
      * times; a correct one locks the participant out of guessing this round
      * again (enforced below) — once every joined participant has answered
      * correctly, the round advances immediately via `resolveCurrentRound()`
-     * rather than waiting out its timer. Scores off `round.time_limit_ms` —
+     * rather than waiting out its timer. Scores off `round.timeLimitMs` —
      * the limit stamped by `activateRound()` when this round began, not
      * whatever Flagship says right now — so a flag flip mid-round can't
      * retroactively change what this guess is worth. */
@@ -327,9 +292,7 @@ export class GameDO extends DurableObject<Env> {
     ): Promise<RpcResult<GuessResult>> {
         const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
             this.requireGameRow().andThen((gameRow) => {
-                const round = this.ctx.storage.sql
-                    .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
-                    .toArray()[0];
+                const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
                 if (!round || round.status !== RoundStatus.Active || !round.prompt) {
                     return err("round not active");
                 }
@@ -340,13 +303,17 @@ export class GameDO extends DurableObject<Env> {
                 // narrowing through an object literal's field.
                 const prompt = round.prompt;
 
-                const alreadyCorrect = this.ctx.storage.sql
-                    .exec<{ n: number }>(
-                        "SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND participant_id = ? AND correct = 1",
-                        index,
-                        participantId,
+                const alreadyCorrect = this.db
+                    .select({n: sql<number>`COUNT(*)`})
+                    .from(guesses)
+                    .where(
+                        and(
+                            eq(guesses.roundIdx, index),
+                            eq(guesses.participantId, participantId),
+                            eq(guesses.correct, 1),
+                        ),
                     )
-                    .toArray()[0]?.n;
+                    .get()?.n;
                 if (alreadyCorrect && alreadyCorrect > 0) {
                     return err("you already answered this round correctly");
                 }
@@ -359,29 +326,31 @@ export class GameDO extends DurableObject<Env> {
 
         const correct = isGuessCorrect(guess, prompt, await guessMatchThreshold(this.env));
         const score = correct
-            ? scoreForGuess(round.started_at, round.time_limit_ms, await guessMaxScore(this.env), await guessMinScore(this.env))
+            ? scoreForGuess(round.startedAt, round.timeLimitMs, await guessMaxScore(this.env), await guessMinScore(this.env))
             : null;
 
-        this.ctx.storage.sql.exec(
-            "INSERT INTO guesses (round_idx, participant_id, player, guess, correct, score, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            index,
-            participantId,
-            participant.name,
-            guess,
-            correct ? 1 : 0,
-            score,
-            Date.now(),
-        );
+        this.db
+            .insert(guesses)
+            .values({
+                roundIdx: index,
+                participantId,
+                player: participant.name,
+                guess,
+                correct: correct ? 1 : 0,
+                score,
+                createdAt: Date.now(),
+            })
+            .run();
 
         // Same "sum of every correct guess" this participant has ever
         // banked as readPublicState()'s `results` — recomputed here (rather
         // than incrementally tracked) so it can't drift from that figure.
-        const totalScore = this.ctx.storage.sql
-            .exec<{ total: number }>(
-                "SELECT COALESCE(SUM(score), 0) AS total FROM guesses WHERE participant_id = ? AND correct = 1",
-                participantId,
-            )
-            .toArray()[0]?.total ?? 0;
+        const totalScore =
+            this.db
+                .select({total: sql<number>`COALESCE(SUM(${guesses.score}), 0)`})
+                .from(guesses)
+                .where(and(eq(guesses.participantId, participantId), eq(guesses.correct, 1)))
+                .get()?.total ?? 0;
 
         this.broadcast({
             type: GameWsEventType.Guess,
@@ -394,15 +363,13 @@ export class GameDO extends DurableObject<Env> {
         });
 
         if (correct) {
-            const participantCount = this.ctx.storage.sql
-                .exec<{ n: number }>("SELECT COUNT(*) AS n FROM participants")
-                .toArray()[0]?.n ?? 0;
-            const correctCount = this.ctx.storage.sql
-                .exec<{ n: number }>(
-                    "SELECT COUNT(DISTINCT participant_id) AS n FROM guesses WHERE round_idx = ? AND correct = 1",
-                    index,
-                )
-                .toArray()[0]?.n ?? 0;
+            const participantCount = this.db.select({n: sql<number>`COUNT(*)`}).from(participants).get()?.n ?? 0;
+            const correctCount =
+                this.db
+                    .select({n: sql<number>`COUNT(DISTINCT ${guesses.participantId})`})
+                    .from(guesses)
+                    .where(and(eq(guesses.roundIdx, index), eq(guesses.correct, 1)))
+                    .get()?.n ?? 0;
             if (participantCount > 0 && correctCount >= participantCount) {
                 // Everyone's answered correctly — advance now rather than waiting
                 // out the timer.
@@ -427,9 +394,7 @@ export class GameDO extends DurableObject<Env> {
         if (validated.isErr()) return {ok: false, error: validated.error};
         const participant = validated.value;
 
-        const round = this.ctx.storage.sql
-            .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
-            .toArray()[0];
+        const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
         if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return toRpcResult(ok(null));
         this.broadcast({
             type: GameWsEventType.Revealed,
@@ -464,7 +429,7 @@ export class GameDO extends DurableObject<Env> {
             },
         );
 
-        if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null && Date.now() >= row.lobby_ends_at) {
+        if (row.status === GameSessionStatus.Waiting && row.lobbyEndsAt !== null && Date.now() >= row.lobbyEndsAt) {
             await this.beginPlaying(row.id);
             return;
         }
@@ -476,23 +441,21 @@ export class GameDO extends DurableObject<Env> {
             return;
         }
 
-        if (row.post_round_index !== null) {
-            if (row.post_round_ends_at === null || Date.now() < row.post_round_ends_at) {
+        if (row.postRoundIndex !== null) {
+            if (row.postRoundEndsAt === null || Date.now() < row.postRoundEndsAt) {
                 // Stale/early firing — rearm rather than advancing early.
                 await this.scheduleNextAlarm();
                 return;
             }
-            await this.advanceAfterPostRound(row.id, row.post_round_index);
+            await this.advanceAfterPostRound(row.id, row.postRoundIndex);
             return;
         }
 
-        const active = this.ctx.storage.sql
-            .exec<RoundRow>("SELECT * FROM rounds WHERE status = 'active' LIMIT 1")
-            .toArray()[0];
+        const active = this.db.select().from(rounds).where(eq(rounds.status, "active")).limit(1).get();
         if (!active) return; // shouldn't happen while playing, but nothing to resolve
 
-        const limitMs = active.time_limit_ms ?? (await guessTimeLimitSeconds(this.env)) * 1000;
-        if (active.started_at === null || Date.now() < active.started_at + limitMs) {
+        const limitMs = active.timeLimitMs ?? (await guessTimeLimitSeconds(this.env)) * 1000;
+        if (active.startedAt === null || Date.now() < active.startedAt + limitMs) {
             // Stale/early firing (e.g. rearmed to a later deadline since this
             // alarm was set) — rearm rather than resolving early.
             await this.scheduleNextAlarm();
@@ -553,6 +516,16 @@ export class GameDO extends DurableObject<Env> {
 
     // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
 
+    // Unlike D1 (migrated via `wrangler d1 migrations apply` against a
+    // shared, hand-numbered `migrations/` folder — see apps/friends/src/db/
+    // README.md), a Durable Object's own SQLite storage has no external
+    // migration-apply mechanism at all: there's no CLI command that reaches
+    // into a specific DO instance's private database. So each instance
+    // bootstraps/evolves its own schema at first-touch via this idempotent,
+    // hand-written raw SQL instead — `./db/schema.ts` is a description of
+    // what this method is expected to produce, kept in sync BY HAND whenever
+    // this method changes. See ./db/README.md for the full story and the
+    // workflow for a future schema change.
     private migrate(): void {
         this.ctx.storage.sql.exec(`
             CREATE TABLE IF NOT EXISTS game
@@ -716,12 +689,10 @@ export class GameDO extends DurableObject<Env> {
         token: string | null,
         userId: string | null,
     ): Result<{ name: string; color: string }, string> {
-        const row = this.ctx.storage.sql
-            .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
-            .toArray()[0];
+        const row = this.db.select().from(participants).where(eq(participants.id, participantId)).get();
         if (!row) return err("forbidden: join the game before playing");
-        if (row.user_id) {
-            if (row.user_id !== userId) return err("forbidden: not your participant id");
+        if (row.userId) {
+            if (row.userId !== userId) return err("forbidden: not your participant id");
         } else if (!token || token !== row.token) {
             return err("forbidden: invalid participant token");
         }
@@ -741,11 +712,9 @@ export class GameDO extends DurableObject<Env> {
      * just trusted by `participantId` — never broadcast to anyone else, so
      * not guessable by another player anyway. */
     private broadcastTyping(index: number, participantId: string, token: string | null): void {
-        const row = this.ctx.storage.sql
-            .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
-            .toArray()[0];
+        const row = this.db.select().from(participants).where(eq(participants.id, participantId)).get();
         if (!row) return;
-        if (!row.user_id && (!token || token !== row.token)) return;
+        if (!row.userId && (!token || token !== row.token)) return;
         this.broadcast({type: GameWsEventType.PlayerTyping, index, participantId, player: row.name, color: row.color});
     }
 
@@ -757,7 +726,7 @@ export class GameDO extends DurableObject<Env> {
      * after it opens only once its predecessor resolves (see
      * `resolveCurrentRound()`). */
     private async beginPlaying(gameId: string): Promise<void> {
-        this.ctx.storage.sql.exec("UPDATE game SET status = 'playing', lobby_ends_at = NULL");
+        this.db.update(game).set({status: "playing", lobbyEndsAt: null}).run();
         await this.activateRound(0);
         this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
         // Distinct write from markCatalogReady (already fired back in
@@ -787,12 +756,11 @@ export class GameDO extends DurableObject<Env> {
     private async activateRound(index: number): Promise<void> {
         const startedAt = Date.now();
         const timeLimitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
-        this.ctx.storage.sql.exec(
-            "UPDATE rounds SET status = 'active', started_at = ?, time_limit_ms = ? WHERE idx = ?",
-            startedAt,
-            timeLimitMs,
-            index,
-        );
+        this.db
+            .update(rounds)
+            .set({status: "active", startedAt, timeLimitMs})
+            .where(eq(rounds.idx, index))
+            .run();
         this.broadcast({
             type: GameWsEventType.RoundStatus,
             index,
@@ -813,26 +781,27 @@ export class GameDO extends DurableObject<Env> {
      * process another incoming call while one is awaiting a binding, e.g.
      * `guessTimeLimitSeconds()`), this re-checks the round is still `Active`
      * as its very first, synchronous step — whichever trigger gets here
-     * first wins and the other is a clean no-op instead of double-resolving. */
+     * first wins and the other is a clean no-op instead of double-resolving.
+     * That first check-then-write sequence (the `still` read through the
+     * `UPDATE rounds` below) has no `await` anywhere in it — same as the
+     * `ctx.storage.sql.exec()` calls it replaced, since
+     * `drizzle-orm/durable-sqlite` stays synchronous too (see ./db/client.ts)
+     * — so the race this comment describes is still closed the same way. */
     private async resolveCurrentRound(gameId: string, index: number): Promise<void> {
-        const still = this.ctx.storage.sql
-            .exec<{ status: RoundStatus }>("SELECT status FROM rounds WHERE idx = ?", index)
-            .toArray()[0];
+        const still = this.db.select({status: rounds.status}).from(rounds).where(eq(rounds.idx, index)).get();
         if (still?.status !== RoundStatus.Active) return; // already resolved by the other trigger
 
-        const correct = this.ctx.storage.sql
-            .exec<{ n: number }>("SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND correct = 1", index)
-            .toArray()[0]?.n;
+        const correct = this.db
+            .select({n: sql<number>`COUNT(*)`})
+            .from(guesses)
+            .where(and(eq(guesses.roundIdx, index), eq(guesses.correct, 1)))
+            .get()?.n;
         const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
-        this.ctx.storage.sql.exec("UPDATE rounds SET status = ? WHERE idx = ?", status, index);
+        this.db.update(rounds).set({status}).where(eq(rounds.idx, index)).run();
         this.broadcast({type: GameWsEventType.RoundStatus, index, status});
 
         const postRoundEndsAt = Date.now() + (await postRoundSeconds(this.env)) * 1000;
-        this.ctx.storage.sql.exec(
-            "UPDATE game SET post_round_index = ?, post_round_ends_at = ?",
-            index,
-            postRoundEndsAt,
-        );
+        this.db.update(game).set({postRoundIndex: index, postRoundEndsAt}).run();
         // Full state push (not just the RoundStatus one above) so clients pick
         // up postRoundIndex/postRoundRemainingMs and this round's now-visible
         // `prompt` (see ROUND_RESOLVED_STATUSES) together in one message.
@@ -855,10 +824,10 @@ export class GameDO extends DurableObject<Env> {
                 throw new Error(error);
             },
         );
-        this.ctx.storage.sql.exec("UPDATE game SET post_round_index = NULL, post_round_ends_at = NULL");
+        this.db.update(game).set({postRoundIndex: null, postRoundEndsAt: null}).run();
 
         const nextIndex = index + 1;
-        if (nextIndex < row.round_count) {
+        if (nextIndex < row.roundCount) {
             await this.activateRound(nextIndex);
             this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
             return;
@@ -866,9 +835,11 @@ export class GameDO extends DurableObject<Env> {
 
         // Every round has now resolved — same "solved if anyone ever completed
         // a round, timeout only if none were ever completed" rule as before.
-        const anyComplete = this.ctx.storage.sql
-            .exec<{ n: number }>("SELECT COUNT(*) AS n FROM rounds WHERE status = 'complete'")
-            .toArray()[0]?.n;
+        const anyComplete = this.db
+            .select({n: sql<number>`COUNT(*)`})
+            .from(rounds)
+            .where(eq(rounds.status, "complete"))
+            .get()?.n;
         const gameStatus = anyComplete && anyComplete > 0 ? GameSessionStatus.Solved : GameSessionStatus.Timeout;
         await this.finalizeGame(gameId, gameStatus);
     }
@@ -881,29 +852,33 @@ export class GameDO extends DurableObject<Env> {
      * rather than once per correct round). */
     private async finalizeGame(gameId: string, status: "solved" | "timeout"): Promise<void> {
         await this.ctx.storage.deleteAlarm();
-        this.ctx.storage.sql.exec("UPDATE game SET status = ?, error = NULL", status);
+        this.db.update(game).set({status, error: null}).run();
 
-        const totals = this.ctx.storage.sql
-            .exec<{ participant_id: string; total: number }>(
-                "SELECT participant_id, SUM(score) AS total FROM guesses WHERE correct = 1 GROUP BY participant_id",
-            )
-            .toArray();
+        const totalExpr = sql<number>`SUM(${guesses.score})`;
+        const totals = this.db
+            .select({participantId: guesses.participantId, total: totalExpr})
+            .from(guesses)
+            .where(eq(guesses.correct, 1))
+            .groupBy(guesses.participantId)
+            .all();
 
-        for (const {participant_id, total} of totals) {
+        for (const {participantId, total} of totals) {
             if (total <= 0) continue;
-            const participant = this.ctx.storage.sql
-                .exec<ParticipantRow>("SELECT user_id FROM participants WHERE id = ?", participant_id)
-                .toArray()[0];
-            if (!participant?.user_id) continue;
+            const participant = this.db
+                .select({userId: participants.userId})
+                .from(participants)
+                .where(eq(participants.id, participantId))
+                .get();
+            if (!participant?.userId) continue;
             try {
                 await this.env.LEADERBOARD.recordScore({
-                    userId: participant.user_id,
+                    userId: participant.userId,
                     kind: "guess",
                     sessionId: gameId,
                     score: total,
                 });
             } catch (err) {
-                console.error("failed to record guess game score", gameId, participant.user_id, err);
+                console.error("failed to record guess game score", gameId, participant.userId, err);
             }
         }
 
@@ -938,24 +913,25 @@ export class GameDO extends DurableObject<Env> {
             },
         );
 
-        if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null) {
-            await this.ctx.storage.setAlarm(row.lobby_ends_at);
+        if (row.status === GameSessionStatus.Waiting && row.lobbyEndsAt !== null) {
+            await this.ctx.storage.setAlarm(row.lobbyEndsAt);
             return;
         }
 
         if (row.status === GameSessionStatus.Playing) {
-            if (row.post_round_index !== null && row.post_round_ends_at !== null) {
-                await this.ctx.storage.setAlarm(row.post_round_ends_at);
+            if (row.postRoundIndex !== null && row.postRoundEndsAt !== null) {
+                await this.ctx.storage.setAlarm(row.postRoundEndsAt);
                 return;
             }
 
-            const active = this.ctx.storage.sql
-                .exec<Pick<RoundRow, "started_at" | "time_limit_ms">>(
-                    "SELECT started_at, time_limit_ms FROM rounds WHERE status = 'active' LIMIT 1",
-                )
-                .toArray()[0];
-            if (active?.started_at != null && active.time_limit_ms != null) {
-                await this.ctx.storage.setAlarm(active.started_at + active.time_limit_ms);
+            const active = this.db
+                .select({startedAt: rounds.startedAt, timeLimitMs: rounds.timeLimitMs})
+                .from(rounds)
+                .where(eq(rounds.status, "active"))
+                .limit(1)
+                .get();
+            if (active?.startedAt != null && active.timeLimitMs != null) {
+                await this.ctx.storage.setAlarm(active.startedAt + active.timeLimitMs);
                 return;
             }
         }
@@ -967,59 +943,62 @@ export class GameDO extends DurableObject<Env> {
      * straight into a further `.andThen()` (see `startNow()`) without
      * re-fetching it. Mirrors `PuzzleDO.assertHost()`. */
     private assertHost(row: GameRow, hostToken: string): Result<GameRow, string> {
-        return hostToken && hostToken === row.host_token ? ok(row) : err("forbidden: only the host can do that");
+        return hostToken && hostToken === row.hostToken ? ok(row) : err("forbidden: only the host can do that");
     }
 
     private requireGameRow(): Result<GameRow, string> {
-        const row = this.ctx.storage.sql.exec<GameRow>("SELECT * FROM game LIMIT 1").toArray()[0];
+        const row = this.db.select().from(game).limit(1).get();
         return row ? ok(row) : err("game not initialized");
     }
 
     private readPublicState(): GamePublic {
-        const game = this.ctx.storage.sql.exec<GameRow>("SELECT * FROM game LIMIT 1").toArray()[0];
-        const rounds = this.ctx.storage.sql
-            .exec<RoundRow>("SELECT * FROM rounds ORDER BY idx ASC")
-            .toArray();
-        const participants = this.ctx.storage.sql
-            .exec<ParticipantPublic>("SELECT id, name, color FROM participants ORDER BY joined_at ASC")
-            .toArray();
-        const results = this.ctx.storage.sql
-            .exec<{ participant_id: string; total: number }>(
-                `SELECT participant_id, SUM(score) AS total
-                 FROM guesses
-                 WHERE correct = 1
-                 GROUP BY participant_id
-                 ORDER BY total DESC`,
-            )
-            .toArray();
+        const gameRow = this.db.select().from(game).limit(1).get();
+        const roundRows = this.db.select().from(rounds).orderBy(asc(rounds.idx)).all();
+        const participantRows = this.db
+            .select({id: participants.id, name: participants.name, color: participants.color})
+            .from(participants)
+            .orderBy(asc(participants.joinedAt))
+            .all();
+        // Built once and reused in both `select` and `orderBy` so the ORDER
+        // BY unambiguously refers to the same aggregate rather than a string
+        // alias — same pattern apps/leaderboard/src/leaderboard.service.ts's
+        // `totalsQuery()` uses for its own SUM.
+        const totalExpr = sql<number>`SUM(${guesses.score})`;
+        const results = this.db
+            .select({participantId: guesses.participantId, total: totalExpr})
+            .from(guesses)
+            .where(eq(guesses.correct, 1))
+            .groupBy(guesses.participantId)
+            .orderBy(desc(totalExpr))
+            .all();
 
         return {
-            id: game?.id ?? "",
-            theme: game?.theme ?? null,
-            status: game?.status ?? GameSessionStatus.Queued,
-            error: game?.error ?? undefined,
-            rounds: rounds.map((r) => ({
+            id: gameRow?.id ?? "",
+            theme: gameRow?.theme ?? null,
+            status: gameRow?.status ?? GameSessionStatus.Queued,
+            error: gameRow?.error ?? undefined,
+            rounds: roundRows.map((r) => ({
                 index: r.idx,
                 status: r.status,
                 error: r.error ?? undefined,
                 remainingMs:
-                    r.status === RoundStatus.Active && r.started_at !== null
-                        ? Math.max(0, (r.time_limit_ms ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.started_at))
+                    r.status === RoundStatus.Active && r.startedAt !== null
+                        ? Math.max(0, (r.timeLimitMs ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.startedAt))
                         : null,
                 imageUrl:
-                    game?.origin && ROUND_VISIBLE_STATUSES.includes(r.status)
-                        ? new URL(imageUrlPathFor(game.id, r.idx), game.origin).toString()
+                    gameRow?.origin && ROUND_VISIBLE_STATUSES.includes(r.status)
+                        ? new URL(imageUrlPathFor(gameRow.id, r.idx), gameRow.origin).toString()
                         : null,
                 prompt: ROUND_RESOLVED_STATUSES.includes(r.status) ? r.prompt : null,
             })),
-            currentRound: rounds.find((r) => r.status === RoundStatus.Active)?.idx ?? null,
-            postRoundIndex: game?.post_round_index ?? null,
+            currentRound: roundRows.find((r) => r.status === RoundStatus.Active)?.idx ?? null,
+            postRoundIndex: gameRow?.postRoundIndex ?? null,
             postRoundRemainingMs:
-                game?.post_round_ends_at != null ? Math.max(0, game.post_round_ends_at - Date.now()) : null,
-            lobbyRemainingMs: game ? lobbyRemainingMs(game.lobby_ends_at) : null,
+                gameRow?.postRoundEndsAt != null ? Math.max(0, gameRow.postRoundEndsAt - Date.now()) : null,
+            lobbyRemainingMs: gameRow ? lobbyRemainingMs(gameRow.lobbyEndsAt) : null,
             connectedPlayers: this.ctx.getWebSockets().length,
-            participants: participants.map((p) => ({id: p.id, name: p.name, color: p.color})),
-            results: results.map((r) => ({participantId: r.participant_id, score: r.total})),
+            participants: participantRows.map((p) => ({id: p.id, name: p.name, color: p.color})),
+            results: results.map((r) => ({participantId: r.participantId, score: r.total})),
         };
     }
 

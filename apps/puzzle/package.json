@@ -13,6 +13,7 @@
     "@game-worker/shared": "^1.0.0",
     "@hono/swagger-ui": "^0.6.1",
     "@hono/zod-openapi": "^1.5.2",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.13.1",
     "neverthrow": "^8.2.0",
     "zod": "^4.4.3"
@@ -21,6 +22,7 @@
     "@cloudflare/workers-types": "^5.20260808.1",
     "@typescript-eslint/parser": "^8.67.0",
     "@typescript/native": "npm:typescript@^7.0.2",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^10.8.1",
     "eslint-plugin-neverthrow": "^1.1.4",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
