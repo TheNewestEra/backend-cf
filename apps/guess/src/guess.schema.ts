@@ -63,6 +63,15 @@ export const RoundPublicSchema = z
             .number()
             .nullable()
             .openapi({description: "ms left to guess this round; null unless this is the currently `active` round"}),
+        imageUrl: z
+            .string()
+            .nullable()
+            .openapi({
+                description:
+                    "Absolute URL to this round's generated image (same bytes as GET /games/{id}/images/{index}); " +
+                    "null under the same spoiler gate as that route — not yet this round's turn, or it hasn't " +
+                    "generated yet. See ROUND_VISIBLE_STATUSES.",
+            }),
         prompt: z
             .string()
             .nullable()

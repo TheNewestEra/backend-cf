@@ -81,3 +81,12 @@ export async function guessTimeLimitSeconds(env: Env): Promise<number> {
 export function imageKeyFor(gameId: string, index: number): string {
     return `games/${gameId}/${index}.png`;
 }
+
+/** Path of the image route a round's `imageUrl` (see guess.schema.ts's
+ * `RoundPublicSchema`) resolves against — kept in one place so
+ * `GameDO.readPublicState()` (the writer) and this file's own `GET
+ * /games/{id}/images/{index}` route (the reader) can't drift apart, same
+ * spirit as `imageKeyFor()` above. */
+export function imageUrlPathFor(gameId: string, index: number): string {
+    return `/games/${gameId}/images/${index}`;
+}

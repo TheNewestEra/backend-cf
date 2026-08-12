@@ -12,6 +12,7 @@ import {
   guessMaxScore,
   guessMinScore,
   guessTimeLimitSeconds,
+  imageUrlPathFor,
   postRoundSeconds,
   roundCount,
 } from "./guess.constants";
@@ -31,6 +32,16 @@ interface GameRow extends Record<string, SqlStorageValue> {
     status: GameStatus;
     error: string | null;
     host_token: string;
+    // Origin (scheme+host) this game was created against — captured once,
+    // from the creating request (see guess.controller.ts's `origin`), and
+    // reused for every round's `imageUrl` for the rest of this game's
+    // lifetime (readPublicState()). Broadcasts fired off the queue
+    // consumer/alarm have no request of their own to derive an origin
+    // from, so it can't just be recomputed per read like browse's
+    // `thumbnailUrl` does — capturing it once at creation is the closest
+    // equivalent. Empty string (pre-migration rows) means "unknown", which
+    // readPublicState() treats as no imageUrl rather than a broken one.
+    origin: string;
     lobby_ends_at: number | null;
     // Set together, by resolveCurrentRound(), while the just-resolved round
     // sits in its post-round reveal pause; both cleared together, by
@@ -115,7 +126,12 @@ export class GameDO extends DurableObject<Env> {
         ctx.blockConcurrencyWhile(async () => this.migrate());
     }
 
-    async init(gameId: string, theme: string | null): Promise<string> {
+    // `origin` is the scheme+host the creating request came in on (see
+    // guess.controller.ts — `new URL(c.req.url).origin`, same technique
+    // `browse`'s catalog.service.ts uses for `thumbnailUrl`), persisted on
+    // the game row and reused for every round's `imageUrl` thereafter — see
+    // the `origin` field's doc comment on `GameRow`.
+    async init(gameId: string, theme: string | null, origin: string): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         const now = Date.now();
@@ -126,16 +142,17 @@ export class GameDO extends DurableObject<Env> {
         this.ctx.storage.sql.exec("DELETE FROM rounds");
         this.ctx.storage.sql.exec("DELETE FROM participants");
         this.ctx.storage.sql.exec(
-            `INSERT INTO game (id, theme, status, error, host_token, lobby_ends_at, post_round_index,
+            `INSERT INTO game (id, theme, status, error, host_token, origin, lobby_ends_at, post_round_index,
                                 post_round_ends_at, round_count, created_at)
-             VALUES (?, ?, 'queued', NULL, ?, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO
+             VALUES (?, ?, 'queued', NULL, ?, ?, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO
             UPDATE SET
                 theme = excluded.theme, status = 'queued', error = NULL,
-                host_token = excluded.host_token, lobby_ends_at = NULL,
+                host_token = excluded.host_token, origin = excluded.origin, lobby_ends_at = NULL,
                 post_round_index = NULL, post_round_ends_at = NULL, round_count = excluded.round_count`,
             gameId,
             theme,
             hostToken,
+            origin,
             rounds,
             now,
         );
@@ -609,6 +626,9 @@ export class GameDO extends DurableObject<Env> {
         // (on an instance that already has it) is just swallowed.
         for (const stmt of [
             "ALTER TABLE game ADD COLUMN host_token TEXT NOT NULL DEFAULT ''",
+            // Backfills to '' on pre-existing rows — readPublicState() treats
+            // that as "unknown" (no imageUrl) rather than a broken origin.
+            "ALTER TABLE game ADD COLUMN origin TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE game ADD COLUMN lobby_ends_at INTEGER",
             "ALTER TABLE game ADD COLUMN post_round_index INTEGER",
             "ALTER TABLE game ADD COLUMN post_round_ends_at INTEGER",
@@ -920,6 +940,16 @@ export class GameDO extends DurableObject<Env> {
                 remainingMs:
                     r.status === RoundStatus.Active && r.started_at !== null
                         ? Math.max(0, (r.time_limit_ms ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.started_at))
+                        : null,
+                // Same spoiler gate as guess.controller.ts's own image route
+                // (ROUND_VISIBLE_STATUSES) — image_key is always set by the
+                // time a round reaches one of those statuses (see
+                // setRoundImage()). `game.origin` is '' on pre-migration rows
+                // that predate this column; treated as "unknown" rather than
+                // building a broken relative-looking URL.
+                imageUrl:
+                    game?.origin && ROUND_VISIBLE_STATUSES.includes(r.status)
+                        ? new URL(imageUrlPathFor(game.id, r.idx), game.origin).toString()
                         : null,
                 prompt: ROUND_RESOLVED_STATUSES.includes(r.status) ? r.prompt : null,
             })),

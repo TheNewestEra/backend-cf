@@ -45,7 +45,12 @@ guessRoutes.openapi(
 
         const gameId = crypto.randomUUID();
         const stub = c.env.GAME_DO.getByName(gameId);
-        const hostToken = await stub.init(gameId, theme);
+        // Same technique browse's catalog.service.ts uses for
+        // `thumbnailUrl` — captured once here (rather than per-read) since
+        // later broadcasts (queue consumer, DO alarm) have no request of
+        // their own to derive it from. See GameRow's `origin` field.
+        const origin = new URL(c.req.url).origin;
+        const hostToken = await stub.init(gameId, theme, origin);
         await c.env.BROWSE.insertCatalogEntry(gameId, "guess", theme);
         await c.env.GAME_QUEUE.send({gameId, theme} satisfies GuessQueueMessage);
 
@@ -136,7 +141,8 @@ guessRoutes.openapi(
 
         const gameId = crypto.randomUUID();
         const stub = c.env.GAME_DO.getByName(gameId);
-        const hostToken = await stub.init(gameId, source.theme);
+        const origin = new URL(c.req.url).origin;
+        const hostToken = await stub.init(gameId, source.theme, origin);
         await c.env.BROWSE.insertCatalogEntry(gameId, "guess", source.theme);
         await c.env.GAME_QUEUE.send({gameId, theme: source.theme} satisfies GuessQueueMessage);
 
