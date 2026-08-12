@@ -22,7 +22,7 @@ export async function processPuzzle(message: PuzzleQueueMessage, env: Env): Prom
     const key = puzzleImageKeyFor(puzzleId);
 
     // Gen the
-    const stream = await generateImage(env.AI, prompt);
+    const stream = await generateImage(env.AI, env.FLAGS, prompt);
     await env.IMAGES.put(key, stream, {httpMetadata: {contentType: "image/png"}});
 
     await Promise.all([

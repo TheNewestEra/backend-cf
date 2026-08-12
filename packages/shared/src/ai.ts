@@ -1,23 +1,12 @@
-const PROMPT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
-const IMAGE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0" as const;
-const IMAGE_STEPS = 8;
-
-// Fallback used only if Flagship evaluation itself fails (network hiccup,
-// binding misconfigured, etc.) — kept in sync by hand with the flag's own
-// default variation. Empty on purpose: an empty list is also what makes
-// `pickPresetTheme` back off to the original "let the model invent it"
-// behavior below, so an unset/misconfigured flag degrades to that instead
-// of a hard failure.
+const DEFAULT_PROMPT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
+const DEFAULT_IMAGE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0" as const;
+const DEFAULT_IMAGE_STEPS = 8;
 const DEFAULT_PRESET_THEMES: string[] = [];
 
-/** A curated pool of themes to draw from when a caller doesn't supply its
- * own, sourced from Cloudflare Flagship's "preset-themes" flag (shared by
- * both `guess` and `puzzle`, exact same flag key, read independently by
- * each). Leave it empty to keep the original behavior — an unthemed round
- * is left entirely up to the model. */
-export async function presetThemes(flags: Flagship): Promise<string[]> {
-    return flags.getObjectValue("preset-themes", DEFAULT_PRESET_THEMES);
-}
+const promptModel = (flags: Flagship): Promise<string> => flags.getStringValue("prompt-model", DEFAULT_PROMPT_MODEL);
+const imageModel = (flags: Flagship): Promise<string> => flags.getStringValue("image-model", DEFAULT_IMAGE_MODEL);
+const imageSteps = (flags: Flagship): Promise<number> => flags.getNumberValue("image-steps", DEFAULT_IMAGE_STEPS);
+const presetThemes = (flags: Flagship): Promise<string[]> => flags.getObjectValue("preset-themes", DEFAULT_PRESET_THEMES);
 
 async function pickPresetTheme(flags: Flagship): Promise<string | null> {
     const themes = await presetThemes(flags);
@@ -40,6 +29,7 @@ export async function generateRoundPrompts(
     const themeInstruction = resolvedTheme
         ? `The theme is: "${resolvedTheme}".`
         : "Pick any fun, family-friendly theme yourself.";
+    const model = await promptModel(flags);
 
     const promptsJsonSchema = {
         type: "object",
@@ -54,7 +44,7 @@ export async function generateRoundPrompts(
         required: ["prompts"],
     } as const;
 
-    const result = await ai.run(PROMPT_MODEL, {
+    const result = await ai.run(model as typeof DEFAULT_PROMPT_MODEL, {
         messages: [
             {
                 role: "system",
@@ -112,8 +102,9 @@ function extractPrompts(result: unknown): string[] {
 export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<string> {
     const theme = await pickPresetTheme(flags);
     const themeInstruction = theme ? ` The theme is: "${theme}".` : "";
+    const model = await promptModel(flags);
 
-    const result = await ai.run(PROMPT_MODEL, {
+    const result = await ai.run(model as typeof DEFAULT_PROMPT_MODEL, {
         messages: [
             {
                 role: "system",
@@ -133,6 +124,7 @@ export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<stri
     return text;
 }
 
-export const generateImage =
-    (ai: Ai, prompt: string): Promise<ReadableStream<Uint8Array>> =>
-        ai.run(IMAGE_MODEL, {prompt, num_steps: IMAGE_STEPS});
+const generateImage = async (ai: Ai, flags: Flagship, prompt: string,): Promise<ReadableStream<Uint8Array>> => {
+    const [model, steps] = await Promise.all([imageModel(flags), imageSteps(flags)]);
+    return ai.run(model as typeof DEFAULT_IMAGE_MODEL, {prompt, num_steps: steps});
+};

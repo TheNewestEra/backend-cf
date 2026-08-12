@@ -67,7 +67,7 @@ async function generateAndStoreImage(
     const stub = env.GAME_DO.getByName(gameId);
     await stub.setRoundStatus(index, RoundStatus.Generating);
     try {
-        const stream = await generateImage(env.AI, prompt);
+        const stream = await generateImage(env.AI, env.FLAGS, prompt);
         const key = imageKeyFor(gameId, index);
         await env.IMAGES.put(key, stream, {httpMetadata: {contentType: "image/png"}});
         await stub.setRoundImage(index, key);
