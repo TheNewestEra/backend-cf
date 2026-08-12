@@ -10,7 +10,7 @@ export type GameKind = (typeof GameKind)[keyof typeof GameKind];
 export const GameKindSchema = z.nativeEnum(GameKind);
 
 const GAME_ROUTES = {
-    [GameKind.Guess]: (id: string) => `/games/guess/${id}`,
+    [GameKind.Guess]: (id: string) => `/games/guess-prompt/${id}`,
     [GameKind.Puzzle]: (id: string) => `/games/piece-puzzle/${id}`,
 } as const satisfies Record<GameKind, (id: string) => `/games/${string}/${string}`>;
 
