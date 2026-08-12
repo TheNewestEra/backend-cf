@@ -3,7 +3,7 @@ import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {guessRoutes} from "./guess.controller";
-import {GameDO, type GameStatus} from "./guess.model";
+import GameDO, {type GameStatus} from "./guess.model";
 import {GameWsMessageSchema} from "./guess.schema";
 import {type GuessQueueMessage, processGuessGame} from "./guess.queue";
 

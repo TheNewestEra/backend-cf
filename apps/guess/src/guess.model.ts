@@ -1,26 +1,28 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
 import {and, asc, desc, eq, sql} from "drizzle-orm";
+import {migrate as runMigrations} from "drizzle-orm/durable-sqlite/migrator";
 import {err, ok, type Result} from "neverthrow";
 import {generateColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
-import {toRpcResult, type RpcResult} from "@game-worker/shared/rpc-result";
+import {type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {createDb, type Db} from "./db/client";
+import migrations from "./db/migrations";
 import {game, guesses, participants, rounds} from "./db/schema";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
 import {GameWsEventType, ROUND_RESOLVED_STATUSES, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
 import {
-  DEFAULT_GUESS_TIME_LIMIT_SECONDS,
-  guessMatchThreshold,
-  guessMaxScore,
-  guessMinScore,
-  guessTimeLimitSeconds,
-  imageUrlPathFor,
-  postRoundSeconds,
-  roundCount,
+    DEFAULT_GUESS_TIME_LIMIT_SECONDS,
+    guessMatchThreshold,
+    guessMaxScore,
+    guessMinScore,
+    guessTimeLimitSeconds,
+    imageUrlPathFor,
+    postRoundSeconds,
+    roundCount,
 } from "./guess.constants";
 
 export {ROUND_VISIBLE_STATUSES, RoundStatus};
@@ -75,7 +77,7 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * which their browser must present to start early — same contract as
  * `PuzzleDO`'s `host_token`.
  */
-export class GameDO extends DurableObject<Env> {
+class GameDO extends DurableObject<Env> {
     // Threaded through as a class field (rather than a parameter, unlike
     // the D1 apps' module-level functions) since every method already has
     // `this.ctx` available. `drizzle-orm/durable-sqlite` wraps `ctx.storage`
@@ -84,8 +86,12 @@ export class GameDO extends DurableObject<Env> {
 
     constructor(ctx: DurableObjectState, env: Env) {
         super(ctx, env);
-        ctx.blockConcurrencyWhile(async () => this.migrate());
+        // `this.db` has to exist before `migrate()` runs — the real Drizzle
+        // migrator (see `migrate()`'s own doc comment) queries through it,
+        // unlike the old hand-rolled bootstrap this replaced, which only
+        // ever touched `ctx.storage.sql` directly.
         this.db = createDb(ctx.storage);
+        ctx.blockConcurrencyWhile(this.migrate);
     }
 
     // `origin` is the scheme+host the creating request came in on (see
@@ -511,169 +517,31 @@ export class GameDO extends DurableObject<Env> {
         // getWebSockets() on some runtimes; broadcasting a stale +1 count is
         // more confusing than a same-tick undercount that self-corrects on the
         // next presence event. Mirrors PuzzleDO's webSocketClose.
-        this.broadcast({type: WsEventType.Presence, connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1)});
+        this.broadcast({
+            type: WsEventType.Presence,
+            connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1)
+        });
     }
 
     // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
 
-    // Unlike D1 (migrated via `wrangler d1 migrations apply` against a
-    // shared, hand-numbered `migrations/` folder — see apps/friends/src/db/
-    // README.md), a Durable Object's own SQLite storage has no external
-    // migration-apply mechanism at all: there's no CLI command that reaches
-    // into a specific DO instance's private database. So each instance
-    // bootstraps/evolves its own schema at first-touch via this idempotent,
-    // hand-written raw SQL instead — `./db/schema.ts` is a description of
-    // what this method is expected to produce, kept in sync BY HAND whenever
-    // this method changes. See ./db/README.md for the full story and the
-    // workflow for a future schema change.
-    private migrate(): void {
-        this.ctx.storage.sql.exec(`
-            CREATE TABLE IF NOT EXISTS game
-            (
-                id
-                TEXT
-                PRIMARY
-                KEY,
-                theme
-                TEXT,
-                status
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                'queued',
-                error
-                TEXT,
-                host_token
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                '',
-                lobby_ends_at
-                INTEGER,
-                created_at
-                INTEGER
-                NOT
-                NULL
-            );
-            CREATE TABLE IF NOT EXISTS rounds
-            (
-                idx
-                INTEGER
-                PRIMARY
-                KEY,
-                prompt
-                TEXT,
-                status
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                'pending',
-                image_key
-                TEXT,
-                ready_at
-                INTEGER,
-                started_at
-                INTEGER,
-                time_limit_ms
-                INTEGER,
-                error
-                TEXT
-            );
-            CREATE TABLE IF NOT EXISTS guesses
-            (
-                id
-                INTEGER
-                PRIMARY
-                KEY
-                AUTOINCREMENT,
-                round_idx
-                INTEGER
-                NOT
-                NULL,
-                participant_id
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                '',
-                player
-                TEXT
-                NOT
-                NULL,
-                guess
-                TEXT
-                NOT
-                NULL,
-                correct
-                INTEGER
-                NOT
-                NULL,
-                score
-                INTEGER,
-                created_at
-                INTEGER
-                NOT
-                NULL
-            );
-            CREATE TABLE IF NOT EXISTS participants
-            (
-                id
-                TEXT
-                PRIMARY
-                KEY,
-                name
-                TEXT
-                NOT
-                NULL,
-                user_id
-                TEXT,
-                token
-                TEXT,
-                color
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                '#888888',
-                joined_at
-                INTEGER
-                NOT
-                NULL
-            );
-        `);
-        // `CREATE TABLE IF NOT EXISTS` only helps a brand-new DO instance —
-        // these columns were added after some instances already existed, so
-        // existing ones need a backfill too. There's no `ALTER TABLE ... ADD
-        // COLUMN IF NOT EXISTS`, so each statement's "duplicate column" failure
-        // (on an instance that already has it) is just swallowed.
-        for (const stmt of [
-            "ALTER TABLE game ADD COLUMN host_token TEXT NOT NULL DEFAULT ''",
-            // Backfills to '' on pre-existing rows — readPublicState() treats
-            // that as "unknown" (no imageUrl) rather than a broken origin.
-            "ALTER TABLE game ADD COLUMN origin TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE game ADD COLUMN lobby_ends_at INTEGER",
-            "ALTER TABLE game ADD COLUMN post_round_index INTEGER",
-            "ALTER TABLE game ADD COLUMN post_round_ends_at INTEGER",
-            // DEFAULT 5 matches the static ROUND_COUNT every pre-existing
-            // instance was actually created with, before it became a
-            // per-game value resolved from Flagship at init() time.
-            "ALTER TABLE game ADD COLUMN round_count INTEGER NOT NULL DEFAULT 5",
-            "ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'",
-            "ALTER TABLE guesses ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE guesses ADD COLUMN score INTEGER",
-            "ALTER TABLE rounds ADD COLUMN started_at INTEGER",
-            "ALTER TABLE rounds ADD COLUMN time_limit_ms INTEGER",
-        ]) {
-            try {
-                this.ctx.storage.sql.exec(stmt);
-            } catch {
-                // Column already exists on this instance — nothing to do.
-            }
-        }
-    }
+    // Real Drizzle migrations now, replacing the hand-rolled idempotent
+    // `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE` bootstrap this used to run
+    // directly against `ctx.storage.sql`. `drizzle-kit generate` (run from
+    // apps/guess) is schema.ts's source of truth for the SQL under
+    // ../../drizzle; `./db/migrations.ts` hand-wires those generated files
+    // in as importable modules (a DO can't read them off disk at runtime)
+    // for `drizzle-orm/durable-sqlite/migrator`'s `migrate()` to apply. See
+    // ./db/README.md for the full story and the workflow for a future
+    // schema change.
+    //
+    // NOTE: migration `0000` is `drizzle-kit`'s plain generated
+    // `CREATE TABLE` output, not `CREATE TABLE IF NOT EXISTS` — deliberately
+    // not softened to tolerate a table that already exists. Any `GameDO`
+    // instance that was already bootstrapped by the old raw-SQL `migrate()`
+    // before this change will fail this migration (table already exists)
+    // the next time it's touched. Accepted trade-off, not an oversight.
+    private migrate = async (): Promise<void> => runMigrations(this.db, migrations);
 
     /** Resolves and authorizes a participant: logged-in callers must be
      * signed in as the same user who joined; anonymous callers must present
@@ -1020,6 +888,8 @@ export class GameDO extends DurableObject<Env> {
         ws.send(JSON.stringify(payload));
     }
 }
+
+export default GameDO
 
 /** See guessTimeLimitSeconds(): linear falloff from `maxScore` at 0 elapsed
  * (the instant a round became the current one — `started_at`, stamped by

@@ -347,14 +347,6 @@ guessRoutes.openapi(
         const index = Number(rawIndex);
         if (!Number.isInteger(index) || index < 0) return c.notFound();
 
-        // Spoiler gate: only serve a round's image once it's been played (the
-        // active round, or one that's already resolved) — never a round that's
-        // merely generated and waiting its turn. See ROUND_VISIBLE_STATUSES.
-        // The upper bound on `index` is enforced implicitly here too: an
-        // out-of-range index just means `state.rounds[index]` is undefined,
-        // same as any other not-visible round — this game's round count is
-        // per-game (see roundCount() in guess.constants.ts), not a static
-        // import-time value to check against.
         const state = await c.env.GAME_DO.getByName(gameId).getState();
         const round = state.rounds[index];
         if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return c.notFound();
