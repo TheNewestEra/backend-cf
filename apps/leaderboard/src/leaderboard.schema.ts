@@ -29,7 +29,7 @@ export const LeaderboardEntrySchema = z
     .openapi("LeaderboardEntry");
 
 /** The requesting user's own standing in the selected window — present
- * even when they're outside the top 10 (or have no score at all yet, in
+ * even when they're outside the top N (or have no score at all yet, in
  * which case `score` is 0 and `rank` is null). */
 export const MyLeaderboardScoreSchema = z
     .object({

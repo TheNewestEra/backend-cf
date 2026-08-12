@@ -90,12 +90,34 @@ export interface LeaderboardEntry {
     score: number;
 }
 
-const TOP_N = 10;
+// Fallback used only if Flagship evaluation itself fails (network hiccup,
+// binding misconfigured, etc.) — kept in sync by hand with the flag's own
+// default variation.
+const DEFAULT_PAGE_SIZE = 10;
 
-/** Top 10 users by summed score in the given window. */
-export async function topScores(db: Database, query: LeaderboardQuery): Promise<LeaderboardEntry[]> {
+/** Page size for `topScores`, sourced from Cloudflare Flagship's
+ * "leaderboard-page-size" flag — flip it in the Flagship dashboard/CLI to
+ * change it without a redeploy. */
+export async function topScoresPageSize(flags: Flagship): Promise<number> {
+    return flags.getNumberValue("leaderboard-page-size", DEFAULT_PAGE_SIZE);
+}
+
+export interface LeaderboardPage {
+    entries: LeaderboardEntry[];
+    hasMore: boolean;
+}
+
+/** Page `page` of users ranked by summed score in the given window, `page`
+ * size sourced from Flagship (see `topScoresPageSize`). `page` is
+ * 1-indexed; `rank` keeps counting up across pages rather than restarting
+ * at 1 each time. Fetches one row past the page boundary instead of a
+ * separate COUNT(*) to learn whether another page exists — same trick as
+ * `friendScores` below. */
+export async function topScores(db: Database, flags: Flagship, query: LeaderboardQuery, page: number): Promise<LeaderboardPage> {
     const {conditions, binds} = filtersFor(query);
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const pageSize = await topScoresPageSize(flags);
+    const offset = (page - 1) * pageSize;
 
     const {results} = await db
         .prepare(
@@ -104,19 +126,22 @@ export async function topScores(db: Database, query: LeaderboardQuery): Promise<
                       JOIN users u ON u.id = e.user_id
                  ${where}
              GROUP BY e.user_id
-             ORDER BY total_score DESC
-                 LIMIT ?`,
+             ORDER BY total_score DESC LIMIT ?
+             OFFSET ?`,
         )
-        .bind(...binds, TOP_N)
+        .bind(...binds, pageSize + 1, offset)
         .all<TotalRow>();
 
-    return results.map((row, i) => ({
-        rank: i + 1,
+    const hasMore = results.length > pageSize;
+    const entries = results.slice(0, pageSize).map((row, i) => ({
+        rank: offset + i + 1,
         userId: row.user_id,
         username: row.username,
         color: row.color,
         score: row.total_score,
     }));
+
+    return {entries, hasMore};
 }
 
 export const FRIENDS_PAGE_SIZE = 10;
@@ -132,11 +157,6 @@ async function friendIds(db: Database, userId: string): Promise<string[]> {
     return results.map((r) => r.friend_id);
 }
 
-export interface FriendLeaderboardPage {
-    entries: LeaderboardEntry[];
-    hasMore: boolean;
-}
-
 /** Leaderboard scoped to `userId` and their friends, 10 to a page —
  * ranked the same way as `topScores` (summed score in the window, highest
  * first) but restricted to that group instead of everyone. `page` is
@@ -149,7 +169,7 @@ export async function friendScores(
     userId: string,
     query: LeaderboardQuery,
     page: number,
-): Promise<FriendLeaderboardPage> {
+): Promise<LeaderboardPage> {
     const ids = [userId, ...(await friendIds(db, userId))];
     const {conditions, binds} = filtersFor(query);
     const idPlaceholders = ids.map(() => "?").join(", ");
@@ -191,9 +211,9 @@ export interface MyScore {
 
 /** The given user's total score (0 if they have none in this window) and
  * their rank among everyone who does — computed even when they're outside
- * the top 10. `rank` is null when the user has no score in the window
- * (nothing to rank them against). Returns null only if `userId` doesn't
- * resolve to an account at all. */
+ * `topScores`' range. `rank` is null when the user has no score in the
+ * window (nothing to rank them against). Returns null only if `userId`
+ * doesn't resolve to an account at all. */
 export async function myScore(db: Database, userId: string, query: LeaderboardQuery): Promise<MyScore | null> {
     const user = await db
         .prepare("SELECT username, color FROM users WHERE id = ?")

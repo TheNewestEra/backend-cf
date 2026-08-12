@@ -41,6 +41,16 @@
       "entrypoint": "AccountsService"
     }
   ],
+  // Cloudflare Flagship — same app as `accounts`/`guess`/`puzzle`, on
+  // purpose: it's how every tunable knob this service has gets changed
+  // without a redeploy (see leaderboard.service.ts). This service's own
+  // flag: "leaderboard-page-size".
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+    }
+  ],
   // See apps/accounts/wrangler.jsonc for why binding arrays are fully
   // re-declared per named environment rather than inherited. Each named
   // env's ACCOUNTS binding targets the sibling `accounts` Worker deployed
@@ -67,6 +77,12 @@
           "binding": "ACCOUNTS",
           "service": "game-accounts-worker-staging",
           "entrypoint": "AccountsService"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ]
     },
@@ -111,6 +127,12 @@
           "binding": "ACCOUNTS",
           "service": "game-accounts-worker-prod",
           "entrypoint": "AccountsService"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ]
     }

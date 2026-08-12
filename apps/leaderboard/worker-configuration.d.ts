@@ -11,6 +11,7 @@ import type {AccountsRpc} from "@game-worker/shared/rpc-types";
 interface __BaseEnv_Env {
     DB: D1Database;
     ACCOUNTS: AccountsRpc;
+    FLAGS: Flagship;
 }
 
 declare global {
