@@ -2,14 +2,43 @@ const PROMPT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 const IMAGE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0" as const;
 const IMAGE_STEPS = 8;
 
+// Fallback used only if Flagship evaluation itself fails (network hiccup,
+// binding misconfigured, etc.) — kept in sync by hand with the flag's own
+// default variation. Empty on purpose: an empty list is also what makes
+// `pickPresetTheme` back off to the original "let the model invent it"
+// behavior below, so an unset/misconfigured flag degrades to that instead
+// of a hard failure.
+const DEFAULT_PRESET_THEMES: string[] = [];
+
+/** A curated pool of themes to draw from when a caller doesn't supply its
+ * own, sourced from Cloudflare Flagship's "preset-themes" flag (shared by
+ * both `guess` and `puzzle`, exact same flag key, read independently by
+ * each). Leave it empty to keep the original behavior — an unthemed round
+ * is left entirely up to the model. */
+export async function presetThemes(flags: Flagship): Promise<string[]> {
+    return flags.getObjectValue("preset-themes", DEFAULT_PRESET_THEMES);
+}
+
+async function pickPresetTheme(flags: Flagship): Promise<string | null> {
+    const themes = await presetThemes(flags);
+    if (themes.length === 0) return null;
+    return themes[Math.floor(Math.random() * themes.length)] ?? null;
+}
+
 /**
  * Asks a text model for exactly `roundCount` short image-generation prompts
  * around a theme (or a theme of its own choosing). These prompts double as
  * the hidden "answers" players guess once they see the generated image.
  */
-export async function generateRoundPrompts(ai: Ai, theme: string | null, roundCount: number): Promise<string[]> {
-    const themeInstruction = theme
-        ? `The theme is: "${theme}".`
+export async function generateRoundPrompts(
+    ai: Ai,
+    flags: Flagship,
+    theme: string | null,
+    roundCount: number,
+): Promise<string[]> {
+    const resolvedTheme = theme ?? await pickPresetTheme(flags);
+    const themeInstruction = resolvedTheme
+        ? `The theme is: "${resolvedTheme}".`
         : "Pick any fun, family-friendly theme yourself.";
 
     const promptsJsonSchema = {
@@ -76,9 +105,14 @@ function extractPrompts(result: unknown): string[] {
 
 /**
  * Asks a text model for a single vivid image prompt — used by the puzzle
- * game when the player doesn't supply their own theme.
+ * game when the player doesn't supply their own theme. Steers the model
+ * toward a Flagship-configured preset theme when one's available, otherwise
+ * leaves the theme entirely up to the model, same as before.
  */
-export async function generateImagePrompt(ai: Ai): Promise<string> {
+export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<string> {
+    const theme = await pickPresetTheme(flags);
+    const themeInstruction = theme ? ` The theme is: "${theme}".` : "";
+
     const result = await ai.run(PROMPT_MODEL, {
         messages: [
             {
@@ -89,7 +123,7 @@ export async function generateImagePrompt(ai: Ai): Promise<string> {
             },
             {
                 role: "user",
-                content: "Write one fun image prompt, suitable for a sliding picture puzzle.",
+                content: `Write one fun image prompt, suitable for a sliding picture puzzle.${themeInstruction}`,
             },
         ],
     });

@@ -40,7 +40,10 @@
   // "grid-size-default", "grid-size-min", "grid-size-max",
   // "puzzle-max-score", "puzzle-min-solved-score". Shared with `guess`
   // (exact same flag key, read independently by each service):
-  // "lobby-countdown-seconds", "max-theme-length", "max-player-length".
+  // "lobby-countdown-seconds", "max-theme-length", "max-player-length",
+  // "preset-themes" (see @game-worker/shared's ai.ts — an object/array flag
+  // of curated theme strings; leave unset/empty to let the model keep
+  // inventing its own theme when a puzzle doesn't have one).
   // `guess` also has its own guess-time-*/round-count/guess-*-score/
   // post-round-seconds flags on this same app.
   "flagship": [

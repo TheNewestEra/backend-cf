@@ -18,7 +18,7 @@ export async function processPuzzle(message: PuzzleQueueMessage, env: Env): Prom
     ]);
 
     // If a theme is given use it else generate one for the user
-    const prompt = theme ?? await generateImagePrompt(env.AI);
+    const prompt = theme ?? await generateImagePrompt(env.AI, env.FLAGS);
     const key = puzzleImageKeyFor(puzzleId);
 
     // Gen the

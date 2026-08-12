@@ -27,7 +27,7 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     // created and the number of prompts/images generated here disagreeing
     // with each other. See roundCount() in guess.constants.ts.
     const roundCount = (await stub.getState()).rounds.length;
-    const prompts = await generateRoundPrompts(env.AI, theme, roundCount);
+    const prompts = await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount);
     await stub.setPrompts(prompts);
 
     // Still `generating` — per-round progress from here on is visible via
