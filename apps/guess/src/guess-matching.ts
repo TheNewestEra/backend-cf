@@ -40,17 +40,16 @@ function significantWords(normalized: string): Set<string> {
     );
 }
 
-/** How much of the answer's key words a guess needs to cover to count as
- * correct. Loose on purpose — this is a party game, not a spelling test. */
-const MATCH_THRESHOLD = 0.35;
-
 /**
  * A guess is correct if it's an exact match after normalizing, or if it
- * covers most of the answer's significant (non-stopword) words — so word
- * order, articles, minor typos in unrelated words, and small
- * plural/tense differences don't fail an otherwise-right guess.
+ * covers at least `threshold` (0-1) of the answer's significant
+ * (non-stopword) words — so word order, articles, minor typos in unrelated
+ * words, and small plural/tense differences don't fail an otherwise-right
+ * guess. `threshold` is Flagship-sourced (see guess.constants.ts's
+ * `guessMatchThreshold()`) rather than read here, same "caller resolves the
+ * flag, this stays a pure function" shape as `scoreForGuess()`.
  */
-export function isGuessCorrect(guess: string, answer: string): boolean {
+export function isGuessCorrect(guess: string, answer: string, threshold: number): boolean {
     const normalizedGuess = normalizeGuess(guess);
     const normalizedAnswer = normalizeGuess(answer);
     if (!normalizedGuess) return false;
@@ -62,5 +61,5 @@ export function isGuessCorrect(guess: string, answer: string): boolean {
     const guessWords = significantWords(normalizedGuess);
     const overlap = [...answerWords].filter((word) => guessWords.has(word)).length;
 
-    return overlap / answerWords.size >= MATCH_THRESHOLD;
+    return overlap / answerWords.size >= threshold;
 }

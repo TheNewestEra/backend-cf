@@ -9,6 +9,7 @@ import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResul
 import {GameWsEventType, ROUND_RESOLVED_STATUSES, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
 import {
   DEFAULT_GUESS_TIME_LIMIT_SECONDS,
+  guessMatchThreshold,
   guessMaxScore,
   guessMinScore,
   guessTimeLimitSeconds,
@@ -78,6 +79,7 @@ interface ParticipantRow extends Record<string, SqlStorageValue> {
 }
 
 interface ParticipantPublic extends Record<string, SqlStorageValue> {
+    id: string;
     name: string;
     color: string;
 }
@@ -271,7 +273,7 @@ export class GameDO extends DurableObject<Env> {
                 color,
                 Date.now(),
             );
-            this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
+            this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId: userId});
             return {participantId: userId, token: null, color};
         }
 
@@ -285,7 +287,7 @@ export class GameDO extends DurableObject<Env> {
             color,
             Date.now(),
         );
-        this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
+        this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId});
         return {participantId, token, color};
     }
 
@@ -335,7 +337,7 @@ export class GameDO extends DurableObject<Env> {
             throw new Error("you already answered this round correctly");
         }
 
-        const correct = isGuessCorrect(guess, round.prompt);
+        const correct = isGuessCorrect(guess, round.prompt, await guessMatchThreshold(this.env));
         const score = correct
             ? scoreForGuess(round.started_at, round.time_limit_ms, await guessMaxScore(this.env), await guessMinScore(this.env))
             : null;
@@ -351,9 +353,20 @@ export class GameDO extends DurableObject<Env> {
             Date.now(),
         );
 
+        // Same "sum of every correct guess" this participant has ever
+        // banked as readPublicState()'s `results` — recomputed here (rather
+        // than incrementally tracked) so it can't drift from that figure.
+        const totalScore = this.ctx.storage.sql
+            .exec<{ total: number }>(
+                "SELECT COALESCE(SUM(score), 0) AS total FROM guesses WHERE participant_id = ? AND correct = 1",
+                participantId,
+            )
+            .toArray()[0]?.total ?? 0;
+
         this.broadcast({
             type: GameWsEventType.Guess,
             index,
+            participantId,
             player: participant.name,
             color: participant.color,
             correct,
@@ -377,7 +390,7 @@ export class GameDO extends DurableObject<Env> {
             }
         }
 
-        return {correct, prompt: correct ? round.prompt : null, score};
+        return {correct, prompt: correct ? round.prompt : null, score, totalScore};
     }
 
     /** Reveals a round's prompt without guessing — gated the same as guessing
@@ -395,6 +408,7 @@ export class GameDO extends DurableObject<Env> {
             type: GameWsEventType.Revealed,
             index,
             prompt: round.prompt,
+            participantId,
             player: participant.name,
             color: participant.color
         });
@@ -692,7 +706,7 @@ export class GameDO extends DurableObject<Env> {
             .toArray()[0];
         if (!row) return;
         if (!row.user_id && (!token || token !== row.token)) return;
-        this.broadcast({type: GameWsEventType.PlayerTyping, index, player: row.name, color: row.color});
+        this.broadcast({type: GameWsEventType.PlayerTyping, index, participantId, player: row.name, color: row.color});
     }
 
     // --- internals -----------------------------------------------------------
@@ -910,20 +924,14 @@ export class GameDO extends DurableObject<Env> {
             .exec<RoundRow>("SELECT * FROM rounds ORDER BY idx ASC")
             .toArray();
         const participants = this.ctx.storage.sql
-            .exec<ParticipantPublic>("SELECT name, color FROM participants ORDER BY joined_at ASC")
+            .exec<ParticipantPublic>("SELECT id, name, color FROM participants ORDER BY joined_at ASC")
             .toArray();
-        // Live scoreboard, not just a finished-game summary — updates as
-        // guesses land, and doubles as the final standings once `status` hits
-        // `solved`/`timeout` (see `finalizeGame()`). Joined against
-        // `participants` (rather than trusting `guesses.player`) so a display
-        // name change after guessing still shows correctly here.
         const results = this.ctx.storage.sql
-            .exec<{ name: string; color: string; total: number }>(
-                `SELECT p.name AS name, p.color AS color, SUM(g.score) AS total
-                 FROM guesses g
-                          JOIN participants p ON p.id = g.participant_id
-                 WHERE g.correct = 1
-                 GROUP BY g.participant_id
+            .exec<{ participant_id: string; total: number }>(
+                `SELECT participant_id, SUM(score) AS total
+                 FROM guesses
+                 WHERE correct = 1
+                 GROUP BY participant_id
                  ORDER BY total DESC`,
             )
             .toArray();
@@ -941,12 +949,6 @@ export class GameDO extends DurableObject<Env> {
                     r.status === RoundStatus.Active && r.started_at !== null
                         ? Math.max(0, (r.time_limit_ms ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.started_at))
                         : null,
-                // Same spoiler gate as guess.controller.ts's own image route
-                // (ROUND_VISIBLE_STATUSES) — image_key is always set by the
-                // time a round reaches one of those statuses (see
-                // setRoundImage()). `game.origin` is '' on pre-migration rows
-                // that predate this column; treated as "unknown" rather than
-                // building a broken relative-looking URL.
                 imageUrl:
                     game?.origin && ROUND_VISIBLE_STATUSES.includes(r.status)
                         ? new URL(imageUrlPathFor(game.id, r.idx), game.origin).toString()
@@ -959,8 +961,8 @@ export class GameDO extends DurableObject<Env> {
                 game?.post_round_ends_at != null ? Math.max(0, game.post_round_ends_at - Date.now()) : null,
             lobbyRemainingMs: game ? lobbyRemainingMs(game.lobby_ends_at) : null,
             connectedPlayers: this.ctx.getWebSockets().length,
-            participants: participants.map((p) => ({name: p.name, color: p.color})),
-            results: results.map((r) => ({name: r.name, color: r.color, score: r.total})),
+            participants: participants.map((p) => ({id: p.id, name: p.name, color: p.color})),
+            results: results.map((r) => ({participantId: r.participant_id, score: r.total})),
         };
     }
 

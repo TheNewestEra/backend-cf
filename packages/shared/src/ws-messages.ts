@@ -33,9 +33,18 @@ export const WsStatusMessageSchema = z
   })
   .openapi("WsStatusMessage");
 
-/** Broadcast whenever someone joins — see each DO's `join()`. */
+/** Broadcast whenever someone joins — see each DO's `join()`. `participantId`
+ * is optional here (rather than each game's own schema, which is where a
+ * required field would normally belong) purely because this shape is shared:
+ * `apps/guess` always sets it, `apps/puzzle` doesn't populate it yet — making
+ * it required would break puzzle's existing broadcast payload. */
 export const WsPlayerJoinedMessageSchema = z
-  .object({ type: z.literal(WsEventType.PlayerJoined), name: z.string(), color: z.string() })
+  .object({
+    type: z.literal(WsEventType.PlayerJoined),
+    name: z.string(),
+    color: z.string(),
+    participantId: z.string().optional(),
+  })
   .openapi("WsPlayerJoinedMessage");
 
 /** Broadcast whenever the live WebSocket connection count changes — see each

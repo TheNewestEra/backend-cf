@@ -37,7 +37,10 @@
   // testing a different value means changing that flag directly instead of
   // flipping a mode and hoping a second "-override-" flag holds what you
   // want. This service's own flags: "guess-time-seconds", "round-count",
-  // "guess-max-score", "guess-min-score", "post-round-seconds". Shared with
+  // "guess-max-score", "guess-min-score", "post-round-seconds",
+  // "guess-match-threshold" (0-1 fraction of the answer's significant words
+  // a guess must cover to count as correct — see guess-matching.ts's
+  // isGuessCorrect()). Shared with
   // `puzzle` (exact same flag key, read independently by each service):
   // "lobby-countdown-seconds", "max-theme-length", "max-player-length",
   // "preset-themes" (see @game-worker/shared's ai.ts — an object/array flag

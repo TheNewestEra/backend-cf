@@ -88,17 +88,21 @@ export const RoundPublicSchema = z
  * game — sorted highest-first, so index 0 is always the leader. Present
  * (and live-updating) throughout the game, not just once it's over; the
  * client can render it as a scoreboard at any point, but it's only the
- * *final* standings once `status` reaches `solved`/`timeout`. */
-export const GameResultSchema = z
-    .object({name: z.string(), color: z.string(), score: z.number()})
-    .openapi("GameResult");
+ * *final* standings once `status` reaches `solved`/`timeout`. Identified by
+ * `participantId` alone — no `name`/`color` here, since those are already on
+ * that participant's `ParticipantPublicSchema` roster entry (and two
+ * participants can share a display `name` anyway); join against `id` there
+ * to render a row. */
+export const GameResultSchema = z.object({participantId: z.string(), score: z.number()}).openapi("GameResult");
 
-/** A joined player's public roster entry — just enough to render an avatar
- * list in the lobby/play page. No id/token here; those stay private to the
- * participant who owns them (see JoinResultSchema). Mirrors Piece Puzzle's
- * own participant roster entry. */
+/** A joined player's public roster entry — enough to render an avatar list
+ * in the lobby/play page and to key it by `id` rather than the free-text
+ * (and possibly duplicate) `name` — e.g. to highlight the caller's own
+ * entry, or to tell two same-named guests apart. `token` stays private to
+ * the participant who owns it (see JoinResultSchema); `id` isn't a secret,
+ * so it's fine here. */
 export const ParticipantPublicSchema = z
-    .object({name: z.string(), color: z.string()})
+    .object({id: z.string(), name: z.string(), color: z.string()})
     .openapi("Participant");
 
 export const GamePublicSchema = z
@@ -146,7 +150,10 @@ export const GuessResultSchema = z
     .object({
         correct: z.boolean(),
         prompt: z.string().nullable(),
-        score: z.number().nullable().openapi({description: "Time-weighted points earned; null when the guess was wrong"}),
+        score: z.number().nullable().openapi({description: "Time-weighted points earned for this guess; null when the guess was wrong"}),
+        totalScore: z
+            .number()
+            .openapi({description: "This participant's running total across every correct guess this game so far (including this one, if correct) — same figure as their entry in GamePublicSchema's `results`"}),
     })
     .openapi("GuessResult");
 
@@ -221,6 +228,7 @@ export const GameWsGuessMessageSchema = z
     .object({
         type: z.literal(GameWsEventType.Guess),
         index: z.number(),
+        participantId: z.string(),
         player: z.string(),
         color: z.string(),
         correct: z.boolean(),
@@ -233,6 +241,7 @@ export const GameWsRevealedMessageSchema = z
         type: z.literal(GameWsEventType.Revealed),
         index: z.number(),
         prompt: z.string(),
+        participantId: z.string(),
         player: z.string(),
         color: z.string(),
     })
@@ -243,6 +252,7 @@ export const GameWsPlayerTypingMessageSchema = z
     .object({
         type: z.literal(GameWsEventType.PlayerTyping),
         index: z.number(),
+        participantId: z.string(),
         player: z.string(),
         color: z.string(),
     })
