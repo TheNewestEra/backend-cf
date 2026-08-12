@@ -10,6 +10,12 @@
 // `currentUserVia`/`logInVia`/`logOutVia` from `@game-worker/shared/session`
 // instead of a second copy of that logic. Only the session lookup itself
 // differs: an in-process D1 query here vs. an RPC call everywhere else.
+//
+// `allow-localhost-cookie` is a Flagship boolean flag (see `FLAGS` binding
+// in wrangler.jsonc) — when enabled it relaxes the session cookie's
+// `Secure`/`Domain` so it round-trips against a `wrangler dev` Worker on
+// plain HTTP for the Angular app at http://localhost:4200 (see
+// @game-worker/shared/cookie). Leave it disabled everywhere else.
 import type {Context} from "hono";
 import {currentUserVia, logInVia, logOutVia} from "@game-worker/shared/session";
 import type {AccountsSessionRpc} from "@game-worker/shared/rpc-types";
@@ -24,11 +30,14 @@ function directSessionRpc(db: Database): AccountsSessionRpc {
     };
 }
 
-export const currentUser = (c: Context<{ Bindings: Env }>) =>
-    currentUserVia(c, directSessionRpc(c.env.DB));
+const allowLocalhostCookie = (c: Context<{ Bindings: Env }>) =>
+    c.env.FLAGS.getBooleanValue("allow-localhost-cookie", false);
 
-export const logIn = (c: Context<{ Bindings: Env }>, userId: string) =>
-    logInVia(c, directSessionRpc(c.env.DB), userId);
+export const currentUser = async (c: Context<{ Bindings: Env }>) =>
+    currentUserVia(c, directSessionRpc(c.env.DB), await allowLocalhostCookie(c));
 
-export const logOut = (c: Context<{ Bindings: Env }>) =>
-    logOutVia(c, directSessionRpc(c.env.DB));
+export const logIn = async (c: Context<{ Bindings: Env }>, userId: string) =>
+    logInVia(c, directSessionRpc(c.env.DB), userId, await allowLocalhostCookie(c));
+
+export const logOut = async (c: Context<{ Bindings: Env }>) =>
+    logOutVia(c, directSessionRpc(c.env.DB), await allowLocalhostCookie(c));

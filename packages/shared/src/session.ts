@@ -12,7 +12,12 @@
 // `cookieDomain` is threaded through as a plain argument (rather than read
 // off `c.env` in here) so this file stays agnostic of any particular
 // service's `Env` shape — each caller pulls its own `c.env.COOKIE_DOMAIN`
-// var (see apps/*/wrangler.jsonc) and passes it in.
+// var (see apps/*/wrangler.jsonc) and passes it in. `allowInsecureLocalDev`
+// follows the same pattern: only `accounts` (the one service with a
+// Flagship `FLAGS` binding) evaluates the `allow-localhost-cookie` flag and
+// passes the result in — see apps/accounts/src/auth.middleware.ts and
+// ./cookie. It defaults to `false` so every other service's
+// `accountsAuthMiddleware` call site is unaffected.
 
 import type {Context} from "hono";
 import {deleteCookie, getCookie, setCookie} from "hono/cookie";
@@ -24,14 +29,15 @@ import type {AccountRecord, AccountsSessionRpc} from "./rpc-types";
  * returns `null` rather than rejecting when there's no session. */
 export async function currentUserVia(
     c: Context,
-    accounts: AccountsSessionRpc
+    accounts: AccountsSessionRpc,
+    allowInsecureLocalDev = false,
 ): Promise<AccountRecord | null> {
     const token = getCookie(c, SESSION_COOKIE);
     if (!token) return null;
 
     const user = await accounts.getUserBySession(token);
     if (!user) {
-        deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts());
+        deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts(allowInsecureLocalDev));
         return null;
     }
     return user;
@@ -63,15 +69,20 @@ export async function logInVia(
     c: Context,
     accounts: AccountsSessionRpc,
     userId: string,
+    allowInsecureLocalDev = false,
 ): Promise<void> {
     const token = await accounts.createSession(userId);
-    setCookie(c, SESSION_COOKIE, token, sessionCookieOpts());
+    setCookie(c, SESSION_COOKIE, token, sessionCookieOpts(allowInsecureLocalDev));
 }
 
-export async function logOutVia(c: Context, accounts: AccountsSessionRpc): Promise<void> {
+export async function logOutVia(
+    c: Context,
+    accounts: AccountsSessionRpc,
+    allowInsecureLocalDev = false,
+): Promise<void> {
     const token = getCookie(c, SESSION_COOKIE);
     if (token) await accounts.deleteSession(token);
-    deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts());
+    deleteCookie(c, SESSION_COOKIE, sessionCookieDeleteOpts(allowInsecureLocalDev));
 }
 
 /** Builds the `currentUser`/`logIn`/`logOut` trio every non-accounts

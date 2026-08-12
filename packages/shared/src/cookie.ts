@@ -2,15 +2,18 @@ export const SESSION_COOKIE = "session";
 
 const COOKIE_DOMAIN = ".ryanb.co.za"
 
-export function sessionCookieOpts() {
+export function sessionCookieOpts(allowInsecureLocalDev: boolean) {
     return {
         path: "/",
-        domain: COOKIE_DOMAIN,
+        domain: allowInsecureLocalDev ? undefined : COOKIE_DOMAIN,
         httpOnly: true,
-        secure: true,
+        secure: !allowInsecureLocalDev,
         sameSite: "Lax",
         maxAge: 60 * 60 * 24 * 30,
     } as const;
 }
 
-export const sessionCookieDeleteOpts = () => ({path: "/", domain: COOKIE_DOMAIN} as const);
+export const sessionCookieDeleteOpts = (allowInsecureLocalDev: boolean) => ({
+    path: "/",
+    domain: allowInsecureLocalDev ? undefined : COOKIE_DOMAIN,
+} as const);

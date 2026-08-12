@@ -40,6 +40,12 @@
       "migrations_dir": "../../migrations"
     }
   ],
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+    }
+  ],
   // Named environments each get their own physical D1 database and a
   // name-suffixed Worker script, deployed with `wrangler deploy --env
   // <name>`. NOTE: per Wrangler's config schema, binding arrays (d1, r2,
@@ -61,6 +67,12 @@
           "database_name": "game-worker-catalog-staging",
           "database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
           "migrations_dir": "../../migrations"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ]
     },
@@ -104,6 +116,12 @@
           "database_name": "game-worker-catalog-prod",
           "database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
           "migrations_dir": "../../migrations"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ]
     }
