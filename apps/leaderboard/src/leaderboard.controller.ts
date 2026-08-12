@@ -74,7 +74,7 @@ leaderboardRoutes.openapi(
         const [{entries, hasMore}, me] = await Promise.all([
             scope === LeaderboardScope.Friends && user
                 ? friendScores(c.env.DB, user.id, query, pageNum)
-                : topScores(c.env.DB, c.env.FLAGS, query, pageNum),
+                : topScores(c.env.DB, c.env.FLAGS, query, pageNum, user?.id ?? null),
             user ? myScore(c.env.DB, user.id, query) : Promise.resolve(null),
         ]);
 
