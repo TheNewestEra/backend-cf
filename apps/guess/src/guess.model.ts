@@ -1,8 +1,10 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
+import {err, ok, type Result} from "neverthrow";
 import {generateColor} from "@game-worker/shared/color";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
+import {toRpcResult, type RpcResult} from "@game-worker/shared/rpc-result";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
@@ -231,11 +233,15 @@ export class GameDO extends DurableObject<Env> {
 
     /** Ends the lobby countdown immediately and starts play. Mirrors
      * `PuzzleDO.startNow()`. */
-    async startNow(hostToken: string): Promise<void> {
-        const row = this.requireGameRow();
-        this.assertHost(row, hostToken);
-        if (row.status !== GameSessionStatus.Waiting) throw new Error("game is not waiting to start");
+    async startNow(hostToken: string): Promise<RpcResult<void>> {
+        const validated = this.requireGameRow()
+            .andThen((row) => this.assertHost(row, hostToken))
+            .andThen((row) => (row.status === GameSessionStatus.Waiting ? ok(row) : err("game is not waiting to start")));
+        if (validated.isErr()) return {ok: false, error: validated.error};
+
+        const row = validated.value;
         await this.beginPlaying(row.id);
+        return toRpcResult(ok(undefined));
     }
 
     // --- RPC: host-only lobby action ----------------------------------------
@@ -255,11 +261,14 @@ export class GameDO extends DurableObject<Env> {
         userId: string | null,
         playerName: string,
         userColor: string | null,
-    ): Promise<{ participantId: string; token: string | null; color: string }> {
-        const row = this.requireGameRow();
-        if (!JOINABLE_STATUSES.includes(row.status)) {
-            throw new Error("game has already started; you can spectate but not join");
-        }
+    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>> {
+        const validated = this.requireGameRow().andThen((row) =>
+            JOINABLE_STATUSES.includes(row.status)
+                ? ok(row)
+                : err("game has already started; you can spectate but not join"),
+        );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+
         const color = userColor ?? generateColor();
 
         if (userId) {
@@ -274,7 +283,7 @@ export class GameDO extends DurableObject<Env> {
                 Date.now(),
             );
             this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId: userId});
-            return {participantId: userId, token: null, color};
+            return toRpcResult(ok({participantId: userId, token: null, color}));
         }
 
         const participantId = crypto.randomUUID();
@@ -288,7 +297,7 @@ export class GameDO extends DurableObject<Env> {
             Date.now(),
         );
         this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId});
-        return {participantId, token, color};
+        return toRpcResult(ok({participantId, token, color}));
     }
 
     // --- RPC: joining --------------------------------------------------------
@@ -315,29 +324,40 @@ export class GameDO extends DurableObject<Env> {
         token: string | null,
         guess: string,
         userId: string | null,
-    ): Promise<GuessResult> {
-        const participant = this.requireParticipant(participantId, token, userId);
+    ): Promise<RpcResult<GuessResult>> {
+        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
+            this.requireGameRow().andThen((gameRow) => {
+                const round = this.ctx.storage.sql
+                    .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
+                    .toArray()[0];
+                if (!round || round.status !== RoundStatus.Active || !round.prompt) {
+                    return err("round not active");
+                }
+                // Captured as its own binding (rather than relying on
+                // `round.prompt` after this point) so the narrowing to
+                // non-null above survives being carried inside the `ok()`
+                // object literal — TS doesn't propagate a property
+                // narrowing through an object literal's field.
+                const prompt = round.prompt;
 
-        const gameRow = this.requireGameRow();
-        const round = this.ctx.storage.sql
-            .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
-            .toArray()[0];
-        if (!round || round.status !== RoundStatus.Active || !round.prompt) {
-            throw new Error("round not active");
-        }
+                const alreadyCorrect = this.ctx.storage.sql
+                    .exec<{ n: number }>(
+                        "SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND participant_id = ? AND correct = 1",
+                        index,
+                        participantId,
+                    )
+                    .toArray()[0]?.n;
+                if (alreadyCorrect && alreadyCorrect > 0) {
+                    return err("you already answered this round correctly");
+                }
 
-        const alreadyCorrect = this.ctx.storage.sql
-            .exec<{ n: number }>(
-                "SELECT COUNT(*) AS n FROM guesses WHERE round_idx = ? AND participant_id = ? AND correct = 1",
-                index,
-                participantId,
-            )
-            .toArray()[0]?.n;
-        if (alreadyCorrect && alreadyCorrect > 0) {
-            throw new Error("you already answered this round correctly");
-        }
+                return ok({participant, gameRow, round, prompt});
+            }),
+        );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+        const {participant, gameRow, round, prompt} = validated.value;
 
-        const correct = isGuessCorrect(guess, round.prompt, await guessMatchThreshold(this.env));
+        const correct = isGuessCorrect(guess, prompt, await guessMatchThreshold(this.env));
         const score = correct
             ? scoreForGuess(round.started_at, round.time_limit_ms, await guessMaxScore(this.env), await guessMinScore(this.env))
             : null;
@@ -390,20 +410,27 @@ export class GameDO extends DurableObject<Env> {
             }
         }
 
-        return {correct, prompt: correct ? round.prompt : null, score, totalScore};
+        return toRpcResult(ok({correct, prompt: correct ? prompt : null, score, totalScore}));
     }
 
     /** Reveals a round's prompt without guessing — gated the same as guessing
      * itself against spoilers (see `ROUND_VISIBLE_STATUSES`): only the
      * current round or one that's already resolved can be revealed, never a
      * round still queued up waiting its turn. */
-    async revealRound(index: number, participantId: string, token: string | null, userId: string | null): Promise<string | null> {
-        const participant = this.requireParticipant(participantId, token, userId);
+    async revealRound(
+        index: number,
+        participantId: string,
+        token: string | null,
+        userId: string | null,
+    ): Promise<RpcResult<string | null>> {
+        const validated = this.requireParticipant(participantId, token, userId);
+        if (validated.isErr()) return {ok: false, error: validated.error};
+        const participant = validated.value;
 
         const round = this.ctx.storage.sql
             .exec<RoundRow>("SELECT * FROM rounds WHERE idx = ?", index)
             .toArray()[0];
-        if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return null;
+        if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return toRpcResult(ok(null));
         this.broadcast({
             type: GameWsEventType.Revealed,
             index,
@@ -412,7 +439,7 @@ export class GameDO extends DurableObject<Env> {
             player: participant.name,
             color: participant.color
         });
-        return round.prompt;
+        return toRpcResult(ok(round.prompt));
     }
 
     // --- RPC: player interaction --------------------------------------------
@@ -424,7 +451,18 @@ export class GameDO extends DurableObject<Env> {
      * there's only ever one round deadline to consider. `scheduleNextAlarm()`
      * always arms it for whichever deadline is soonest. */
     async alarm(): Promise<void> {
-        const row = this.requireGameRow();
+        // Not part of `GameDO`'s RPC surface — there's no caller to hand a
+        // `Result` back to, and the DO alarm subsystem's own retry policy is
+        // exactly what an uncaught rejection here should drive, same as a
+        // thrown error always did — so `requireGameRow()`'s `Err` is
+        // rethrown rather than propagated as a value. Mirrors PuzzleDO's
+        // `alarm()`.
+        const row = this.requireGameRow().match(
+            (row) => row,
+            (error) => {
+                throw new Error(error);
+            },
+        );
 
         if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null && Date.now() >= row.lobby_ends_at) {
             await this.beginPlaying(row.id);
@@ -666,26 +704,28 @@ export class GameDO extends DurableObject<Env> {
 
     /** Resolves and authorizes a participant: logged-in callers must be
      * signed in as the same user who joined; anonymous callers must present
-     * the token issued at join time. Throws `Error("forbidden: ...")` for
-     * either failure, which `hostActionError` (shared/http-exceptions.ts)
-     * maps to a 403 — someone who never joined can still spectate, they just
-     * can't act. Returns the joined display name/color to record on the
-     * action and broadcast alongside it. */
+     * the token issued at join time. `Err("forbidden: ...")` for either
+     * failure — every caller (`submitGuess()`/`revealRound()`) folds that
+     * straight into its own `RpcResult` (see shared/rpc-result.ts), which
+     * guess.controller.ts's `hostActionError` maps to a 403 — someone who
+     * never joined can still spectate, they just can't act. Resolves to the
+     * joined display name/color to record on the action and broadcast
+     * alongside it. Mirrors `PuzzleDO.requireParticipant()`. */
     private requireParticipant(
         participantId: string,
         token: string | null,
         userId: string | null,
-    ): { name: string; color: string } {
+    ): Result<{ name: string; color: string }, string> {
         const row = this.ctx.storage.sql
             .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
             .toArray()[0];
-        if (!row) throw new Error("forbidden: join the game before playing");
+        if (!row) return err("forbidden: join the game before playing");
         if (row.user_id) {
-            if (row.user_id !== userId) throw new Error("forbidden: not your participant id");
+            if (row.user_id !== userId) return err("forbidden: not your participant id");
         } else if (!token || token !== row.token) {
-            throw new Error("forbidden: invalid participant token");
+            return err("forbidden: invalid participant token");
         }
-        return {name: row.name, color: row.color};
+        return ok({name: row.name, color: row.color});
     }
 
     /** Broadcasts that a player is actively typing a guess for a round —
@@ -806,7 +846,15 @@ export class GameDO extends DurableObject<Env> {
      * real wait — driven by `alarm()` — rather than something clients only
      * see for an instant. */
     private async advanceAfterPostRound(gameId: string, index: number): Promise<void> {
-        const row = this.requireGameRow();
+        // Internal orchestration, not part of the RPC surface — see
+        // `alarm()`'s doc comment on why this unwraps-and-rethrows rather
+        // than propagating an `Err`.
+        const row = this.requireGameRow().match(
+            (row) => row,
+            (error) => {
+                throw new Error(error);
+            },
+        );
         this.ctx.storage.sql.exec("UPDATE game SET post_round_index = NULL, post_round_ends_at = NULL");
 
         const nextIndex = index + 1;
@@ -880,7 +928,15 @@ export class GameDO extends DurableObject<Env> {
      * so there's still only ever one deadline to arm for. Deletes the alarm
      * entirely once nothing is pending. */
     private async scheduleNextAlarm(): Promise<void> {
-        const row = this.requireGameRow();
+        // Internal orchestration, not part of the RPC surface — see
+        // `alarm()`'s doc comment on why this unwraps-and-rethrows rather
+        // than propagating an `Err`.
+        const row = this.requireGameRow().match(
+            (row) => row,
+            (error) => {
+                throw new Error(error);
+            },
+        );
 
         if (row.status === GameSessionStatus.Waiting && row.lobby_ends_at !== null) {
             await this.ctx.storage.setAlarm(row.lobby_ends_at);
@@ -907,16 +963,16 @@ export class GameDO extends DurableObject<Env> {
         await this.ctx.storage.deleteAlarm();
     }
 
-    private assertHost(row: GameRow, hostToken: string): void {
-        if (!hostToken || hostToken !== row.host_token) {
-            throw new Error("forbidden: only the host can do that");
-        }
+    /** Passes `row` through unchanged on success, so callers can chain it
+     * straight into a further `.andThen()` (see `startNow()`) without
+     * re-fetching it. Mirrors `PuzzleDO.assertHost()`. */
+    private assertHost(row: GameRow, hostToken: string): Result<GameRow, string> {
+        return hostToken && hostToken === row.host_token ? ok(row) : err("forbidden: only the host can do that");
     }
 
-    private requireGameRow(): GameRow {
+    private requireGameRow(): Result<GameRow, string> {
         const row = this.ctx.storage.sql.exec<GameRow>("SELECT * FROM game LIMIT 1").toArray()[0];
-        if (!row) throw new Error("game not initialized");
-        return row;
+        return row ? ok(row) : err("game not initialized");
     }
 
     private readPublicState(): GamePublic {

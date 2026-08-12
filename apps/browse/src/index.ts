@@ -12,7 +12,8 @@ import {
     markCatalogReady,
     updatePlayStatus,
 } from "./catalog.service";
-import {D1Result} from "@cloudflare/workers-types";
+import {createDb} from "./db/client";
+import {D1Response} from "@cloudflare/workers-types";
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -32,24 +33,24 @@ app.doc("/openapi.json", {
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
 
 export class CatalogService extends WorkerEntrypoint<Env> {
-    insertCatalogEntry(id: string, kind: GameKind, theme: string | null): Promise<D1Result> {
-        return insertCatalogEntry(this.env.DB, id, kind, theme);
+    insertCatalogEntry(id: string, kind: GameKind, theme: string | null): Promise<D1Response> {
+        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme);
     }
 
-    markCatalogGenerating(id: string): Promise<D1Result> {
-        return markCatalogGenerating(this.env.DB, id);
+    markCatalogGenerating(id: string): Promise<D1Response> {
+        return markCatalogGenerating(createDb(this.env.DB), id);
     }
 
-    markCatalogReady(id: string, thumbnailKey: string): Promise<D1Result> {
-        return markCatalogReady(this.env.DB, id, thumbnailKey);
+    markCatalogReady(id: string, thumbnailKey: string): Promise<D1Response> {
+        return markCatalogReady(createDb(this.env.DB), id, thumbnailKey);
     }
 
-    markCatalogError(id: string): Promise<D1Result> {
-        return markCatalogError(this.env.DB, id);
+    markCatalogError(id: string): Promise<D1Response> {
+        return markCatalogError(createDb(this.env.DB), id);
     }
 
-    updatePlayStatus(id: string, playStatus: PlayStatus): Promise<D1Result> {
-        return updatePlayStatus(this.env.DB, id, playStatus);
+    updatePlayStatus(id: string, playStatus: PlayStatus): Promise<D1Response> {
+        return updatePlayStatus(createDb(this.env.DB), id, playStatus);
     }
 }
 

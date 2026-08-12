@@ -1,7 +1,10 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
 import {GameKindSchema} from "@game-worker/shared/game";
+import {err, ok, type Result} from "neverthrow";
+import type {AccountRecord} from "@game-worker/shared/rpc-types";
 import {currentUser} from "./auth.middleware";
+import {createDb} from "./db/client";
 import {
     LeaderboardEntrySchema,
     LeaderboardPeriod,
@@ -13,6 +16,18 @@ import {
 import {friendScores, type LeaderboardQuery, myScore, topScores} from "./leaderboard.service";
 
 export const leaderboardRoutes = new OpenAPIHono<{ Bindings: Env }>();
+
+/** `scope=friends` is the only thing this route can actually reject — it
+ * needs a signed-in viewer to know whose friend group to restrict to, so
+ * `Err` here is the sole source of the route's 401. Never crosses a Workers
+ * RPC boundary (this Worker's own controller calls it directly), so a live
+ * `Result` is fine to hand back as-is — same reasoning as browse's
+ * `submitRating` (see catalog.service.ts). Passes `user` through unchanged
+ * on success so the caller doesn't need to re-derive it. */
+function requireViewerFor(scope: LeaderboardScope, user: AccountRecord | null): Result<AccountRecord | null, string> {
+    if (scope === LeaderboardScope.Friends && !user) return err("log in to see the friends leaderboard");
+    return ok(user);
+}
 
 leaderboardRoutes.openapi(
     createRoute({
@@ -63,19 +78,19 @@ leaderboardRoutes.openapi(
         const query: LeaderboardQuery = {kind: kind ?? null, period: period ?? LeaderboardPeriod.All};
         const user = await currentUser(c);
 
-        if (scope === LeaderboardScope.Friends && !user) {
-            return c.json({error: "log in to see the friends leaderboard"}, 401);
-        }
+        const viewer = requireViewerFor(scope ?? LeaderboardScope.Global, user);
+        if (viewer.isErr()) return c.json({error: viewer.error}, 401);
 
         const pageNum = page ?? 1;
+        const db = createDb(c.env.DB);
 
         // Independent reads — the current user's standing doesn't depend on
         // the entries list or vice versa — so fetch them concurrently.
         const [{entries, hasMore}, me] = await Promise.all([
             scope === LeaderboardScope.Friends && user
-                ? friendScores(c.env.DB, user.id, query, pageNum)
-                : topScores(c.env.DB, c.env.FLAGS, query, pageNum, user?.id ?? null),
-            user ? myScore(c.env.DB, user.id, query) : Promise.resolve(null),
+                ? friendScores(db, user.id, query, pageNum)
+                : topScores(db, c.env.FLAGS, query, pageNum, user?.id ?? null),
+            user ? myScore(db, user.id, query) : Promise.resolve(null),
         ]);
 
         return c.json({entries, me, page: pageNum, hasMore}, 200);

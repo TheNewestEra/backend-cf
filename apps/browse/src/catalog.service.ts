@@ -1,66 +1,51 @@
-import type {Database} from "@game-worker/shared/db";
 import {type GameKind, playUrlFor} from "@game-worker/shared/game";
+import type {D1Response} from "@cloudflare/workers-types";
+import {and, desc, eq, ne, sql} from "drizzle-orm";
+import {err, ok, type Result} from "neverthrow";
 import {type CatalogEntry, CatalogSort, CatalogStatus, PlayStatus} from "./catalog.schema";
-import {D1Result} from "@cloudflare/workers-types";
+import type {Db} from "./db/client";
+import {catalog, ratings} from "./db/schema";
 
-interface CatalogRow {
-    readonly id: string;
-    readonly kind: GameKind;
-    readonly theme: string | null;
-    readonly status: CatalogStatus;
-    readonly thumbnail_key: string | null;
-    readonly play_status: PlayStatus;
-    readonly rating_sum: number;
-    readonly rating_count: number;
-    readonly created_at: number;
-    readonly updated_at: number;
-}
-
-export const insertCatalogEntry = (
-    db: Database,
-    id: string,
-    kind: GameKind,
-    theme: string | null,
-): Promise<D1Result> =>
+export const insertCatalogEntry = (db: Db, id: string, kind: GameKind, theme: string | null): Promise<D1Response> =>
     db
-        .prepare(
-            `INSERT INTO catalog (id, kind, theme, status, thumbnail_key, play_status, rating_sum, rating_count,
-                                  created_at, updated_at)
-             VALUES (?, ?, ?, ?, NULL, ?, 0, 0, ?, ?)`,
-        )
-        .bind(id, kind, theme, CatalogStatus.Generating, PlayStatus.Joinable, Date.now(), Date.now())
+        .insert(catalog)
+        .values({
+            id,
+            kind,
+            theme,
+            status: CatalogStatus.Generating,
+            thumbnailKey: null,
+            playStatus: PlayStatus.Joinable,
+            ratingSum: 0,
+            ratingCount: 0,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+        })
         .run();
 
-export const updatePlayStatus = (db: Database, id: string, playStatus: PlayStatus): Promise<D1Result> =>
+export const updatePlayStatus = (db: Db, id: string, playStatus: PlayStatus): Promise<D1Response> =>
+    db.update(catalog).set({playStatus, updatedAt: Date.now()}).where(eq(catalog.id, id)).run();
+
+export const markCatalogGenerating = (db: Db, id: string): Promise<D1Response> =>
     db
-        .prepare("UPDATE catalog SET play_status = ?, updated_at = ? WHERE id = ?")
-        .bind(playStatus, Date.now(), id)
+        .update(catalog)
+        .set({status: CatalogStatus.Generating, updatedAt: Date.now()})
+        .where(eq(catalog.id, id))
         .run();
 
-export const markCatalogGenerating = (db: Database, id: string): Promise<D1Result> =>
+export const markCatalogReady = (db: Db, id: string, thumbnailKey: string): Promise<D1Response> =>
     db
-        .prepare("UPDATE catalog SET status = ?, updated_at = ? WHERE id = ?")
-        .bind(CatalogStatus.Generating, Date.now(), id)
+        .update(catalog)
+        .set({status: CatalogStatus.Ready, thumbnailKey, updatedAt: Date.now()})
+        .where(eq(catalog.id, id))
         .run();
 
-export const markCatalogReady = (db: Database, id: string, thumbnailKey: string): Promise<D1Result> =>
-    db
-        .prepare("UPDATE catalog SET status = ?, thumbnail_key = ?, updated_at = ? WHERE id = ?")
-        .bind(CatalogStatus.Ready, thumbnailKey, Date.now(), id)
-        .run();
+export const markCatalogError = (db: Db, id: string): Promise<D1Response> =>
+    db.update(catalog).set({status: CatalogStatus.Error, updatedAt: Date.now()}).where(eq(catalog.id, id)).run();
 
-export const markCatalogError = (db: Database, id: string): Promise<D1Result> =>
-    db
-        .prepare("UPDATE catalog SET status = ?, updated_at = ? WHERE id = ?")
-        .bind(CatalogStatus.Error, Date.now(), id)
-        .run();
-
-export const getThumbnailKey = async (db: Database, id: string): Promise<string | null> => {
-    const row = await db
-        .prepare("SELECT thumbnail_key FROM catalog WHERE id = ?")
-        .bind(id)
-        .first<{ thumbnail_key: string | null }>();
-    return row?.thumbnail_key ?? null;
+export const getThumbnailKey = async (db: Db, id: string): Promise<string | null> => {
+    const row = await db.select({thumbnailKey: catalog.thumbnailKey}).from(catalog).where(eq(catalog.id, id)).get();
+    return row?.thumbnailKey ?? null;
 };
 
 export interface ListCatalogOptions {
@@ -71,83 +56,75 @@ export interface ListCatalogOptions {
     offset: number;
 }
 
-const buildListQuery = (opts: ListCatalogOptions) => {
-    const clauses = [
-        opts.playStatus
-            ? {sql: "status != ?", bind: CatalogStatus.Error}
-            : {sql: "status = ?", bind: CatalogStatus.Ready},
-        opts.playStatus ? {sql: "play_status = ?", bind: opts.playStatus} : null,
-        opts.kind ? {sql: "kind = ?", bind: opts.kind} : null,
-    ].filter((clause): clause is { sql: string; bind: GameKind } => clause !== null);
+/** Rating-ratio expression for `CatalogSort.Rating`'s ORDER BY — entries
+ * with no ratings yet (`rating_count = 0`) sort as `-1`, i.e. last, exactly
+ * matching the raw-SQL `CASE` this replaced. */
+const ratingRatio = sql`CASE WHEN ${catalog.ratingCount} > 0 THEN ${catalog.ratingSum} * 1.0 / ${catalog.ratingCount} ELSE -1 END`;
 
-    const whereClause = clauses.length > 0 ? `WHERE ${clauses.map((c) => c.sql).join(" AND ")}` : "";
+export const listCatalog = async (db: Db, opts: ListCatalogOptions, origin: string): Promise<CatalogEntry[]> => {
+    const conditions = [
+        opts.playStatus ? ne(catalog.status, CatalogStatus.Error) : eq(catalog.status, CatalogStatus.Ready),
+        opts.playStatus ? eq(catalog.playStatus, opts.playStatus) : undefined,
+        opts.kind ? eq(catalog.kind, opts.kind) : undefined,
+    ].filter((condition) => condition !== undefined);
 
-    const orderClause =
-        opts.sort === CatalogSort.Rating
-            ? "ORDER BY (CASE WHEN rating_count > 0 THEN rating_sum * 1.0 / rating_count ELSE -1 END) DESC, created_at DESC"
-            : "ORDER BY created_at DESC";
+    const orderBy = opts.sort === CatalogSort.Rating ? [desc(ratingRatio), desc(catalog.createdAt)] : [desc(catalog.createdAt)];
 
-    return {
-        query: `SELECT *
-                FROM catalog ${whereClause} ${orderClause} LIMIT ?
-                OFFSET ?`,
-        binds: [...clauses.map((c) => c.bind), opts.limit, opts.offset],
-    };
+    const rows = await db
+        .select()
+        .from(catalog)
+        .where(and(...conditions))
+        .orderBy(...orderBy)
+        .limit(opts.limit)
+        .offset(opts.offset);
+
+    return rows.map((row) => toPublic(row, origin));
 };
 
-export const listCatalog = async (
-    db: Database,
-    opts: ListCatalogOptions,
-    origin: string
-): Promise<CatalogEntry[]> => {
-    const {query, binds} = buildListQuery(opts);
-    return db
-        .prepare(query)
-        .bind(...binds)
-        .all<CatalogRow>()
-        .then(({results}) => results.map(row => toPublic(row, origin)));
-};
+export type RatingResult = {average: number; count: number};
 
-export type RatingResult = { average: number; count: number } | null;
-
-export const submitRating = async (
-    db: Database,
-    catalogId: string,
-    stars: number,
-    rater: string | null,
-): Promise<RatingResult> => {
+/** `Err("not found")` when `catalogId` doesn't name an existing catalog
+ * entry — never crosses a Workers RPC boundary (called directly from
+ * catalog.controller.ts within this same Worker), so a live `Result` is
+ * fine to hand back as-is; no `toRpcResult()`/`RpcResult` involved. */
+export const submitRating = async (db: Db, catalogId: string, stars: number, rater: string | null): Promise<Result<RatingResult, string>> => {
     const existing = await db
-        .prepare("SELECT rating_sum, rating_count FROM catalog WHERE id = ?")
-        .bind(catalogId)
-        .first<{ rating_sum: number; rating_count: number }>();
-    if (!existing) return null;
+        .select({ratingSum: catalog.ratingSum, ratingCount: catalog.ratingCount})
+        .from(catalog)
+        .where(eq(catalog.id, catalogId))
+        .get();
+    if (!existing) return err("not found");
 
     const now = Date.now();
+    // Atomic via D1/Drizzle's `.batch()` — same guarantee the original
+    // `db.batch([...])` call gave: the new rating row and the running
+    // sum/count on `catalog` either both land or neither does.
     await db.batch([
+        db.insert(ratings).values({catalogId, rater, stars, createdAt: now}),
         db
-            .prepare("INSERT INTO ratings (catalog_id, rater, stars, created_at) VALUES (?, ?, ?, ?)")
-            .bind(catalogId, rater, stars, now),
-        db
-            .prepare(
-                "UPDATE catalog SET rating_sum = rating_sum + ?, rating_count = rating_count + 1, updated_at = ? WHERE id = ?",
-            )
-            .bind(stars, now, catalogId),
+            .update(catalog)
+            .set({
+                ratingSum: sql`${catalog.ratingSum} + ${stars}`,
+                ratingCount: sql`${catalog.ratingCount} + 1`,
+                updatedAt: now,
+            })
+            .where(eq(catalog.id, catalogId)),
     ]);
 
-    return {
-        average: (existing.rating_sum + stars) / (existing.rating_count + 1),
-        count: existing.rating_count + 1,
-    };
+    return ok({
+        average: (existing.ratingSum + stars) / (existing.ratingCount + 1),
+        count: existing.ratingCount + 1,
+    });
 };
 
-const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
+const toPublic = (row: typeof catalog.$inferSelect, origin: string): CatalogEntry => ({
     id: row.id,
     kind: row.kind,
     theme: row.theme,
-    thumbnailUrl: row.thumbnail_key ? new URL(`/api/catalog/${row.id}/thumbnail`, origin) : null,
+    thumbnailUrl: row.thumbnailKey ? new URL(`/api/catalog/${row.id}/thumbnail`, origin) : null,
     playUrl: playUrlFor(row.kind, row.id),
-    playStatus: row.play_status,
-    averageRating: row.rating_count > 0 ? row.rating_sum / row.rating_count : null,
-    ratingCount: row.rating_count,
-    createdAt: row.created_at,
+    playStatus: row.playStatus,
+    averageRating: row.ratingCount > 0 ? row.ratingSum / row.ratingCount : null,
+    ratingCount: row.ratingCount,
+    createdAt: row.createdAt,
 });

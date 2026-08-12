@@ -1,3 +1,5 @@
+import {err, ok, type Result} from "neverthrow";
+
 const DEFAULT_PROMPT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 const DEFAULT_IMAGE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0" as const;
 const DEFAULT_IMAGE_STEPS = 8;
@@ -18,13 +20,22 @@ async function pickPresetTheme(flags: Flagship): Promise<string | null> {
  * Asks a text model for exactly `roundCount` short image-generation prompts
  * around a theme (or a theme of its own choosing). These prompts double as
  * the hidden "answers" players guess once they see the generated image.
- */
+ * `ai.run()` itself is left to throw on genuine infra failure (network,
+ * binding misconfiguration) — only the two *expected* validation failures
+ * (malformed/wrong-count model output) resolve to an `Err` rather than
+ * throwing, since those are ordinary, anticipated outcomes of asking a
+ * model for structured output, not something exceptional. Both queue
+ * consumers that call this (guess.queue.ts/puzzle.queue.ts) already run
+ * inside a `try/catch` that drives the message's retry, so either failure
+ * mode ends up handled the same way there — see `webSocketMessage()`'s
+ * analogous split in puzzle.model.ts for the same reasoning applied to a
+ * request instead of a queue message. */
 export async function generateRoundPrompts(
     ai: Ai,
     flags: Flagship,
     theme: string | null,
     roundCount: number,
-): Promise<string[]> {
+): Promise<Result<string[], string>> {
     const resolvedTheme = theme ?? await pickPresetTheme(flags);
     const themeInstruction = resolvedTheme
         ? `The theme is: "${resolvedTheme}".`
@@ -64,11 +75,11 @@ export async function generateRoundPrompts(
         },
     });
 
-    const prompts = extractPrompts(result);
-    if (prompts.length !== roundCount) {
-        throw new Error(`expected ${roundCount} prompts, model returned ${prompts.length}`);
-    }
-    return prompts;
+    return extractPrompts(result).andThen((prompts) =>
+        prompts.length === roundCount
+            ? ok(prompts)
+            : err(`expected ${roundCount} prompts, model returned ${prompts.length}`),
+    );
 }
 
 // Text-generation output is a loose union across model variants — usually
@@ -83,14 +94,14 @@ function extractText(result: unknown): string | undefined {
     return typeof response === "string" ? response : undefined;
 }
 
-function extractPrompts(result: unknown): string[] {
+function extractPrompts(result: unknown): Result<string[], string> {
     const response = unwrapResponse(result);
     const parsed = typeof response === "string" ? JSON.parse(response) : response;
     const prompts = (parsed as { prompts?: unknown } | undefined)?.prompts;
     if (!Array.isArray(prompts) || !prompts.every((p) => typeof p === "string")) {
-        throw new Error("model did not return a `prompts` string array");
+        return err("model did not return a `prompts` string array");
     }
-    return prompts.map((p) => p.trim()).filter(Boolean);
+    return ok(prompts.map((p) => p.trim()).filter(Boolean));
 }
 
 /**
@@ -99,7 +110,7 @@ function extractPrompts(result: unknown): string[] {
  * toward a Flagship-configured preset theme when one's available, otherwise
  * leaves the theme entirely up to the model, same as before.
  */
-export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<string> {
+export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<Result<string, string>> {
     const theme = await pickPresetTheme(flags);
     const themeInstruction = theme ? ` The theme is: "${theme}".` : "";
     const model = await promptModel(flags);
@@ -120,8 +131,7 @@ export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<stri
     });
 
     const text = extractText(result)?.trim();
-    if (!text) throw new Error("model returned no prompt");
-    return text;
+    return text ? ok(text) : err("model returned no prompt");
 }
 
 export async function generateImage(

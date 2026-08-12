@@ -1,0 +1,68 @@
+name: Drizzle schema check
+
+# Each of accounts/browse/friends/leaderboard owns a subset of tables in the
+# one shared D1 database, authored via Drizzle: schema.ts is the source of
+# truth, and `drizzle-kit generate` diffs it against an app-local ./drizzle
+# folder to produce SQL. That folder is deliberately NOT the shared
+# repo-root migrations/ folder that `wrangler d1 migrations apply` actually
+# runs (see deploy.yml's `provision` job) — the real workflow copies
+# drizzle-kit's output over by hand into a new next-numbered file there.
+# Full explanation: apps/friends/src/db/README.md.
+#
+# That hand-copy step means nothing enforces schema.ts and each app's own
+# ./drizzle snapshot staying in sync day to day. This workflow is that
+# enforcement: for every app that owns D1 tables, it re-runs
+# `drizzle-kit generate` fresh against the committed schema.ts and fails if
+# that produces ANY working-tree change under that app's ./drizzle folder —
+# catching both "edited schema.ts, forgot to run generate" (stale/missing
+# diff) and "ran generate, forgot to git add" (uncommitted output).
+#
+# Pure local drizzle-kit + git diff — no Cloudflare secrets, no D1 access —
+# so unlike deploy.yml's jobs this is safe to run on every pull_request,
+# including ones opened from forks.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  drizzle-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The apps that own D1 tables via Drizzle — mirrors
+        # .github/services.json's d1_services. Kept as a literal here
+        # (rather than a job that reads that file, the way deploy.yml's
+        # `resolve` job does for its own matrix) since this list changes
+        # rarely and doing so keeps this whole check to one job with no
+        # cross-job wiring; update both places together if a service starts
+        # or stops owning D1 tables.
+        service: [accounts, browse, friends, leaderboard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      - name: Regenerate ./drizzle from schema.ts
+        working-directory: apps/${{ matrix.service }}
+        run: npx drizzle-kit generate
+
+      # `git add -N` (intent-to-add) registers any wholly new file
+      # drizzle-kit just emitted as tracked-but-empty, so a brand-new
+      # migration/snapshot file shows up in `git diff` as an addition
+      # instead of being silently invisible to it as an untracked file.
+      - name: Fail if that produced any uncommitted change under ./drizzle
+        working-directory: apps/${{ matrix.service }}
+        run: |
+          git add -N -- drizzle
+          if ! git diff --exit-code -- drizzle; then
+            echo "::error::apps/${{ matrix.service }}/drizzle doesn't match what 'drizzle-kit generate' produces from the current schema.ts. Run 'npx drizzle-kit generate' in apps/${{ matrix.service }} and commit the result (see apps/friends/src/db/README.md)." >&2
+            exit 1
+          fi

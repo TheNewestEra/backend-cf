@@ -11,6 +11,7 @@ import {
     getUserBySession,
     type UserRecord
 } from "./account.service";
+import {createDb} from "./db/client";
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -37,23 +38,23 @@ app.get("/docs", swaggerUI({url: "/openapi.json"}));
  * service's `auth.middleware.ts`. */
 export class AccountsService extends WorkerEntrypoint<Env> {
     getUserBySession(token: string): Promise<UserRecord | null> {
-        return getUserBySession(this.env.DB, token);
+        return getUserBySession(createDb(this.env.DB), token);
     }
 
     createSession(userId: string): Promise<string> {
-        return createSession(this.env.DB, userId);
+        return createSession(createDb(this.env.DB), userId);
     }
 
     deleteSession(token: string): Promise<void> {
-        return deleteSession(this.env.DB, token);
+        return deleteSession(createDb(this.env.DB), token);
     }
 
     findUserByUsername(username: string): Promise<UserRecord | null> {
-        return findUserByUsername(this.env.DB, username);
+        return findUserByUsername(createDb(this.env.DB), username);
     }
 
     getUserById(id: string): Promise<UserRecord | null> {
-        return getUserById(this.env.DB, id);
+        return getUserById(createDb(this.env.DB), id);
     }
 }
 
