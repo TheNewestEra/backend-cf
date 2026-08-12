@@ -124,7 +124,11 @@ export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<stri
     return text;
 }
 
-const generateImage = async (ai: Ai, flags: Flagship, prompt: string,): Promise<ReadableStream<Uint8Array>> => {
+export async function generateImage(
+    ai: Ai,
+    flags: Flagship,
+    prompt: string,
+): Promise<ReadableStream<Uint8Array>> {
     const [model, steps] = await Promise.all([imageModel(flags), imageSteps(flags)]);
     return ai.run(model as typeof DEFAULT_IMAGE_MODEL, {prompt, num_steps: steps});
-};
+}
