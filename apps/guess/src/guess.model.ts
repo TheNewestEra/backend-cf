@@ -812,6 +812,7 @@ export class GameDO extends DurableObject<Env> {
         const nextIndex = index + 1;
         if (nextIndex < row.round_count) {
             await this.activateRound(nextIndex);
+            this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
             return;
         }
 
