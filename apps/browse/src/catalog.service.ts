@@ -1,12 +1,26 @@
 import {type GameKind, playUrlFor} from "@game-worker/shared/game";
+import type {FriendsRpc} from "@game-worker/shared/rpc-types";
 import type {D1Response} from "@cloudflare/workers-types";
-import {and, desc, eq, ne, sql} from "drizzle-orm";
+import {and, desc, eq, inArray, ne, sql} from "drizzle-orm";
 import {err, ok, type Result} from "neverthrow";
 import {type CatalogEntry, CatalogSort, CatalogStatus, PlayStatus} from "./catalog.schema";
 import type {Db} from "./db/client";
 import {catalog, ratings} from "./db/schema";
 
-export const insertCatalogEntry = (db: Db, id: string, kind: GameKind, theme: string | null): Promise<D1Response> =>
+/** `creator` is null for an anonymous host — `createdBy` is left null too,
+ * so such entries never match the "created by friends" filter (there's no
+ * account to be someone's friend). `creator.name`/`.color` are still
+ * recorded either way, as a point-in-time snapshot (same pattern `theme`
+ * already uses) rather than a live join back to `users` at read time — an
+ * anonymous host has no persisted `users` row to join against, so the
+ * snapshot is what makes their chosen name/color displayable at all. */
+export const insertCatalogEntry = (
+    db: Db,
+    id: string,
+    kind: GameKind,
+    theme: string | null,
+    creator: {id: string | null; name: string; color: string},
+): Promise<D1Response> =>
     db
         .insert(catalog)
         .values({
@@ -18,6 +32,9 @@ export const insertCatalogEntry = (db: Db, id: string, kind: GameKind, theme: st
             playStatus: PlayStatus.Joinable,
             ratingSum: 0,
             ratingCount: 0,
+            createdBy: creator.id,
+            creatorName: creator.name,
+            creatorColor: creator.color,
             createdAt: Date.now(),
             updatedAt: Date.now(),
         })
@@ -52,6 +69,10 @@ export interface ListCatalogOptions {
     kind: GameKind | null;
     sort: CatalogSort;
     playStatus: PlayStatus | null;
+    /** Restricts the list to entries `created_by` a friend of this viewer
+     * (never the viewer's own entries — same "friends, not me" semantics as
+     * apps/leaderboard's `friendScores`). Null for the unrestricted list. */
+    createdByFriendsOf: string | null;
     limit: number;
     offset: number;
 }
@@ -61,11 +82,18 @@ export interface ListCatalogOptions {
  * matching the raw-SQL `CASE` this replaced. */
 const ratingRatio = sql`CASE WHEN ${catalog.ratingCount} > 0 THEN ${catalog.ratingSum} * 1.0 / ${catalog.ratingCount} ELSE -1 END`;
 
-export const listCatalog = async (db: Db, opts: ListCatalogOptions, origin: string): Promise<CatalogEntry[]> => {
+export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalogOptions, origin: string): Promise<CatalogEntry[]> => {
+    const friendIdsList = opts.createdByFriendsOf ? await friends.getFriendIds(opts.createdByFriendsOf) : null;
+    // A viewer with no friends yet can't have any "created by friends"
+    // matches — skip the query entirely rather than handing `inArray` an
+    // empty list.
+    if (friendIdsList && friendIdsList.length === 0) return [];
+
     const conditions = [
         opts.playStatus ? ne(catalog.status, CatalogStatus.Error) : eq(catalog.status, CatalogStatus.Ready),
         opts.playStatus ? eq(catalog.playStatus, opts.playStatus) : undefined,
         opts.kind ? eq(catalog.kind, opts.kind) : undefined,
+        friendIdsList ? inArray(catalog.createdBy, friendIdsList) : undefined,
     ].filter((condition) => condition !== undefined);
 
     const orderBy = opts.sort === CatalogSort.Rating ? [desc(ratingRatio), desc(catalog.createdAt)] : [desc(catalog.createdAt)];
@@ -127,4 +155,10 @@ const toPublic = (row: typeof catalog.$inferSelect, origin: string): CatalogEntr
     averageRating: row.ratingCount > 0 ? row.ratingSum / row.ratingCount : null,
     ratingCount: row.ratingCount,
     createdAt: row.createdAt,
+    // `creatorName` is null only for entries that predate this column
+    // (never for a freshly-inserted row — `insertCatalogEntry` always
+    // writes it, even for an anonymous host) — see this file's header
+    // comment on `insertCatalogEntry` for why it's a snapshot rather than a
+    // live join.
+    creator: row.creatorName ? {userId: row.createdBy, name: row.creatorName, color: row.creatorColor ?? "#888888"} : null,
 });

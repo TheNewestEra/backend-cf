@@ -9,6 +9,7 @@ import {
     findUserByUsername,
     getUserById,
     getUserBySession,
+    getUsersByIds,
     type UserRecord
 } from "./account.service";
 import {createDb} from "./db/client";
@@ -55,6 +56,10 @@ export class AccountsService extends WorkerEntrypoint<Env> {
 
     getUserById(id: string): Promise<UserRecord | null> {
         return getUserById(createDb(this.env.DB), id);
+    }
+
+    getUsersByIds(ids: string[]): Promise<UserRecord[]> {
+        return getUsersByIds(createDb(this.env.DB), ids);
     }
 }
 

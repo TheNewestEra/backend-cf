@@ -86,7 +86,7 @@ friendsRoutes.openapi(
         // concurrently the way `Promise.all()` would, but (unlike
         // `Promise.all()`) folds either side's D1 failure into one `Result`
         // instead of leaving it to reject unhandled.
-        const combined = await ResultAsync.combine([getFriendsPageData(db, user.id), listPendingInvites(db, user.id)]);
+        const combined = await ResultAsync.combine([getFriendsPageData(db, c.env.ACCOUNTS, user.id), listPendingInvites(db, c.env.ACCOUNTS, user.id)]);
         if (combined.isErr()) return c.json({error: combined.error}, 500);
 
         const [pageData, invites] = combined.value;
@@ -120,7 +120,7 @@ friendsRoutes.openapi(
         const {username} = c.req.valid("json");
         if (!username.trim()) return c.json({error: "username is required"}, 400);
 
-        const result = await sendFriendRequest(createDb(c.env.DB), user.id, username.trim());
+        const result = await sendFriendRequest(createDb(c.env.DB), c.env.ACCOUNTS, user.id, username.trim());
         if (result.isErr()) return c.json({error: result.error}, 400);
 
         if (result.value.kind === "requested") {
@@ -370,7 +370,7 @@ friendsRoutes.openapi(
         // already gets `[]` above rather than a 401) — a D1 hiccup degrades
         // the same way, via `.unwrapOr([])`, rather than introducing the
         // one error case this endpoint's contract doesn't have.
-        const invites = await listPendingInvites(createDb(c.env.DB), user.id).unwrapOr([]);
+        const invites = await listPendingInvites(createDb(c.env.DB), c.env.ACCOUNTS, user.id).unwrapOr([]);
         return c.json({invites}, 200);
     },
 );

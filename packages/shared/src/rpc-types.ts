@@ -29,6 +29,12 @@ export interface AccountsRpc {
     deleteSession(token: string): Promise<void>;
     findUserByUsername(username: string): Promise<AccountRecord | null>;
     getUserById(id: string): Promise<AccountRecord | null>;
+    /** Batch counterpart to `getUserById` — one round trip for a whole set
+     * of ids that each need a display name/color (a leaderboard page, a
+     * friends list), instead of N. Rows for an id that doesn't resolve are
+     * simply omitted, not padded with null, and the result order doesn't
+     * necessarily match `ids`. */
+    getUsersByIds(ids: string[]): Promise<AccountRecord[]>;
 }
 
 /** Subset of AccountsRpc needed to resolve/create/destroy a session — used
@@ -38,7 +44,17 @@ export type AccountsSessionRpc = Pick<AccountsRpc, "getUserBySession" | "createS
 
 /** RPC surface exposed by `apps/browse`'s `CatalogService`. */
 export interface CatalogRpc {
-    insertCatalogEntry(id: string, kind: GameKind, theme: string | null): Promise<void>;
+    /** `creator` is null for an anonymous host (no account to attribute the
+     * entry to); `name`/`color` are the host's resolved display name/color
+     * at creation time (an account's, or an anonymous host's chosen/
+     * generated one) — see catalog.service.ts's `insertCatalogEntry` for
+     * why these are stored as a snapshot rather than joined live. */
+    insertCatalogEntry(
+        id: string,
+        kind: GameKind,
+        theme: string | null,
+        creator: {id: string | null; name: string; color: string},
+    ): Promise<void>;
     markCatalogGenerating(id: string): Promise<void>;
     markCatalogReady(id: string, thumbnailKey: string): Promise<void>;
     markCatalogError(id: string): Promise<void>;
@@ -51,6 +67,12 @@ export interface CatalogRpc {
 /** RPC surface exposed by `apps/leaderboard`'s `LeaderboardService`. */
 export interface LeaderboardRpc {
     recordScore(input: { userId: string; kind: GameKind; sessionId: string; score: number }): Promise<void>;
+}
+
+/** RPC surface exposed by `apps/friends`' `FriendsService`. */
+export interface FriendsRpc {
+    /** IDs of `userId`'s friends (not including `userId` itself). */
+    getFriendIds(userId: string): Promise<string[]>;
 }
 
 /** RPC surface exposed by `apps/puzzle`'s `PuzzleService`. */

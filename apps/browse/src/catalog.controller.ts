@@ -2,7 +2,10 @@ import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
 import {GameKindSchema} from "@game-worker/shared/game";
 import {immutableImageResponse} from "@game-worker/shared/images";
-import {CatalogEntrySchema, CatalogSort, CatalogSortSchema, PlayStatusSchema,} from "./catalog.schema";
+import {err, ok, type Result} from "neverthrow";
+import type {AccountRecord} from "@game-worker/shared/rpc-types";
+import {currentUser} from "./auth.middleware";
+import {CatalogEntrySchema, CatalogScope, CatalogScopeSchema, CatalogSort, CatalogSortSchema, PlayStatusSchema,} from "./catalog.schema";
 import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
 import {createDb} from "./db/client";
 
@@ -11,6 +14,15 @@ const MAX_LIMIT = 60;
 const MAX_RATER_LENGTH = 40;
 
 export const browseRoutes = new OpenAPIHono<{ Bindings: Env }>();
+
+/** `scope=friends` is the only thing GET /api/catalog can actually reject
+ * — it needs a signed-in viewer to know whose friend group to restrict to,
+ * so `Err` here is the sole source of the route's 401. Same pattern as
+ * apps/leaderboard's `requireViewerFor`. */
+function requireViewerFor(scope: CatalogScope, user: AccountRecord | null): Result<AccountRecord | null, string> {
+    if (scope === CatalogScope.Friends && !user) return err("log in to see games created by friends");
+    return ok(user);
+}
 
 browseRoutes.openapi(
     createRoute({
@@ -22,7 +34,8 @@ browseRoutes.openapi(
             "Without `playStatus`, this is the plain browse gallery: only entries with a generated thumbnail " +
             "(unchanged from before `playStatus` existed). Pass `playStatus=joinable` for open lobbies/still-" +
             "generating games you can join as a player, or `playStatus=active` for started games/puzzles you " +
-            "can only spectate — both also include entries with no thumbnail yet.",
+            "can only spectate — both also include entries with no thumbnail yet. `scope=friends` restricts " +
+            "the list to entries created by a friend of the signed-in viewer and requires being logged in.",
         request: {
             query: z.object({
                 kind: GameKindSchema.optional().openapi({description: "Filter to one game type"}),
@@ -30,6 +43,7 @@ browseRoutes.openapi(
                 playStatus: PlayStatusSchema.optional().openapi({
                     description: "Filter to what's joinable, in progress, or finished right now",
                 }),
+                scope: CatalogScopeSchema.optional().openapi({description: `Defaults to ${CatalogScope.All}`}),
                 limit: z.coerce.number().optional().openapi({description: `1-${MAX_LIMIT}, defaults to ${DEFAULT_LIMIT}`}),
                 offset: z.coerce.number().optional(),
             }),
@@ -39,18 +53,29 @@ browseRoutes.openapi(
                 description: "Catalog page",
                 content: {"application/json": {schema: z.object({entries: z.array(CatalogEntrySchema)})}},
             },
+            401: {
+                description: "scope=friends requires being logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
-        const {kind, sort, playStatus, limit, offset} = c.req.valid("query");
+        const {kind, sort, playStatus, scope, limit, offset} = c.req.valid("query");
+
+        const user = await currentUser(c);
+        const viewer = requireViewerFor(scope ?? CatalogScope.All, user);
+        if (viewer.isErr()) return c.json({error: viewer.error}, 401);
+
         const origin = new URL(c.req.url).origin;
 
         const entries = await listCatalog(
             createDb(c.env.DB),
+            c.env.FRIENDS,
             {
                 kind: kind ?? null,
                 sort: sort ?? CatalogSort.Recent,
                 playStatus: playStatus ?? null,
+                createdByFriendsOf: scope === CatalogScope.Friends && viewer.value ? viewer.value.id : null,
                 limit: clamp(limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT),
                 offset: Math.max(0, offset ?? 0),
             },

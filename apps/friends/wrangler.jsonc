@@ -19,9 +19,9 @@
     }
   ],
   // Owns `friend_requests`, `friendships`, `friend_groups`,
-  // `friend_group_members`, `game_invites`. Also reads (never writes)
-  // `users` directly for display-name joins, same pragmatic pattern as
-  // `leaderboard` — see friends.service.ts.
+  // `friend_group_members`, `game_invites`. Display names/colors come from
+  // the ACCOUNTS RPC binding below (`getUsersByIds`/`findUserByUsername`),
+  // never a direct read against `users` — see friends.service.ts.
   // Unnamed/top-level config == "dev" (deployed as `game-friends-worker`,
   // no --env flag needed).
   "d1_databases": [

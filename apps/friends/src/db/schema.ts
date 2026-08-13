@@ -12,9 +12,11 @@
 // never gets handed to `wrangler d1 migrations apply` and asked to recreate
 // tables that are already live.
 //
-// `users` (read by every query below for display-name joins) is
-// deliberately NOT here — it's owned and migrated by apps/accounts. See
-// ./users-ref.ts.
+// `users` is deliberately NOT here, and this directory has no read-only ref
+// file for it at all — it's owned and migrated by apps/accounts, and
+// display-name/color lookups go through its `AccountsRpc.getUsersByIds`/
+// `findUserByUsername` instead of a direct table read — see
+// friends.service.ts.
 
 import {index, integer, primaryKey, sqliteTable, text, unique} from "drizzle-orm/sqlite-core";
 

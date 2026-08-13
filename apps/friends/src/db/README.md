@@ -2,10 +2,10 @@
 
 `schema.ts` is the source of truth for the five tables this app owns
 (`friend_requests`, `friendships`, `friend_groups`, `friend_group_members`,
-`game_invites`). `users-ref.ts` is a deliberately-partial, read-only mirror
-of `users` (owned by `apps/accounts`) — never included in drizzle-kit's
-schema path, so drizzle-kit never tries to migrate a table this app doesn't
-own.
+`game_invites`). There's no read-only ref file for `users` (owned by
+`apps/accounts`) at all: display-name/color lookups go through its
+`AccountsRpc` service binding (`getUsersByIds`/`findUserByUsername`)
+instead of a direct table read — see friends.service.ts.
 
 ## Why generated migrations don't land in the shared `migrations/` folder
 

@@ -43,6 +43,22 @@
       "bucket_name": "game-guess-images"
     }
   ],
+  // Session lookups for the "created by friends" filter — same
+  // ACCOUNTS-RPC pattern as apps/leaderboard's wrangler.jsonc (see its
+  // comment on this binding). FRIENDS resolves the viewer's friend list for
+  // that same filter, via apps/friends' FriendsService.
+  "services": [
+    {
+      "binding": "ACCOUNTS",
+      "service": "game-accounts-worker",
+      "entrypoint": "AccountsService"
+    },
+    {
+      "binding": "FRIENDS",
+      "service": "game-friends-worker",
+      "entrypoint": "FriendsService"
+    }
+  ],
   // See apps/accounts/wrangler.jsonc for why binding arrays are fully
   // re-declared per named environment rather than inherited.
   "env": {
@@ -66,6 +82,18 @@
         {
           "binding": "IMAGES",
           "bucket_name": "game-guess-images-staging"
+        }
+      ],
+      "services": [
+        {
+          "binding": "ACCOUNTS",
+          "service": "game-accounts-worker-staging",
+          "entrypoint": "AccountsService"
+        },
+        {
+          "binding": "FRIENDS",
+          "service": "game-friends-worker-staging",
+          "entrypoint": "FriendsService"
         }
       ]
     },
@@ -109,6 +137,18 @@
         {
           "binding": "IMAGES",
           "bucket_name": "game-guess-images-prod"
+        }
+      ],
+      "services": [
+        {
+          "binding": "ACCOUNTS",
+          "service": "game-accounts-worker-prod",
+          "entrypoint": "AccountsService"
+        },
+        {
+          "binding": "FRIENDS",
+          "service": "game-friends-worker-prod",
+          "entrypoint": "FriendsService"
         }
       ]
     }

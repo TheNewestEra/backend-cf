@@ -88,9 +88,9 @@ leaderboardRoutes.openapi(
         // the entries list or vice versa — so fetch them concurrently.
         const [{entries, hasMore}, me] = await Promise.all([
             scope === LeaderboardScope.Friends && user
-                ? friendScores(db, user.id, query, pageNum)
-                : topScores(db, c.env.FLAGS, query, pageNum, user?.id ?? null),
-            user ? myScore(db, user.id, query) : Promise.resolve(null),
+                ? friendScores(db, c.env.FRIENDS, c.env.ACCOUNTS, user.id, query, pageNum)
+                : topScores(db, c.env.FLAGS, c.env.ACCOUNTS, c.env.FRIENDS, query, pageNum, user?.id ?? null),
+            user ? myScore(db, c.env.ACCOUNTS, user.id, query) : Promise.resolve(null),
         ]);
 
         return c.json({entries, me, page: pageNum, hasMore}, 200);

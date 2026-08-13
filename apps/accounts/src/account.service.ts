@@ -17,7 +17,7 @@
 // exposed to real accounts worth protecting.
 
 import {err, ok, type Result} from "neverthrow";
-import {and, eq, gt} from "drizzle-orm";
+import {and, eq, gt, inArray} from "drizzle-orm";
 import {generateColor} from "@game-worker/shared/color";
 import type {UserSchema} from "./account.schema";
 import type {z} from "@hono/zod-openapi";
@@ -44,6 +44,16 @@ export async function findUserByUsername(db: Db, username: string): Promise<User
         .where(eq(users.usernameLower, username.trim().toLowerCase()))
         .get();
     return row ?? null;
+}
+
+/** Batch counterpart to `getUserById` — every other service that used to
+ * read `users` directly for display-name/color joins (`leaderboard`,
+ * `friends`) now goes through this instead, one round trip per request
+ * rather than N. An empty `ids` short-circuits rather than handing
+ * `inArray` an empty list. */
+export async function getUsersByIds(db: Db, ids: string[]): Promise<UserRecord[]> {
+    if (ids.length === 0) return [];
+    return db.select({id: users.id, username: users.username, color: users.color}).from(users).where(inArray(users.id, ids));
 }
 
 // --- account creation / login -----------------------------------------

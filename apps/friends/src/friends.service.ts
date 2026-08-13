@@ -1,10 +1,10 @@
 import type {z} from "@hono/zod-openapi";
-import {and, asc, desc, eq} from "drizzle-orm";
+import type {AccountRecord, AccountsRpc} from "@game-worker/shared/rpc-types";
+import {and, asc, desc, eq, inArray} from "drizzle-orm";
 import {err, ok, ResultAsync} from "neverthrow";
 import type {Db} from "./db/client";
 import {query, requireFound} from "./db/result";
 import {friendGroupMembers, friendGroups, friendRequests, friendships} from "./db/schema";
-import {users} from "./db/users-ref";
 import type {FriendRequestSummarySchema, FriendSummarySchema, GroupSummarySchema} from "./friends.schema";
 
 export type FriendSummary = z.infer<typeof FriendSummarySchema>;
@@ -18,21 +18,6 @@ export interface FriendsPageData {
     groups: GroupSummary[];
 }
 
-
-const findUserByUsername = (db: Db, username: string): ResultAsync<{
-    id: string;
-    username: string;
-    color: string
-}, string> =>
-    query(
-        db
-            .select({id: users.id, username: users.username, color: users.color})
-            .from(users)
-            .where(eq(users.usernameLower, username.trim().toLowerCase()))
-            .get(),
-    )
-        .andThen((rows) => requireFound(rows, "No user with that username."));
-
 // --- friend requests -------------------------------------------------------
 
 export type SendFriendRequestResult =
@@ -41,10 +26,12 @@ export type SendFriendRequestResult =
 
 export const sendFriendRequest = (
     db: Db,
+    accounts: AccountsRpc,
     requesterId: string,
     recipientUsername: string,
 ): ResultAsync<SendFriendRequestResult, string> =>
-    findUserByUsername(db, recipientUsername)
+    query(accounts.findUserByUsername(recipientUsername))
+        .andThen((user) => requireFound(user, "No user with that username."))
         .andThen((req) => (req.id !== requesterId ? ok(req) : err("forbidden")))
         .andThen((recipient) =>
             query(
@@ -272,72 +259,111 @@ export const groupMemberIds = (db: Db, ownerId: string, groupId: string): Promis
         .map((rows) => rows.map((r) => r.friendId))
         .unwrapOr([]);
 
-const listGroups = (db: Db, ownerId: string): ResultAsync<GroupSummary[], string> =>
+/** One `getUsersByIds` round trip for every member across every group,
+ * rather than one `users` JOIN per group (the direct-table-read version of
+ * this function issued a separate query per group; this keeps that same
+ * one-query-per-group shape for `friendGroupMembers` itself, but resolves
+ * every member's display name/color in a single batched RPC call instead
+ * of N). */
+const listGroups = (db: Db, accounts: AccountsRpc, ownerId: string): ResultAsync<GroupSummary[], string> =>
     query(
         db.select({id: friendGroups.id, name: friendGroups.name})
             .from(friendGroups).where(eq(friendGroups.ownerId, ownerId))
             .orderBy(asc(friendGroups.name)),
-    ).andThen((groups) =>
-        ResultAsync.combine(
-            groups.map((group) =>
-                query(
-                    db
-                        .select({id: users.id, username: users.username, color: users.color})
-                        .from(friendGroupMembers)
-                        .innerJoin(users, eq(users.id, friendGroupMembers.friendId))
-                        .where(eq(friendGroupMembers.groupId, group.id))
-                        .orderBy(asc(users.username)),
-                ).map((members) => ({id: group.id, name: group.name, members})),
-            ),
-        ),
-    );
+    ).andThen((groups) => {
+        if (groups.length === 0) return ok([]);
+
+        return query(
+            db
+                .select({groupId: friendGroupMembers.groupId, friendId: friendGroupMembers.friendId})
+                .from(friendGroupMembers)
+                .where(inArray(friendGroupMembers.groupId, groups.map((g) => g.id))),
+        ).andThen((memberRows) =>
+            query(accounts.getUsersByIds(memberRows.map((r) => r.friendId))).map((users) => {
+                const byId = new Map(users.map((u) => [u.id, u]));
+                return groups.map((group) => ({
+                    id: group.id,
+                    name: group.name,
+                    members: memberRows
+                        .filter((r) => r.groupId === group.id)
+                        .flatMap((r) => {
+                            const user = byId.get(r.friendId);
+                            return user ? [user] : [];
+                        })
+                        .sort((a, b) => a.username.localeCompare(b.username)),
+                }));
+            }),
+        );
+    });
+
+/** IDs of `userId`'s friends (not including `userId` itself). Backs
+ * `FriendsService.getFriendIds` (see index.ts) — the RPC entrypoint
+ * `leaderboard`/`browse` call instead of reading the `friendships` table
+ * directly, now that this Worker exposes it. */
+export const friendIds = (db: Db, userId: string): Promise<string[]> =>
+    db
+        .select({friendId: friendships.friendId})
+        .from(friendships)
+        .where(eq(friendships.userId, userId))
+        .then((rows) => rows.map((r) => r.friendId));
 
 // --- combined view for the friends page -----------------------------------
 
 /** `ResultAsync.combine()` over a fixed 4-tuple keeps each branch's own
  * type (unlike `listGroups()`'s homogeneous array case above) — the same
  * concurrency `Promise.all()` gave this, now folding the first D1 failure
- * into one `Result` instead of an unhandled rejection. */
-export const getFriendsPageData = (db: Db, userId: string): ResultAsync<FriendsPageData, string> =>
+ * into one `Result` instead of an unhandled rejection.
+ *
+ * The first three queries used to JOIN `users` directly for each row's
+ * display name/color; now they fetch bare ids and every id across all
+ * three (plus `listGroups`' own separate batch, for its members) is
+ * resolved via `AccountsRpc.getUsersByIds` instead — one more RPC round
+ * trip than the theoretical minimum (`listGroups` batches its own members
+ * separately), but still a small constant number of calls per page load,
+ * not one per row. */
+export const getFriendsPageData = (db: Db, accounts: AccountsRpc, userId: string): ResultAsync<FriendsPageData, string> =>
     ResultAsync.combine([
+        query(db.select({friendId: friendships.friendId}).from(friendships).where(eq(friendships.userId, userId))),
         query(
             db
-                .select({id: users.id, username: users.username, color: users.color})
-                .from(friendships)
-                .innerJoin(users, eq(users.id, friendships.friendId))
-                .where(eq(friendships.userId, userId))
-                .orderBy(asc(users.username)),
-        ),
-        query(
-            db
-                .select({
-                    id: friendRequests.id,
-                    username: users.username,
-                    color: users.color,
-                    created_at: friendRequests.createdAt,
-                })
+                .select({id: friendRequests.id, requesterId: friendRequests.requesterId, created_at: friendRequests.createdAt})
                 .from(friendRequests)
-                .innerJoin(users, eq(users.id, friendRequests.requesterId))
                 .where(and(eq(friendRequests.recipientId, userId), eq(friendRequests.status, "pending")))
                 .orderBy(desc(friendRequests.createdAt)),
         ),
         query(
             db
-                .select({
-                    id: friendRequests.id,
-                    username: users.username,
-                    color: users.color,
-                    created_at: friendRequests.createdAt,
-                })
+                .select({id: friendRequests.id, recipientId: friendRequests.recipientId, created_at: friendRequests.createdAt})
                 .from(friendRequests)
-                .innerJoin(users, eq(users.id, friendRequests.recipientId))
                 .where(and(eq(friendRequests.requesterId, userId), eq(friendRequests.status, "pending")))
                 .orderBy(desc(friendRequests.createdAt)),
         ),
-        listGroups(db, userId),
-    ]).map(([friends, incoming, outgoing, groups]) => ({
-        friends,
-        incomingRequests: incoming,
-        outgoingRequests: outgoing,
-        groups,
-    }));
+        listGroups(db, accounts, userId),
+    ]).andThen(([friendRows, incomingRows, outgoingRows, groups]) => {
+        const ids = [
+            ...new Set([...friendRows.map((r) => r.friendId), ...incomingRows.map((r) => r.requesterId), ...outgoingRows.map((r) => r.recipientId)]),
+        ];
+
+        return query(accounts.getUsersByIds(ids)).map((users) => {
+            const byId = new Map<string, AccountRecord>(users.map((u) => [u.id, u]));
+
+            const friends = friendRows
+                .flatMap((r) => {
+                    const user = byId.get(r.friendId);
+                    return user ? [user] : [];
+                })
+                .sort((a, b) => a.username.localeCompare(b.username));
+
+            const incomingRequests = incomingRows.flatMap((r) => {
+                const user = byId.get(r.requesterId);
+                return user ? [{id: r.id, username: user.username, color: user.color, created_at: r.created_at}] : [];
+            });
+
+            const outgoingRequests = outgoingRows.flatMap((r) => {
+                const user = byId.get(r.recipientId);
+                return user ? [{id: r.id, username: user.username, color: user.color, created_at: r.created_at}] : [];
+            });
+
+            return {friends, incomingRequests, outgoingRequests, groups};
+        });
+    });

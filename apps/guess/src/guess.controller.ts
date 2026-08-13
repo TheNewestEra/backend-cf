@@ -84,7 +84,7 @@ guessRoutes.openapi(
         // actually reject — see guess.model.ts's `join()`.
         const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
         if (joined.isErr()) return c.json({error: joined.error}, 400);
-        await c.env.BROWSE.insertCatalogEntry(gameId, "guess", theme);
+        await c.env.BROWSE.insertCatalogEntry(gameId, "guess", theme, {id: user?.id ?? null, name: player, color: joined.value.color});
         await c.env.GAME_QUEUE.send({gameId, theme} satisfies GuessQueueMessage);
 
         return c.json({gameId, hostToken, ...joined.value}, 202);
@@ -220,7 +220,7 @@ guessRoutes.openapi(
         // actually reject — see guess.model.ts's `join()`.
         const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
         if (joined.isErr()) return c.json({error: joined.error}, 400);
-        await c.env.BROWSE.insertCatalogEntry(gameId, "guess", source.theme);
+        await c.env.BROWSE.insertCatalogEntry(gameId, "guess", source.theme, {id: user?.id ?? null, name: player, color: joined.value.color});
         await c.env.GAME_QUEUE.send({gameId, theme: source.theme} satisfies GuessQueueMessage);
 
         return c.json({gameId, hostToken, ...joined.value}, 202);

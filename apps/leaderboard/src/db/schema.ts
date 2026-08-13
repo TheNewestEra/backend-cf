@@ -12,10 +12,12 @@
 // never gets handed to `wrangler d1 migrations apply` and asked to recreate
 // a table that's already live.
 //
-// `users` (joined for display-name/color lookups) and `friendships` (read
-// for friend-scoped queries) are deliberately NOT here — they're owned and
-// migrated by apps/accounts and apps/friends respectively. See
-// ./users-ref.ts and ./friendships-ref.ts.
+// `users` (owned by apps/accounts) and `friendships` (owned by
+// apps/friends) are deliberately NOT here, and this directory has no
+// read-only ref file for either: display-name/color lookups go through
+// apps/accounts' `AccountsRpc.getUsersByIds`, and friend-scoped queries
+// (`friendScores`) go through apps/friends' `FriendsRpc.getFriendIds` —
+// both RPC calls rather than direct table reads. See leaderboard.service.ts.
 
 import {index, integer, sqliteTable, text} from "drizzle-orm/sqlite-core";
 

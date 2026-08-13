@@ -1,10 +1,10 @@
 import type {z} from "@hono/zod-openapi";
+import type {AccountsRpc} from "@game-worker/shared/rpc-types";
 import {and, desc, eq} from "drizzle-orm";
 import {err, ok, type ResultAsync} from "neverthrow";
 import type {Db} from "./db/client";
 import {query, requireFound} from "./db/result";
 import {gameInvites} from "./db/schema";
-import {users} from "./db/users-ref";
 import type {InviteSummarySchema} from "./friends.schema";
 
 export type InviteSummary = z.infer<typeof InviteSummarySchema>;
@@ -29,21 +29,43 @@ export const createInvite = (
     ).map(() => ({id, kind, sessionId, inviterUsername, inviterColor, createdAt}));
 };
 
-export const listPendingInvites = (db: Db, recipientId: string): ResultAsync<InviteSummary[], string> =>
+/** Batch-resolves each invite's `inviterId` to a display name/color via one
+ * `AccountsRpc.getUsersByIds` call instead of a `users` JOIN — see
+ * friends.service.ts's `getFriendsPageData` for the same pattern. An
+ * invite whose inviter no longer resolves (shouldn't happen) is dropped
+ * rather than shown with a blank name. */
+export const listPendingInvites = (db: Db, accounts: AccountsRpc, recipientId: string): ResultAsync<InviteSummary[], string> =>
     query(
         db
             .select({
                 id: gameInvites.id,
                 kind: gameInvites.kind,
                 sessionId: gameInvites.sessionId,
-                inviterUsername: users.username,
-                inviterColor: users.color,
+                inviterId: gameInvites.inviterId,
                 createdAt: gameInvites.createdAt,
             })
             .from(gameInvites)
-            .innerJoin(users, eq(users.id, gameInvites.inviterId))
             .where(and(eq(gameInvites.recipientId, recipientId), eq(gameInvites.status, "pending")))
             .orderBy(desc(gameInvites.createdAt)),
+    ).andThen((rows) =>
+        query(accounts.getUsersByIds(rows.map((r) => r.inviterId))).map((users) => {
+            const byId = new Map(users.map((u) => [u.id, u]));
+            return rows.flatMap((row) => {
+                const user = byId.get(row.inviterId);
+                return user
+                    ? [
+                          {
+                              id: row.id,
+                              kind: row.kind,
+                              sessionId: row.sessionId,
+                              inviterUsername: user.username,
+                              inviterColor: user.color,
+                              createdAt: row.createdAt,
+                          },
+                      ]
+                    : [];
+            });
+        }),
     );
 
 export interface RespondedInvite {

@@ -3,10 +3,10 @@
 `schema.ts` is the source of truth for the two tables this app owns
 (`users`, `sessions`) — see account.service.ts's header comment: this is
 the only service that ever writes either table. Every other Worker reaches
-this data through the `AccountsService` RPC entrypoint (see `index.ts`)
-instead of a direct D1 binding, so there's no read-only mirror file here
-the way `apps/friends` has `users-ref.ts` — nothing outside this app reads
-these tables directly at all.
+this data through the `AccountsService` RPC entrypoint (see `index.ts`,
+notably `getUserById`/`getUsersByIds`/`findUserByUsername`) instead of a
+direct D1 binding — nothing outside this app reads these tables directly
+at all.
 
 ## Why generated migrations don't land in the shared `migrations/` folder
 

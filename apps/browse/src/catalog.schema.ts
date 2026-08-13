@@ -21,6 +21,17 @@ export const CatalogSort = {
 } as const;
 export type CatalogSort = (typeof CatalogSort)[keyof typeof CatalogSort];
 
+/** `all` (the default) is every entry; `friends` restricts the list to
+ * entries created by a friend of the signed-in viewer (never the viewer's
+ * own entries) and requires being logged in — same shape as
+ * apps/leaderboard's `LeaderboardScope`. */
+export const CatalogScope = {
+    All: "all",
+    Friends: "friends",
+} as const;
+export type CatalogScope = (typeof CatalogScope)[keyof typeof CatalogScope];
+export const CatalogScopeSchema = z.nativeEnum(CatalogScope).openapi("CatalogScope");
+
 export const CatalogStatusSchema = z
     .nativeEnum(CatalogStatus)
     .openapi("CatalogStatus");
@@ -33,6 +44,14 @@ export const CatalogSortSchema = z
     .nativeEnum(CatalogSort)
     .openapi("CatalogSort");
 
+export const CatalogCreatorSchema = z
+    .object({
+        userId: z.string().nullable().openapi({description: "Null for an anonymous host"}),
+        name: z.string(),
+        color: z.string(),
+    })
+    .openapi("CatalogCreator");
+
 export const CatalogEntrySchema = z
     .object({
         id: z.string(),
@@ -44,6 +63,7 @@ export const CatalogEntrySchema = z
         averageRating: z.number().nullable(),
         ratingCount: z.number().int().nonnegative(),
         createdAt: z.number().int().positive(),
+        creator: CatalogCreatorSchema.nullable().openapi({description: "Null only for entries that predate creator tracking"}),
     })
     .openapi("CatalogEntry");
 

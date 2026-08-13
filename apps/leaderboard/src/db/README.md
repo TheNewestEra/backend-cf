@@ -1,11 +1,11 @@
 # Drizzle in apps/leaderboard
 
 `schema.ts` is the source of truth for the one table this app owns
-(`leaderboard_entries`). `users-ref.ts` and `friendships-ref.ts` are
-deliberately-partial, read-only mirrors of `users` (owned by
-`apps/accounts`) and `friendships` (owned by `apps/friends`) — neither is
-ever included in drizzle-kit's schema path, so drizzle-kit never tries to
-migrate a table this app doesn't own.
+(`leaderboard_entries`). There's no read-only ref file for `users` (owned by
+`apps/accounts`) or `friendships` (owned by `apps/friends`) at all: display-
+name/color lookups go through `AccountsRpc.getUsersByIds` and friend-scoped
+queries go through `FriendsRpc.getFriendIds`, both service bindings instead
+of a direct table read — see leaderboard.service.ts.
 
 ## Why generated migrations don't land in the shared `migrations/` folder
 

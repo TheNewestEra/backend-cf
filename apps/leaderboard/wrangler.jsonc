@@ -19,11 +19,10 @@
     }
   ],
   // Owns `leaderboard_entries` (see catalog.service.ts-style ownership
-  // comment) and also reads (never writes) `users` directly for display
-  // names — a pragmatic read against the shared physical database rather
-  // than N RPC round trips per top-10 list. Session lookups still go
-  // through the ACCOUNTS RPC binding below, since that's stateful
-  // behavior (expiry checks), not a plain display-name join.
+  // comment). Display names/colors for the accounts behind each entry come
+  // from the ACCOUNTS RPC binding below (`AccountsRpc.getUsersByIds`, one
+  // batched call per request) — same binding session lookups already went
+  // through — rather than a direct read against `users`.
   // Unnamed/top-level config == "dev" (deployed as `game-leaderboard-worker`,
   // no --env flag needed).
   "d1_databases": [
@@ -39,6 +38,11 @@
       "binding": "ACCOUNTS",
       "service": "game-accounts-worker",
       "entrypoint": "AccountsService"
+    },
+    {
+      "binding": "FRIENDS",
+      "service": "game-friends-worker",
+      "entrypoint": "FriendsService"
     }
   ],
   // Cloudflare Flagship — same app as `accounts`/`guess`/`puzzle`, on
@@ -77,6 +81,11 @@
           "binding": "ACCOUNTS",
           "service": "game-accounts-worker-staging",
           "entrypoint": "AccountsService"
+        },
+        {
+          "binding": "FRIENDS",
+          "service": "game-friends-worker-staging",
+          "entrypoint": "FriendsService"
         }
       ],
       "flagship": [
@@ -127,6 +136,11 @@
           "binding": "ACCOUNTS",
           "service": "game-accounts-worker-prod",
           "entrypoint": "AccountsService"
+        },
+        {
+          "binding": "FRIENDS",
+          "service": "game-friends-worker-prod",
+          "entrypoint": "FriendsService"
         }
       ],
       "flagship": [

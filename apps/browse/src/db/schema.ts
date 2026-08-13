@@ -36,6 +36,16 @@ export const catalog = sqliteTable(
         playStatus: text("play_status").notNull().default("joinable").$type<PlayStatus>(),
         ratingSum: integer("rating_sum").notNull().default(0),
         ratingCount: integer("rating_count").notNull().default(0),
+        // Who created this entry, for the "created by friends" browse filter
+        // and the creator name/color shown alongside each entry — see
+        // migrations/0009_catalog_creator.sql's header comment for why all
+        // three are nullable (anonymous hosts, and rows that predate this
+        // column) and why `creatorName`/`creatorColor` are a snapshot taken
+        // at creation time rather than a live join back to `users` (same
+        // snapshot pattern `theme` above already uses).
+        createdBy: text("created_by"), // account id of the creating user; null for anonymous hosts
+        creatorName: text("creator_name"),
+        creatorColor: text("creator_color"),
         createdAt: integer("created_at").notNull(),
         updatedAt: integer("updated_at").notNull(),
     },
@@ -47,6 +57,7 @@ export const catalog = sqliteTable(
         index("idx_catalog_created").on(sql`${table.createdAt} desc`),
         index("idx_catalog_kind_created").on(table.kind, sql`${table.createdAt} desc`),
         index("idx_catalog_play_status_created").on(table.playStatus, sql`${table.createdAt} desc`),
+        index("idx_catalog_created_by").on(table.createdBy),
     ],
 );
 

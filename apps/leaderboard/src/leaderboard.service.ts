@@ -7,16 +7,17 @@
 // history.
 //
 // Accounts only: anonymous/guest play is never recorded here, so every row
-// in the table has a real `users` row to join against — no "guest bucket"
-// to special-case. `users` itself is owned by the accounts Worker; this
-// Worker only ever reads it (for display names), never writes it.
+// in the table has a real `users` row behind it — no "guest bucket" to
+// special-case. `users` itself is owned by the accounts Worker; display
+// names/colors are resolved through its `AccountsRpc.getUsersByIds` (one
+// batched round trip per request, not a direct table read) rather than a
+// SQL join — see `withUserInfo` below.
 
+import type {AccountRecord, AccountsRpc, FriendsRpc} from "@game-worker/shared/rpc-types";
 import type {GameKind} from "@game-worker/shared/game";
 import {and, desc, eq, gt, gte, inArray, sql} from "drizzle-orm";
 import type {Db} from "./db/client";
-import {friendships} from "./db/friendships-ref";
 import {leaderboardEntries} from "./db/schema";
-import {users} from "./db/users-ref";
 import {LeaderboardPeriod} from "./leaderboard.schema";
 
 export type LeaderboardKind = GameKind;
@@ -75,12 +76,34 @@ function filtersFor(query: LeaderboardQuery) {
     return conditions;
 }
 
-interface TotalRow {
+/** What `totalsQuery` itself returns — no display fields, since it no
+ * longer joins `users` (see this file's header). */
+interface RawTotalRow {
     userId: string;
-    username: string;
-    color: string;
     totalScore: number;
     lastPlayed: number;
+}
+
+interface TotalRow extends RawTotalRow {
+    username: string;
+    color: string;
+}
+
+/** Resolves each row's `userId` to a display name/color via one batched
+ * `AccountsRpc.getUsersByIds` call — the replacement for the SQL join
+ * `totalsQuery` used to do directly against `users`. A row whose id doesn't
+ * resolve (shouldn't happen — see this file's header on why every
+ * `leaderboard_entries.user_id` is a real account) is dropped rather than
+ * crashing the whole page. Called with an already-paged slice of rows
+ * (never the extra page-boundary row), so it never resolves more accounts
+ * than actually end up in the response. */
+async function withUserInfo(accounts: AccountsRpc, rows: RawTotalRow[]): Promise<TotalRow[]> {
+    if (rows.length === 0) return [];
+    const byId = new Map<string, AccountRecord>((await accounts.getUsersByIds(rows.map((r) => r.userId))).map((u) => [u.id, u]));
+    return rows.flatMap((row) => {
+        const user = byId.get(row.userId);
+        return user ? [{...row, username: user.username, color: user.color}] : [];
+    });
 }
 
 export interface LeaderboardEntry {
@@ -133,33 +156,23 @@ export interface LeaderboardPage {
     hasMore: boolean;
 }
 
-/** IDs of `userId`'s friends (not including `userId` itself) — a direct
- * read against the `friendships` table owned by the `friends` Worker, the
- * same pragmatic cross-app read this file already does against `users`. */
-async function friendIds(db: Db, userId: string): Promise<string[]> {
-    const rows = await db.select({friendId: friendships.friendId}).from(friendships).where(eq(friendships.userId, userId));
-    return rows.map((r) => r.friendId);
-}
-
-/** Shared totals query: `leaderboard_entries` JOINed to `users` for
- * display fields, GROUPed BY user, ORDERed by summed score descending,
- * page-boundary trick applied via `limit`/`offset` (see call sites for why
- * `limit` is always one past the actual page size). The `SUM(...)`
- * expression is built once and reused in both `select` and `orderBy` so
- * the ORDER BY unambiguously refers to the same aggregate rather than a
- * string alias. */
+/** Shared totals query: `leaderboard_entries` GROUPed BY user, ORDERed by
+ * summed score descending, page-boundary trick applied via `limit`/`offset`
+ * (see call sites for why `limit` is always one past the actual page
+ * size). No display fields — those come from `withUserInfo` afterward, not
+ * a join, so this never resolves more accounts than the actual page needs.
+ * The `SUM(...)` expression is built once and reused in both `select` and
+ * `orderBy` so the ORDER BY unambiguously refers to the same aggregate
+ * rather than a string alias. */
 function totalsQuery(db: Db, where: ReturnType<typeof and>, limit: number, offset: number) {
     const totalScore = sql<number>`SUM(${leaderboardEntries.score})`;
     return db
         .select({
             userId: leaderboardEntries.userId,
-            username: users.username,
-            color: users.color,
             totalScore,
             lastPlayed: sql<number>`MAX(${leaderboardEntries.createdAt})`,
         })
         .from(leaderboardEntries)
-        .innerJoin(users, eq(users.id, leaderboardEntries.userId))
         .where(where)
         .groupBy(leaderboardEntries.userId)
         .orderBy(desc(totalScore))
@@ -178,6 +191,8 @@ function totalsQuery(db: Db, where: ReturnType<typeof and>, limit: number, offse
 export async function topScores(
     db: Db,
     flags: Flagship,
+    accounts: AccountsRpc,
+    friends: FriendsRpc,
     query: LeaderboardQuery,
     page: number,
     viewerId: string | null,
@@ -187,14 +202,17 @@ export async function topScores(
     const offset = (page - 1) * pageSize;
 
     // Independent reads — the viewer's friend list doesn't depend on the
-    // page of totals or vice versa — so fetch them concurrently.
-    const [results, viewerFriendIds] = await Promise.all([
+    // page of totals or vice versa — so fetch them concurrently. Display
+    // fields are resolved afterward, only for the page that actually ships
+    // (see `withUserInfo`), since they depend on `rawResults`.
+    const [rawResults, viewerFriendIds] = await Promise.all([
         totalsQuery(db, where, pageSize + 1, offset),
-        viewerId ? friendIds(db, viewerId).then((ids) => new Set(ids)) : Promise.resolve(null),
+        viewerId ? friends.getFriendIds(viewerId).then((ids) => new Set(ids)) : Promise.resolve(null),
     ]);
 
-    const hasMore = results.length > pageSize;
-    const entries = results.slice(0, pageSize).map((row, i) => {
+    const hasMore = rawResults.length > pageSize;
+    const results = await withUserInfo(accounts, rawResults.slice(0, pageSize));
+    const entries = results.map((row, i) => {
         const entry = toEntry(row, offset + i + 1, query.kind);
         if (viewerFriendIds) entry.isFriend = viewerFriendIds.has(row.userId);
         return entry;
@@ -212,15 +230,23 @@ export const FRIENDS_PAGE_SIZE = 10;
  * counting up across pages rather than restarting at 1 each time.
  * Fetches one row past the page boundary instead of a separate COUNT(*)
  * to learn whether another page exists. */
-export async function friendScores(db: Db, userId: string, query: LeaderboardQuery, page: number): Promise<LeaderboardPage> {
-    const ids = [userId, ...(await friendIds(db, userId))];
+export async function friendScores(
+    db: Db,
+    friends: FriendsRpc,
+    accounts: AccountsRpc,
+    userId: string,
+    query: LeaderboardQuery,
+    page: number,
+): Promise<LeaderboardPage> {
+    const ids = [userId, ...(await friends.getFriendIds(userId))];
     const where = and(inArray(leaderboardEntries.userId, ids), ...filtersFor(query));
     const offset = (page - 1) * FRIENDS_PAGE_SIZE;
 
-    const results = await totalsQuery(db, where, FRIENDS_PAGE_SIZE + 1, offset);
+    const rawResults = await totalsQuery(db, where, FRIENDS_PAGE_SIZE + 1, offset);
 
-    const hasMore = results.length > FRIENDS_PAGE_SIZE;
-    const entries = results.slice(0, FRIENDS_PAGE_SIZE).map((row, i) => toEntry(row, offset + i + 1, query.kind));
+    const hasMore = rawResults.length > FRIENDS_PAGE_SIZE;
+    const results = await withUserInfo(accounts, rawResults.slice(0, FRIENDS_PAGE_SIZE));
+    const entries = results.map((row, i) => toEntry(row, offset + i + 1, query.kind));
 
     return {entries, hasMore};
 }
@@ -238,8 +264,8 @@ export interface MyScore {
  * `topScores`' range. `rank` is null when the user has no score in the
  * window (nothing to rank them against). Returns null only if `userId`
  * doesn't resolve to an account at all. */
-export async function myScore(db: Db, userId: string, query: LeaderboardQuery): Promise<MyScore | null> {
-    const user = await db.select({username: users.username, color: users.color}).from(users).where(eq(users.id, userId)).get();
+export async function myScore(db: Db, accounts: AccountsRpc, userId: string, query: LeaderboardQuery): Promise<MyScore | null> {
+    const user = await accounts.getUserById(userId);
     if (!user) return null;
 
     const conditions = filtersFor(query);

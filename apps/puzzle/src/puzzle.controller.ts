@@ -83,7 +83,7 @@ puzzleRoutes.openapi(
         // actually reject — see puzzle.model.ts's `join()`.
         const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
         if (joined.isErr()) return c.json({error: joined.error}, 400);
-        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", theme);
+        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", theme, {id: user?.id ?? null, name: player, color: joined.value.color});
         await c.env.PUZZLE_QUEUE.send({puzzleId, theme} satisfies PuzzleQueueMessage);
 
         return c.json({puzzleId, hostToken, ...joined.value}, 202);
@@ -209,6 +209,13 @@ puzzleRoutes.openapi(
     }),
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
+        // Unlike POST /puzzles, nobody's auto-joined as host here (the 201
+        // response has no participantId/token — whoever replays joins
+        // separately over the WebSocket, same as any other player), so
+        // there's no `player` display name to snapshot yet for an
+        // anonymous replayer. A logged-in caller's account name is known
+        // regardless, so that's still recorded as the creator.
+        const user = await currentUser(c);
         const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
         if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
             return c.json({error: "puzzle must be finished before replaying"}, 409);
@@ -233,7 +240,11 @@ puzzleRoutes.openapi(
         const timeLimitMs = await puzzleTimeLimitMs(c.env);
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
         const hostToken = await stub.initFromSource(puzzleId, source.theme, source.gridSize, timeLimitMs, source.prompt);
-        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", source.theme);
+        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", source.theme, {
+            id: user?.id ?? null,
+            name: user?.username ?? "Anonymous",
+            color: user?.color ?? "#888888",
+        });
         await c.env.BROWSE.markCatalogReady(puzzleId, puzzleImageKeyFor(puzzleId));
 
         return c.json({puzzleId, hostToken}, 201);

@@ -33,8 +33,13 @@ app.doc("/openapi.json", {
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
 
 export class CatalogService extends WorkerEntrypoint<Env> {
-    insertCatalogEntry(id: string, kind: GameKind, theme: string | null): Promise<D1Response> {
-        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme);
+    insertCatalogEntry(
+        id: string,
+        kind: GameKind,
+        theme: string | null,
+        creator: {id: string | null; name: string; color: string},
+    ): Promise<D1Response> {
+        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme, creator);
     }
 
     markCatalogGenerating(id: string): Promise<D1Response> {
