@@ -38,7 +38,7 @@ const findUserByUsername = (db: Db, username: string): ResultAsync<{
 
 export const sendFriendRequest = (db: Db, requesterId: string, recipientUsername: string): ResultAsync<void, string> =>
     findUserByUsername(db, recipientUsername)
-        .andThen((req) => (req.id === requesterId ? ok(req) : err("forbidden")))
+        .andThen((req) => (req.id !== requesterId ? ok(req) : err("forbidden")))
         .andThen((recipient) =>
             query(
                 db
@@ -83,7 +83,7 @@ export const sendFriendRequest = (db: Db, requesterId: string, recipientUsername
                             target: [friendRequests.requesterId, friendRequests.recipientId],
                             set: {status: "pending", createdAt: Date.now(), respondedAt: null},
                         })
-                ).map((_) => undefined)
+                ).map(() => undefined)
         );
 
 const executeAcceptBatch = (db: Db, requestId: string, requesterId: string, recipientId: string) => {
