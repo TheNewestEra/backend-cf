@@ -15,10 +15,12 @@
 // ./db/migrations.ts.
 import journal from "../../drizzle/meta/_journal.json";
 import m0000 from "../../drizzle/0000_zippy_deathbird.sql";
+import m0001 from "../../drizzle/0001_wise_rockslide.sql";
 
 export default {
     journal,
     migrations: {
         m0000,
+        m0001,
     },
 };

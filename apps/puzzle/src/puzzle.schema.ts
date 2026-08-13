@@ -37,6 +37,16 @@ export const SelectionPublicSchema = z
     .object({cell: z.number(), participantId: z.string(), player: z.string(), color: z.string()})
     .openapi("Selection");
 
+/** A single participant's running total across every tile-placing move
+ * this puzzle — sorted highest-first, so index 0 is always the leader.
+ * Present (and live-updating) throughout play, not just once the puzzle is
+ * over; only the *final* standings once `status` reaches `solved`/
+ * `timeout`. Identified by `participantId` alone, same reasoning as Guess
+ * the Prompt's own `GameResultSchema` — join against that participant's
+ * `ParticipantPublicSchema` roster entry to render a row. Mirrors
+ * guess.schema.ts's `GameResultSchema` exactly. */
+export const PuzzleResultSchema = z.object({participantId: z.string(), score: z.number()}).openapi("PuzzleResult");
+
 export const PuzzlePublicSchema = z
     .object({
         id: z.string(),
@@ -51,13 +61,18 @@ export const PuzzlePublicSchema = z
         remainingMs: z.number().nullable(),
         lobbyRemainingMs: z.number().nullable(),
         endedAt: z.number().nullable(),
-        score: z.number().nullable(),
-        solvedBy: z.string().nullable(),
+        solvedBy: z
+            .string()
+            .nullable()
+            .openapi({description: "Name of whoever placed the final tile — narrative only; see `results` for who actually scored what"}),
         connectedPlayers: z.number(),
         participants: z.array(ParticipantPublicSchema).openapi({description: "Everyone who has joined, in join order"}),
         selections: z
             .array(SelectionPublicSchema)
             .openapi({description: "Every tile currently selected by a participant, for state restore on (re)connect"}),
+        results: z
+            .array(PuzzleResultSchema)
+            .openapi({description: "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`"}),
     })
     .openapi("Puzzle");
 
@@ -66,7 +81,10 @@ export const MoveResultSchema = z
         status: PuzzleStatusSchema,
         board: z.array(z.number()),
         solved: z.boolean(),
-        score: z.number().nullable(),
+        score: z.number().nullable().openapi({description: "Time-weighted points earned for this move; null when it didn't place any tile correctly"}),
+        totalScore: z
+            .number()
+            .openapi({description: "This participant's running total across every scoring move this puzzle so far (including this one, if any) — same figure as their entry in PuzzlePublicSchema's `results`"}),
     })
     .openapi("MoveResult");
 
@@ -131,10 +149,12 @@ export const PuzzleWsSolvedMessageSchema = z
     .object({
         type: z.literal(PuzzleWsEventType.Solved),
         board: z.array(z.number()),
-        score: z.number(),
         solvedBy: z.string(),
         solvedByColor: z.string(),
         remainingMs: z.number(),
+        results: z
+            .array(PuzzleResultSchema)
+            .openapi({description: "Final per-player standings — same figure as PuzzlePublicSchema's `results` at this instant"}),
     })
     .openapi("PuzzleWsSolvedMessage");
 
@@ -145,6 +165,10 @@ export const PuzzleWsMoveMessageSchema = z
         cellB: z.number(),
         by: z.string(),
         color: z.string(),
+        score: z
+            .number()
+            .nullable()
+            .openapi({description: "Time-weighted points this move earned its mover; null when it didn't place any tile correctly"}),
     })
     .openapi("PuzzleWsMoveMessage");
 
@@ -172,7 +196,12 @@ export const PuzzleWsTileDeselectedMessageSchema = z
     .openapi("PuzzleWsTileDeselectedMessage");
 
 export const PuzzleWsTimeoutMessageSchema = z
-    .object({type: z.literal(PuzzleWsEventType.Timeout)})
+    .object({
+        type: z.literal(PuzzleWsEventType.Timeout),
+        results: z
+            .array(PuzzleResultSchema)
+            .openapi({description: "Final per-player standings — whatever partial progress each participant scored before time ran out"}),
+    })
     .openapi("PuzzleWsTimeoutMessage");
 
 /** Direct reply to a `join` client message (see `PuzzleWsJoinRequestSchema`

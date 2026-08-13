@@ -1,6 +1,6 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
-import {asc, eq, inArray, isNotNull, sql} from "drizzle-orm";
+import {asc, desc, eq, inArray, isNotNull, sql} from "drizzle-orm";
 import {migrate as runMigrations} from "drizzle-orm/durable-sqlite/migrator";
 import {err, ok, type Result} from "neverthrow";
 import {generateColor, isValidHexColor} from "@game-worker/shared/color";
@@ -12,13 +12,14 @@ import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {createDb, type Db} from "./db/client";
 import migrations from "./db/migrations";
-import {participants, puzzle} from "./db/schema";
+import {moves, participants, puzzle} from "./db/schema";
 import {puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
-import type {MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
+import type {MoveResultSchema, PuzzlePublicSchema, PuzzleResultSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
 import {PuzzleWsClientEventType, PuzzleWsClientMessageSchema, PuzzleWsEventType} from "./puzzle.schema";
 
 export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
 export type PuzzlePublic = z.infer<typeof PuzzlePublicSchema>;
+export type PuzzleResult = z.infer<typeof PuzzleResultSchema>;
 export type MoveResult = z.infer<typeof MoveResultSchema>;
 export type PuzzleWsMessage = z.infer<typeof PuzzleWsMessageSchema>;
 
@@ -134,8 +135,8 @@ export class PuzzleDO extends DurableObject<Env> {
                 startedAt: null,
                 lobbyEndsAt: null,
                 endedAt: null,
-                score: null,
                 solvedBy: null,
+                scoredCells: "[]",
                 hostToken,
                 createdAt: Date.now(),
             })
@@ -177,8 +178,8 @@ export class PuzzleDO extends DurableObject<Env> {
                 startedAt: null,
                 lobbyEndsAt: endsAt,
                 endedAt: null,
-                score: null,
                 solvedBy: null,
+                scoredCells: "[]",
                 hostToken,
                 createdAt: Date.now(),
             })
@@ -246,10 +247,17 @@ export class PuzzleDO extends DurableObject<Env> {
                 startedAt: null,
                 lobbyEndsAt: null,
                 endedAt: null,
-                score: null,
                 solvedBy: null,
+                scoredCells: "[]",
             })
             .run();
+        // Always empty at this point in practice — moves only ever get
+        // logged (and cells only ever get marked scored) while `playing`
+        // (see `swapTiles()`), and regenerate is only reachable pre-play
+        // (JOINABLE_STATUSES, checked above) — but cleared explicitly
+        // anyway rather than relying on that invariant, same defensive
+        // spirit as the rest of this reset.
+        this.db.delete(moves).run();
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
         return toRpcResult(ok(row.theme));
     }
@@ -329,11 +337,29 @@ export class PuzzleDO extends DurableObject<Env> {
 
     // --- RPC: joining --------------------------------------------------------
 
-    /** `userId` is null for anonymous guests — a solve still counts for this
-     * puzzle's own state, it just isn't logged to the leaderboard (recorded
-     * via the LEADERBOARD service binding — see wrangler.jsonc).
-     * `participantId`/`token` prove the caller joined before the puzzle
-     * started — see `join()` and `requireParticipant()`. */
+    /** Unlike the old "whoever finishes it wins the whole pot" score, this
+     * scores each swap on its own — see `scoreForMove()` — and broadcasts
+     * it immediately, so every participant who places a tile earns points
+     * in real time, not just the one who happens to make the puzzle's very
+     * last move. `userId` is null for anonymous guests — their moves still
+     * score against this puzzle's own live board (`results`, see
+     * `readPublicState()`), they just aren't logged to the leaderboard,
+     * which only happens once per player as a single total when the puzzle
+     * finishes (see `finalizePuzzle()`) rather than per move — mirrors
+     * `GameDO.submitGuess()`'s own userId handling. `participantId`/`token`
+     * prove the caller joined before the puzzle started — see `join()` and
+     * `requireParticipant()`.
+     *
+     * A cell only ever scores once (see `row.scoredCells`/`db/schema.ts`'s
+     * doc comment on it): without that, swapping the same pair of tiles
+     * into place and back out again would pay out every single time — the
+     * naive "did this swap increase the number of correct cells" check
+     * can't tell "genuinely made progress" apart from "undid my own last
+     * move and redid it", since both look identical from inside one swap.
+     * Tracking which cells have *ever* been credited closes that off: the
+     * second (and every later) time a given cell lands correctly, it's
+     * already in the set and simply doesn't score again, however many
+     * times it gets shuffled away and back. */
     async swapTiles(
         participantId: string,
         token: string | null,
@@ -365,6 +391,14 @@ export class PuzzleDO extends DurableObject<Env> {
         const board: number[] = JSON.parse(row.board);
         [board[cellA], board[cellB]] = [board[cellB]!, board[cellA]!];
 
+        const scoredCells = new Set<number>(JSON.parse(row.scoredCells));
+        // Only cellA/cellB can possibly have changed, so there's no need to
+        // diff the whole board — a cell counts as newly placed only if it's
+        // correct *now* and hasn't already banked points at any earlier
+        // point in this puzzle's life (see this method's doc comment).
+        const newlyPlacedCells = [cellA, cellB].filter((cell) => board[cell] === cell && !scoredCells.has(cell));
+        for (const cell of newlyPlacedCells) scoredCells.add(cell);
+
         // Whoever had cellA/cellB selected (typically just the mover, whose
         // own selectedCell fed one half of this swap) no longer has anything
         // meaningful selected there — the tile that was under it just moved.
@@ -382,43 +416,62 @@ export class PuzzleDO extends DurableObject<Env> {
 
         const solved = board.every((tile, cell) => tile === cell);
 
+        const [maxScore, minScore] = await Promise.all([puzzleMaxScore(this.env), puzzleMinSolvedScore(this.env)]);
+        const cellCount = row.gridSize * row.gridSize;
+        const score = scoreForMove(row.startedAt, row.timeLimitMs, maxScore, minScore, newlyPlacedCells.length, cellCount);
+
+        // Every attempt is logged (not just scoring ones) — mirrors
+        // `GameDO.submitGuess()`'s `guesses` insert.
+        this.db
+            .insert(moves)
+            .values({
+                participantId,
+                player: participant.name,
+                cellA,
+                cellB,
+                cellsPlaced: newlyPlacedCells.length,
+                score,
+                createdAt: Date.now(),
+            })
+            .run();
+
+        // This participant's running total across every scoring move this
+        // puzzle so far, including the one just inserted — recomputed here
+        // (rather than incrementally tracked) so it can't drift from
+        // `readPublicState()`'s own `results`, same reasoning as
+        // `GameDO.submitGuess()`'s `totalScore`.
+        const totalScore =
+            this.db
+                .select({total: sql<number>`COALESCE(SUM(${moves.score}), 0)`})
+                .from(moves)
+                .where(eq(moves.participantId, participantId))
+                .get()?.total ?? 0;
+
+        this.db
+            .update(puzzle)
+            .set({board: JSON.stringify(board), scoredCells: JSON.stringify([...scoredCells])})
+            .run();
+
         if (solved) {
             const endedAt = Date.now();
-            const elapsedMs = endedAt - (row.startedAt ?? endedAt);
-            const remainingMs = Math.max(0, row.timeLimitMs - elapsedMs);
-            const [minSolvedScore, maxScore] = await Promise.all([
-                puzzleMinSolvedScore(this.env),
-                puzzleMaxScore(this.env),
-            ]);
-            const score = Math.max(minSolvedScore, Math.round((remainingMs / row.timeLimitMs) * maxScore));
-
-            this.db
-                .update(puzzle)
-                .set({
-                    board: JSON.stringify(board),
-                    status: GameSessionStatus.Solved,
-                    endedAt,
-                    score,
-                    solvedBy: participant.name,
-                })
-                .run();
-            await this.ctx.storage.deleteAlarm();
+            const remainingMs = Math.max(0, row.timeLimitMs - (endedAt - (row.startedAt ?? endedAt)));
+            const results = await this.finalizePuzzle(row.id, GameSessionStatus.Solved, endedAt, {
+                name: participant.name,
+                color: participant.color,
+            });
             this.broadcast({
                 type: PuzzleWsEventType.Solved,
                 board,
-                score,
                 solvedBy: participant.name,
                 solvedByColor: participant.color,
                 remainingMs,
+                results,
             });
-            this.updateCatalogPlayStatus(row.id, "finished");
-            if (userId) await this.env.LEADERBOARD.recordScore({userId, kind: "puzzle", sessionId: row.id, score});
-            return toRpcResult(ok({status: GameSessionStatus.Solved, board, solved: true, score}));
+            return toRpcResult(ok({status: GameSessionStatus.Solved, board, solved: true, score, totalScore}));
         }
 
-        this.db.update(puzzle).set({board: JSON.stringify(board)}).run();
-        this.broadcast({type: PuzzleWsEventType.Move, cellA, cellB, by: participant.name, color: participant.color});
-        return toRpcResult(ok({status: GameSessionStatus.Playing, board, solved: false, score: null}));
+        this.broadcast({type: PuzzleWsEventType.Move, cellA, cellB, by: participant.name, color: participant.color, score});
+        return toRpcResult(ok({status: GameSessionStatus.Playing, board, solved: false, score, totalScore}));
     }
 
     /** Records and broadcasts that a player has selected/highlighted a
@@ -503,9 +556,13 @@ export class PuzzleDO extends DurableObject<Env> {
             return;
         }
         if (row.status === GameSessionStatus.Playing) {
-            this.db.update(puzzle).set({status: GameSessionStatus.Timeout, endedAt: Date.now(), score: 0}).run();
-            this.broadcast({type: PuzzleWsEventType.Timeout});
-            this.updateCatalogPlayStatus(row.id, "finished");
+            // Whatever partial progress got made before time ran out still
+            // scores — a timeout only means nobody (or not everybody) placed
+            // the last tile, not that every earlier correct placement this
+            // game is wiped out. Mirrors `GameDO.alarm()`'s own guess-timeout
+            // handling.
+            const results = await this.finalizePuzzle(row.id, GameSessionStatus.Timeout, Date.now(), null);
+            this.broadcast({type: PuzzleWsEventType.Timeout, results});
         }
         // Any other status means the puzzle moved on (solved, regenerated, etc.)
         // before this stale alarm fired — nothing to do.
@@ -710,13 +767,77 @@ export class PuzzleDO extends DurableObject<Env> {
                 startedAt,
                 lobbyEndsAt: null,
                 endedAt: null,
-                score: null,
                 solvedBy: null,
+                scoredCells: "[]",
             })
             .run();
         await this.ctx.storage.setAlarm(startedAt + timeLimitMs);
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
         this.updateCatalogPlayStatus(puzzleId, "active");
+    }
+
+    /** Closes out the puzzle, however it ended: sums every scoring move
+     * logged so far (grouped by participant, highest first — same shape as
+     * `readPublicState()`'s own `results`, which this can't drift from
+     * since both read the same `moves` table), records one leaderboard
+     * entry per logged-in participant for their total, and tells `browse`
+     * the join window is closed for good. Mirrors `GameDO.finalizeGame()`.
+     * Doesn't touch `board`/`scoredCells` — `swapTiles()`'s caller has
+     * already persisted those itself by the time it calls this for a solve;
+     * a timeout leaves them exactly as they were. `solvedBy` is null for a
+     * timeout, or whoever made the winning move for a solve. */
+    private async finalizePuzzle(
+        puzzleId: string,
+        status: "solved" | "timeout",
+        endedAt: number,
+        solvedBy: {name: string; color: string} | null,
+    ): Promise<PuzzleResult[]> {
+        await this.ctx.storage.deleteAlarm();
+        this.db
+            .update(puzzle)
+            .set({status, endedAt, solvedBy: solvedBy?.name ?? null})
+            .run();
+
+        const totalExpr = sql<number>`SUM(${moves.score})`;
+        const results: PuzzleResult[] = this.db
+            .select({participantId: moves.participantId, score: totalExpr})
+            .from(moves)
+            .where(isNotNull(moves.score))
+            .groupBy(moves.participantId)
+            .orderBy(desc(totalExpr))
+            .all();
+
+        // One batched lookup for every scoring participant's account, rather
+        // than one query per participant — same "N round trips -> 1" shape
+        // as AccountsRpc.getUsersByIds / leaderboard.service.ts's
+        // withUserInfo, whose flatMap-an-empty-array-to-skip idiom the two
+        // flatMaps below also borrow.
+        const scorerIds = results.filter((r) => r.score > 0).map((r) => r.participantId);
+        const userIdByParticipant = new Map(
+            scorerIds.length === 0
+                ? []
+                : this.db
+                      .select({id: participants.id, userId: participants.userId})
+                      .from(participants)
+                      .where(inArray(participants.id, scorerIds))
+                      .all()
+                      .flatMap((p) => (p.userId ? [[p.id, p.userId] as const] : [])),
+        );
+
+        await Promise.all(
+            results.flatMap(({participantId, score}) => {
+                const userId = userIdByParticipant.get(participantId);
+                if (!userId) return [];
+                return [
+                    this.env.LEADERBOARD.recordScore({userId, kind: "puzzle", sessionId: puzzleId, score}).catch((err) => {
+                        console.error("failed to record puzzle score", puzzleId, participantId, err);
+                    }),
+                ];
+            }),
+        );
+
+        this.updateCatalogPlayStatus(puzzleId, "finished");
+        return results;
     }
 
     /** Tells `browse` this instance's join window opened/closed (see
@@ -762,11 +883,11 @@ export class PuzzleDO extends DurableObject<Env> {
                 remainingMs: null,
                 lobbyRemainingMs: null,
                 endedAt: null,
-                score: null,
                 solvedBy: null,
                 connectedPlayers: this.ctx.getWebSockets().length,
                 participants: [],
                 selections: [],
+                results: [],
             };
         }
 
@@ -801,6 +922,20 @@ export class PuzzleDO extends DurableObject<Env> {
             .all()
             .map((s) => ({...s, cell: s.cell!}));
 
+        // Same "sum of every scoring move, grouped by participant" this
+        // participant's own `totalScore` is built from in `swapTiles()` —
+        // recomputed here (rather than incrementally tracked) so it can't
+        // drift from that figure. Mirrors `GameDO.readPublicState()`'s own
+        // `results` query.
+        const totalExpr = sql<number>`SUM(${moves.score})`;
+        const results = this.db
+            .select({participantId: moves.participantId, total: totalExpr})
+            .from(moves)
+            .where(isNotNull(moves.score))
+            .groupBy(moves.participantId)
+            .orderBy(desc(totalExpr))
+            .all();
+
         return {
             id: row.id,
             theme: row.theme,
@@ -814,7 +949,6 @@ export class PuzzleDO extends DurableObject<Env> {
             remainingMs,
             lobbyRemainingMs: lobbyRemainingMs(row.lobbyEndsAt),
             endedAt: row.endedAt,
-            score: row.score,
             solvedBy: row.solvedBy,
             connectedPlayers: this.ctx.getWebSockets().length,
             participants: participantRows.map((p) => ({id: p.id, name: p.name, color: p.color})),
@@ -824,6 +958,7 @@ export class PuzzleDO extends DurableObject<Env> {
                 player: s.name,
                 color: s.color,
             })),
+            results: results.map((r) => ({participantId: r.participantId, score: r.total})),
         };
     }
 
@@ -858,4 +993,36 @@ function shuffledBoard(gridSize: number): number[] {
         }
     } while (tiles.every((tile, i) => tile === i));
     return tiles;
+}
+
+/** See `puzzleMaxScore()`/`puzzleMinSolvedScore()`: the whole puzzle's
+ * point pool (`maxScore`) is split evenly across every cell, so each
+ * tile's own share decays linearly from `maxScore / cellCount` at zero
+ * elapsed time (the instant the puzzle started — `startedAt`, stamped by
+ * `beginPlaying()`) down to `minScore / cellCount` at the time limit or
+ * beyond — mirrors guess.model.ts's `scoreForGuess()`, just paid out per
+ * correctly-placed tile instead of per correct guess, and by whoever
+ * placed it rather than only whoever happens to make the puzzle's last
+ * move. `matchesDelta` is how many of this move's two cells went from
+ * wrong to right (0 or negative means the move didn't improve the board —
+ * same "wrong guess earns nothing" rule as `scoreForGuess()`, so this
+ * returns `null` rather than a number for those). `startedAt` is only
+ * null for a puzzle somehow being scored before `beginPlaying()` ran;
+ * treated as "just started" (max score) rather than throwing, same
+ * fallback `scoreForGuess()` uses for its own `startedAt`. */
+function scoreForMove(
+    startedAt: number | null,
+    limitMs: number,
+    maxScore: number,
+    minScore: number,
+    matchesDelta: number,
+    cellCount: number,
+): number | null {
+    if (matchesDelta <= 0) return null;
+    const elapsedMs = Date.now() - (startedAt ?? Date.now());
+    const remainingMs = Math.max(0, limitMs - elapsedMs);
+    const maxPerTile = maxScore / cellCount;
+    const minPerTile = minScore / cellCount;
+    const perTile = Math.max(minPerTile, (remainingMs / limitMs) * maxPerTile);
+    return Math.round(perTile * matchesDelta);
 }

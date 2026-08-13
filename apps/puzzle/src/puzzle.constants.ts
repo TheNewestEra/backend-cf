@@ -45,9 +45,17 @@ export async function resolveGridSize(env: Env, requested: number | undefined): 
     return Math.min(max, Math.max(min, requested as number));
 }
 
-/** Score awarded for solving with no time left; full marks for solving
- * instantly. Linear in between. Sourced from Cloudflare Flagship's
- * "puzzle-max-score"/"puzzle-min-solved-score" flags. */
+/** The whole puzzle's point pool, split evenly across every cell
+ * (`gridSize * gridSize`) and paid out per tile as it's correctly placed
+ * rather than as one lump sum to whoever makes the final move — see
+ * `scoreForMove()` in puzzle.model.ts. `puzzleMaxScore` is each tile's
+ * share at the instant the puzzle starts (full pool if placed with zero
+ * elapsed time); `puzzleMinSolvedScore` is the floor each tile's share
+ * decays to once the time limit is reached — same linear-falloff shape
+ * Guess the Prompt's own "guess-max-score"/"guess-min-score" flags drive
+ * per round (see guess.constants.ts), just distributed over every correct
+ * placement instead of every correct round. Sourced from Cloudflare
+ * Flagship's "puzzle-max-score"/"puzzle-min-solved-score" flags. */
 export async function puzzleMaxScore(env: Env): Promise<number> {
     return env.FLAGS.getNumberValue("puzzle-max-score", DEFAULT_PUZZLE_MAX_SCORE);
 }

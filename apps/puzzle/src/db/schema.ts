@@ -24,7 +24,17 @@ import type {GameSessionStatus} from "@game-worker/shared/game-session-status";
 // no re-derivation/duplication needed.
 
 /** Single-row table — exactly one puzzle per `PuzzleDO` instance (see
- * `requireRow()`/`readPublicState()`'s `SELECT * FROM puzzle LIMIT 1`). */
+ * `requireRow()`/`readPublicState()`'s `SELECT * FROM puzzle LIMIT 1`).
+ * No single `score` column any more — scoring moved to per-move, per-
+ * participant events (see `moves` below), summed on read the same way
+ * apps/guess's `guesses` table is; `solvedBy` stays as the name of
+ * whoever placed the final tile, purely narrative ("solved by ...") since
+ * it no longer determines who was scored. `scoredCells` is a JSON array of
+ * cell indices that have ever paid out points, for the puzzle's whole
+ * lifetime since `beginPlaying()` last reset it to `"[]"` — see
+ * `swapTiles()`'s doc comment for why this exists: without it, swapping the
+ * same pair of tiles into place and back out again and again would pay out
+ * every single time. */
 export const puzzle = sqliteTable("puzzle", {
     id: text("id").primaryKey(),
     theme: text("theme"),
@@ -37,8 +47,8 @@ export const puzzle = sqliteTable("puzzle", {
     startedAt: integer("started_at"),
     lobbyEndsAt: integer("lobby_ends_at"),
     endedAt: integer("ended_at"),
-    score: integer("score"),
     solvedBy: text("solved_by"),
+    scoredCells: text("scored_cells").notNull().default("[]"),
     hostToken: text("host_token").notNull(),
     createdAt: integer("created_at").notNull(),
 });
@@ -52,4 +62,27 @@ export const participants = sqliteTable("participants", {
     color: text("color").notNull().default("#888888"),
     joinedAt: integer("joined_at").notNull(),
     selectedCell: integer("selected_cell"),
+});
+
+/** One row per tile swap (not just scoring ones) — mirrors apps/guess's
+ * `guesses` table: every attempt is logged, but `score` is only non-null
+ * for a move that actually placed one or two *never-before-scored* tiles
+ * into their correct final position (see puzzle.model.ts's
+ * `scoreForMove()` and `puzzle.scoredCells` above — a cell only ever pays
+ * out once per puzzle, so `cellsPlaced` is always 0, 1, or 2 and never
+ * negative; there's no "undo" credit for swapping a placed tile back out).
+ * Real-time, per-participant scoring replaces the old single "whoever
+ * finishes it wins the whole pot" model — every participant who makes a
+ * placing move earns points off it, time-weighted the same way the old
+ * solve-only score was. `readPublicState()`/`finalizePuzzle()` both sum
+ * this table grouped by `participant_id` for the live/final scoreboard. */
+export const moves = sqliteTable("moves", {
+    id: integer("id").primaryKey({autoIncrement: true}),
+    participantId: text("participant_id").notNull(),
+    player: text("player").notNull(),
+    cellA: integer("cell_a").notNull(),
+    cellB: integer("cell_b").notNull(),
+    cellsPlaced: integer("cells_placed").notNull(),
+    score: integer("score"),
+    createdAt: integer("created_at").notNull(),
 });
