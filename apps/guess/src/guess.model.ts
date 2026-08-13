@@ -4,16 +4,25 @@ import {and, asc, desc, eq, sql} from "drizzle-orm";
 import {migrate as runMigrations} from "drizzle-orm/durable-sqlite/migrator";
 import {err, ok, type Result} from "neverthrow";
 import {generateColor} from "@game-worker/shared/color";
+import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
-import {type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
+import {fromRpcResult, type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
+import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {createDb, type Db} from "./db/client";
 import migrations from "./db/migrations";
 import {game, guesses, participants, rounds} from "./db/schema";
 import {isGuessCorrect} from "./guess-matching";
 import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
-import {GameWsEventType, ROUND_RESOLVED_STATUSES, ROUND_VISIBLE_STATUSES, RoundStatus} from "./guess.schema";
+import {
+    GameWsClientEventType,
+    GameWsClientMessageSchema,
+    GameWsEventType,
+    ROUND_RESOLVED_STATUSES,
+    ROUND_VISIBLE_STATUSES,
+    RoundStatus,
+} from "./guess.schema";
 import {
     DEFAULT_GUESS_TIME_LIMIT_SECONDS,
     guessMatchThreshold,
@@ -38,6 +47,34 @@ export type GameWsMessage = z.infer<typeof GameWsMessageSchema>;
 type GameRow = typeof game.$inferSelect;
 type RoundRow = typeof rounds.$inferSelect;
 type ParticipantRow = typeof participants.$inferSelect;
+
+/** What a connected socket knows about who it's speaking for — resolved
+ * once at `fetch()`/upgrade time (the only point a WS connection carries
+ * the session cookie) and kept on the socket itself via
+ * `serializeAttachment`/`deserializeAttachment` for the rest of its
+ * lifetime, since individual WS messages don't carry cookies the way HTTP
+ * requests did. `null`/`null` for an anonymous connection. Mirrors Piece
+ * Puzzle's `PuzzleDO`'s own `ConnectionIdentity`. */
+interface ConnectionIdentity {
+    userId: string | null;
+    color: string | null;
+}
+
+/** The `action` values `GameWsErrorMessage` (see guess.schema.ts's
+ * `GameWsErrorMessageSchema`) tags a rejected client message with —
+ * matches that schema's own `z.enum([...])` literal-for-literal, same
+ * pattern as `GameWsClientEventType` (a TS `enum` member isn't assignable
+ * to the schema's plain string-literal union without a cast, where this
+ * is). Used by `webSocketMessage()`'s `reply()` helper below. Mirrors
+ * Piece Puzzle's `PuzzleWsAction`. */
+export const GameWsAction = {
+    Unknown: "unknown",
+    Join: "join",
+    Guess: "guess",
+    Reveal: "reveal",
+    Typing: "typing",
+} as const;
+export type GameWsAction = (typeof GameWsAction)[keyof typeof GameWsAction];
 
 /** Statuses in which a game hasn't started yet — the only window during
  * which joining is allowed. Once a game reaches `playing` its rounds are
@@ -389,28 +426,40 @@ class GameDO extends DurableObject<Env> {
     /** Reveals a round's prompt without guessing — gated the same as guessing
      * itself against spoilers (see `ROUND_VISIBLE_STATUSES`): only the
      * current round or one that's already resolved can be revealed, never a
-     * round still queued up waiting its turn. */
+     * round still queued up waiting its turn — `Err("round not visible
+     * yet")` rather than a silent `ok(null)` for that case (unlike this
+     * method's old HTTP-era shape, which needed the `null` to tell its 200
+     * from its 409), since `webSocketMessage()`'s `reply()` now folds every
+     * rejection into a `GameWsErrorMessage` the same way regardless of which
+     * one it is. */
     async revealRound(
         index: number,
         participantId: string,
         token: string | null,
         userId: string | null,
-    ): Promise<RpcResult<string | null>> {
-        const validated = this.requireParticipant(participantId, token, userId);
+    ): Promise<RpcResult<string>> {
+        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) => {
+            const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
+            if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return err("round not visible yet");
+            // Captured as its own binding (rather than relying on
+            // `round.prompt` after this point) so the narrowing to non-null
+            // above survives being carried inside the `ok()` object literal
+            // — same reasoning as `submitGuess()`'s own `prompt` binding.
+            const prompt = round.prompt;
+            return ok({participant, prompt});
+        });
         if (validated.isErr()) return {ok: false, error: validated.error};
-        const participant = validated.value;
+        const {participant, prompt} = validated.value;
 
-        const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
-        if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return toRpcResult(ok(null));
         this.broadcast({
             type: GameWsEventType.Revealed,
             index,
-            prompt: round.prompt,
+            prompt,
             participantId,
             player: participant.name,
             color: participant.color
         });
-        return toRpcResult(ok(round.prompt));
+        return toRpcResult(ok(prompt));
     }
 
     // --- RPC: player interaction --------------------------------------------
@@ -475,8 +524,16 @@ class GameDO extends DurableObject<Env> {
         if (request.headers.get("Upgrade") !== "websocket") {
             return new Response("Expected WebSocket", {status: 426});
         }
+        // Resolved once, here, because this is the only point a WS
+        // connection ever carries the session cookie — see
+        // `ConnectionIdentity`'s doc comment. Mirrors `PuzzleDO.fetch()`.
+        const user = await currentUserFromRequestVia(request, this.env.ACCOUNTS);
         const pair = new WebSocketPair();
         this.ctx.acceptWebSocket(pair[1]);
+        pair[1].serializeAttachment({
+            userId: user?.id ?? null,
+            color: user?.color ?? null,
+        } satisfies ConnectionIdentity);
         this.send(pair[1], {type: GameWsEventType.State, ...this.readPublicState()});
         // Let every other connected client know the spectator/player count
         // changed — mirrors PuzzleDO's presence broadcast.
@@ -484,29 +541,102 @@ class GameDO extends DurableObject<Env> {
         return new Response(null, {status: 101, webSocket: pair[0]});
     }
 
+    /** Dispatches one parsed client message to its RPC and replies once, to
+     * the sending socket only — broadcasts to everyone else still happen
+     * inside the RPC itself (`join()`/`submitGuess()`/`revealRound()`), same
+     * as before. Each arm's own validation (e.g. `player`/`guess` being
+     * non-empty) is checked up front and short-circuits with a
+     * `GameWsErrorMessage` the same way a rejected RPC call would; the RPC
+     * call itself already returns an `RpcResult` (see
+     * @game-worker/shared/rpc-result) instead of throwing, so there's no
+     * `try/catch` here at all — just `fromRpcResult()` to rehydrate a real
+     * `neverthrow` `Result`, and `reply()` to `.match()` it into whichever
+     * message actually goes back to the sender. Mirrors `PuzzleDO`'s own
+     * `webSocketMessage()`; `typing` is the one arm that never replies
+     * (fire-and-forget, same as before this migration — see
+     * `broadcastTyping()`). */
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
         if (typeof message !== "string") return;
         if (message === "ping") {
             this.send(ws, {type: WsEventType.Pong});
             return;
         }
-        // Anything else must be a small JSON envelope — currently only
-        // "typing" (see broadcastTyping()). Malformed/unknown messages are
-        // ignored rather than closing the socket, since clients are otherwise
-        // push-only observers and a stray message shouldn't be fatal.
+
+        let json: unknown;
         try {
-            const parsed = JSON.parse(message) as {
-                type?: string;
-                index?: number;
-                participantId?: string;
-                token?: string
-            };
-            if (parsed.type === "typing" && typeof parsed.index === "number" && typeof parsed.participantId === "string") {
-                this.broadcastTyping(parsed.index, parsed.participantId, parsed.token ?? null);
-            }
+            json = JSON.parse(message);
         } catch {
-            // Not JSON — ignore.
+            this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Unknown, error: "malformed message"});
+            return;
         }
+        const parsed = GameWsClientMessageSchema.safeParse(json);
+        if (!parsed.success) {
+            this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Unknown, error: "invalid message"});
+            return;
+        }
+
+        const identity = (ws.deserializeAttachment() as ConnectionIdentity | null) ?? {userId: null, color: null};
+        const data = parsed.data;
+
+        switch (data.type) {
+            case GameWsClientEventType.Join: {
+                const player = data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "";
+                if (!player) {
+                    this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Join, error: "player is required"});
+                    return;
+                }
+                // join() only ever rejects with the "already started" case —
+                // see guess.controller.ts's old POST .../join handler, which
+                // this mirrors.
+                const outcome = fromRpcResult(await this.join(identity.userId, player, identity.color));
+                this.reply(ws, GameWsAction.Join, outcome, (joined) => ({type: GameWsEventType.JoinResult, ...joined}));
+                return;
+            }
+            case GameWsClientEventType.Guess: {
+                const guess = data.guess.trim();
+                if (!guess) {
+                    this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Guess, error: "guess is required"});
+                    return;
+                }
+                const outcome = fromRpcResult(
+                    await this.submitGuess(data.index, data.participantId, data.token ?? null, guess, identity.userId),
+                );
+                this.reply(ws, GameWsAction.Guess, outcome, (result) => ({type: GameWsEventType.GuessResult, ...result}));
+                return;
+            }
+            case GameWsClientEventType.Reveal: {
+                const outcome = fromRpcResult(
+                    await this.revealRound(data.index, data.participantId, data.token ?? null, identity.userId),
+                );
+                this.reply(ws, GameWsAction.Reveal, outcome);
+                return;
+            }
+            case GameWsClientEventType.Typing: {
+                this.broadcastTyping(data.index, data.participantId, data.token ?? null);
+                return;
+            }
+        }
+    }
+
+    /** Folds a `fromRpcResult()`-rehydrated `Result` into the single reply
+     * `webSocketMessage()` sends the originating socket for one action:
+     * `toMessage(value)` on `Ok` — default "nothing", since `revealRound()`
+     * already broadcasts its own result, which reaches the sender too as
+     * just another connected client — or a `GameWsErrorMessage` tagged with
+     * `action` on `Err`. Mirrors `PuzzleDO.reply()`. */
+    private reply<T>(
+        ws: WebSocket,
+        action: GameWsAction,
+        outcome: Result<T, string>,
+        toMessage: (value: T) => GameWsMessage | null = () => null,
+    ): void {
+        outcome.match(
+            (value) => {
+                const message = toMessage(value);
+                if (message) this.send(ws, message);
+            },
+            (error) => this.send(ws, {type: GameWsEventType.Error, action, error}),
+        );
     }
 
     // --- alarm: drives the lobby's auto-start, then the current round's own

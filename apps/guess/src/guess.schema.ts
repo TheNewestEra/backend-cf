@@ -195,6 +195,9 @@ export const GameWsEventType = {
     Guess: "guess",
     Revealed: "revealed",
     PlayerTyping: "player_typing",
+    JoinResult: "join_result",
+    GuessResult: "guess_result",
+    Error: "error",
 } as const;
 export type GameWsEventType = (typeof GameWsEventType)[keyof typeof GameWsEventType];
 
@@ -258,6 +261,44 @@ export const GameWsPlayerTypingMessageSchema = z
     })
     .openapi("GameWsPlayerTypingMessage");
 
+/** Direct reply to a `join` client message (see `GameWsJoinRequestSchema`
+ * below) — sent only to the joining socket, never broadcast, since the
+ * `token`/`participantId` it carries are that participant's own secret.
+ * `.extend()` on `JoinResultSchema` composes over that component rather
+ * than duplicating its fields, same reasoning as `GameWsStateMessageSchema`
+ * above. Mirrors Piece Puzzle's `PuzzleWsJoinResultMessageSchema`. */
+export const GameWsJoinResultMessageSchema = JoinResultSchema.extend({
+    type: z.literal(GameWsEventType.JoinResult),
+}).openapi("GameWsJoinResultMessage");
+
+/** Direct reply to a `guess` client message — sent only to the guessing
+ * socket, since `prompt` (once correct) and `totalScore` are that
+ * participant's own private view. Distinct from the public
+ * `GameWsGuessMessageSchema` broadcast above (which every connected client,
+ * including the guesser, also receives) — that one carries just enough for
+ * everyone else's UI (`correct`/`score`) without spoiling the prompt for
+ * anyone still guessing this round. `.extend()` on `GuessResultSchema`
+ * composes over that component the same way `GameWsJoinResultMessageSchema`
+ * does over `JoinResultSchema`. */
+export const GameWsGuessResultMessageSchema = GuessResultSchema.extend({
+    type: z.literal(GameWsEventType.GuessResult),
+}).openapi("GameWsGuessResultMessage");
+
+/** Direct reply to a rejected client message (`join`/`guess`/`reveal`, or one
+ * that failed to parse at all) — sent only to the sender, mirroring the 4xx
+ * bodies these actions used to return over HTTP before they moved onto the
+ * WebSocket (see guess.model.ts's `webSocketMessage`). Mirrors Piece
+ * Puzzle's `PuzzleWsErrorMessageSchema`; `typing` never rejects (see
+ * `broadcastTyping()`) but is still a valid `action` tag for a malformed
+ * `typing` message caught by the outer parse failure instead. */
+export const GameWsErrorMessageSchema = z
+    .object({
+        type: z.literal(GameWsEventType.Error),
+        action: z.enum(["join", "guess", "reveal", "typing", "unknown"]),
+        error: z.string(),
+    })
+    .openapi("GameWsErrorMessage");
+
 /** Every message shape `GameDO` ever sends over its WebSocket, discriminated
  * by `type` — see guess.model.ts's `broadcast()`/`send()`. */
 export const GameWsMessageSchema = z
@@ -271,7 +312,104 @@ export const GameWsMessageSchema = z
         GameWsGuessMessageSchema,
         GameWsRevealedMessageSchema,
         GameWsPlayerTypingMessageSchema,
+        GameWsJoinResultMessageSchema,
+        GameWsGuessResultMessageSchema,
+        GameWsErrorMessageSchema,
         WsPresenceMessageSchema,
         WsPongMessageSchema,
     ])
     .openapi("GameWsMessage");
+
+// --- WebSocket client→server message shapes --------------------------------
+//
+// What used to be POST /games/:id/join, /guess, and /reveal are now sent as
+// messages over the same WebSocket connection instead — see this file's
+// header comment on `GameWsMessageSchema` for why the upgrade route itself
+// still has no OpenAPI representation, and guess.model.ts's
+// `webSocketMessage()` for how these get dispatched. Registered on the
+// OpenAPI registry the same way as `GameWsMessageSchema` (see index.ts) so
+// the generated client has typed models for the outgoing side too. Mirrors
+// Piece Puzzle's own client→server union in puzzle.schema.ts.
+
+export const GameWsClientEventType = {
+    Join: "join",
+    Guess: "guess",
+    Reveal: "reveal",
+    Typing: "typing",
+} as const;
+export type GameWsClientEventType = (typeof GameWsClientEventType)[keyof typeof GameWsClientEventType];
+
+/** Was POST /games/:id/join's body. `player` is used as the display name
+ * regardless of login state — identity (`userId`/`color`) is resolved once
+ * at WebSocket-upgrade time instead (see guess.model.ts's `fetch()` and
+ * `ConnectionIdentity`), same as Piece Puzzle's own `PuzzleWsJoinRequestSchema`.
+ * A logged-in caller's `color` is always their account's, regardless of
+ * what's sent here. Reply comes back as a `GameWsJoinResultMessage` (success)
+ * or `GameWsErrorMessage` (already started), addressed only to this socket.
+ * `player` isn't length-capped here — Flagship's "max-player-length" flag is
+ * async, so it can't back a static schema bound the way this used to;
+ * over-length names are truncated instead, at the point `player` actually
+ * gets used (see guess.model.ts's `webSocketMessage()`). */
+export const GameWsJoinRequestSchema = z
+    .object({
+        type: z.literal(GameWsClientEventType.Join),
+        player: z.string().optional(),
+    })
+    .openapi("GameWsJoinRequest");
+
+/** Was POST /games/:id/guess's body. `token` is only needed for anonymous
+ * guests — see `JoinResultSchema`. Reply comes back as a
+ * `GameWsGuessResultMessage` (this guesser's own private view — see that
+ * schema's doc comment) or a `GameWsErrorMessage`, addressed only to this
+ * socket; everyone else only ever sees the public `GameWsGuessMessage`
+ * broadcast. `index` isn't bounds-checked against this game's actual round
+ * count here — an out-of-range index just fails the same as any other round
+ * that isn't currently active. */
+export const GameWsGuessRequestSchema = z
+    .object({
+        type: z.literal(GameWsClientEventType.Guess),
+        index: z.number().int().min(0),
+        participantId: z.string(),
+        token: z.string().optional(),
+        guess: z.string(),
+    })
+    .openapi("GameWsGuessRequest");
+
+/** Was POST /games/:id/reveal's body — see `GameWsGuessRequestSchema` above
+ * for the token/index notes, which apply identically here. Success is
+ * observed via the resulting `GameWsRevealedMessage` broadcast (which
+ * reaches the sender too, since it's a connected client like any other);
+ * failure — including a round that isn't visible yet — comes back as a
+ * `GameWsErrorMessage` addressed only to this socket. */
+export const GameWsRevealRequestSchema = z
+    .object({
+        type: z.literal(GameWsClientEventType.Reveal),
+        index: z.number().int().min(0),
+        participantId: z.string(),
+        token: z.string().optional(),
+    })
+    .openapi("GameWsRevealRequest");
+
+/** A live "player is typing a guess" cue — see guess.model.ts's
+ * `broadcastTyping()`. Purely cosmetic and fire-and-forget: never replied
+ * to (success or failure), unlike every other client message here. */
+export const GameWsTypingRequestSchema = z
+    .object({
+        type: z.literal(GameWsClientEventType.Typing),
+        index: z.number(),
+        participantId: z.string(),
+        token: z.string().optional(),
+    })
+    .openapi("GameWsTypingRequest");
+
+/** Every message shape `GameDO` ever accepts over its WebSocket
+ * (`"ping"` is handled separately as a bare string — see
+ * guess.model.ts's `webSocketMessage()` — and isn't part of this union). */
+export const GameWsClientMessageSchema = z
+    .discriminatedUnion("type", [
+        GameWsJoinRequestSchema,
+        GameWsGuessRequestSchema,
+        GameWsRevealRequestSchema,
+        GameWsTypingRequestSchema,
+    ])
+    .openapi("GameWsClientMessage");

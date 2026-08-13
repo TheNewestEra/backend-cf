@@ -4,7 +4,7 @@ import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {guessRoutes} from "./guess.controller";
 import GameDO, {type GameStatus} from "./guess.model";
-import {GameWsMessageSchema} from "./guess.schema";
+import {GameWsClientMessageSchema, GameWsMessageSchema} from "./guess.schema";
 import {type GuessQueueMessage, processGuessGame} from "./guess.queue";
 
 export {GameDO};
@@ -15,6 +15,7 @@ app.use("*", corsMiddleware);
 app.route("/", guessRoutes);
 
 app.openAPIRegistry.register("GameWsMessage", GameWsMessageSchema);
+app.openAPIRegistry.register("GameWsClientMessage", GameWsClientMessageSchema);
 
 app.doc("/openapi.json", {
     openapi: "3.0.0",
@@ -23,9 +24,11 @@ app.doc("/openapi.json", {
         version: "1.0.0",
         description:
             "Guess the Prompt: 5 AI-generated image rounds per game, players guess the prompt behind each. The " +
-            "WebSocket upgrade endpoint (`/games/{id}/ws`) isn't representable in OpenAPI 3 and is omitted " +
-            "from this spec, though it's a real, functioning route — its message payloads are still registered " +
-            "as the `GameWsMessage` component below, so the generated client has typed models for them.",
+            "WebSocket upgrade endpoint (`/games/{id}/ws`) isn't representable in OpenAPI 3 and is omitted from " +
+            "this spec, though it's a real, functioning route — joining, guessing, and revealing are all sent as " +
+            "messages over it (there's no POST for any of them), and both directions' message payloads are still " +
+            "registered as the `GameWsMessage` (server→client) and `GameWsClientMessage` (client→server) " +
+            "components below, so the generated client has typed models for them.",
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));

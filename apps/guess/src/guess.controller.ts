@@ -1,13 +1,12 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
-import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
+import {maxThemeLength} from "@game-worker/shared/game-session";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
-import {currentUser} from "./auth.middleware";
 import {HostBodySchema, imageKeyFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
-import {GamePublicSchema, GuessResultSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
+import {GamePublicSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
 
 export const guessRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -78,7 +77,11 @@ guessRoutes.openapi(
 );
 
 // Not OpenAPI-documented: this is a WebSocket upgrade, not a request/response
-// JSON endpoint — OpenAPI 3 has no representation for it.
+// JSON endpoint — OpenAPI 3 has no representation for it. Carries more than
+// broadcasts out — joining, guessing, and revealing are all sent as messages
+// over this same connection now (see guess.schema.ts's
+// `GameWsClientMessageSchema` and guess.model.ts's `webSocketMessage()`);
+// there's no separate POST for any of them any more.
 guessRoutes.get("/games/:id/ws", async (c) => {
     if (c.req.header("Upgrade") !== "websocket") {
         return c.text("Expected WebSocket", 426);
@@ -147,168 +150,6 @@ guessRoutes.openapi(
         await c.env.GAME_QUEUE.send({gameId, theme: source.theme} satisfies GuessQueueMessage);
 
         return c.json({gameId, hostToken}, 202);
-    },
-);
-
-guessRoutes.openapi(
-    createRoute({
-        method: "post",
-        path: "/games/{id}/join",
-        tags: ["Guess the Prompt"],
-        summary: "Join a game as a player before it starts",
-        description:
-            "Must be called (and must succeed) before submitting any guess or reveal — it's what distinguishes a " +
-            "player from a spectator. Only possible while rounds are still generating or the lobby is open " +
-            "(`queued`/`generating`/`waiting`); once the game is `playing` this returns " +
-            "409 and late arrivals can only spectate over the WebSocket. Logged-in players are identified by their " +
-            "session and keep their account color; `player` is only used for anonymous guests, who get back a " +
-            "`token` they must resend with every guess/reveal, plus a freshly generated `color`.",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {
-                content: {
-                    "application/json": {schema: z.object({player: z.string().optional()})},
-                },
-                required: false,
-            },
-        },
-        responses: {
-            200: {description: "Joined", content: {"application/json": {schema: JoinResultSchema}}},
-            400: {description: "Missing player name", content: {"application/json": {schema: ErrorSchema}}},
-            409: {description: "Game has already started", content: {"application/json": {schema: ErrorSchema}}},
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
-        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
-
-        if (!player) return c.json({error: "player is required"}, 400);
-
-        const stub = c.env.GAME_DO.getByName(id);
-        const result = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null));
-        if (result.isErr()) {
-            // join() only ever rejects with the "already started" case
-            // (never a "forbidden: ..." one), so this is always a 409 —
-            // unlike the participant-gated actions below, there's no
-            // host/participant check to fail here.
-            return c.json({error: result.error}, 409);
-        }
-        return c.json(result.value, 200);
-    },
-);
-
-guessRoutes.openapi(
-    createRoute({
-        method: "post",
-        path: "/games/{id}/guess",
-        tags: ["Guess the Prompt"],
-        summary: "Submit a guess for a round",
-        description:
-            "Requires having joined via POST /games/{id}/join first — see that endpoint for why. `index` isn't " +
-            "bounds-checked against this game's actual round count here (that count is per-game, see GET " +
-            "/games/{id}'s rounds array) — an out-of-range index just 409s the same as any other round that isn't " +
-            "currently active.",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {
-                content: {
-                    "application/json": {
-                        schema: z.object({
-                            index: z.number().int().min(0),
-                            participantId: z.string(),
-                            token: z.string().optional(),
-                            guess: z.string(),
-                        }),
-                    },
-                },
-            },
-        },
-        responses: {
-            200: {description: "Guess result", content: {"application/json": {schema: GuessResultSchema}}},
-            400: {description: "Missing/invalid fields", content: {"application/json": {schema: ErrorSchema}}},
-            403: {
-                description: "Didn't join this game before it started",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-            409: {
-                description: "Round isn't the currently active one, or you already answered it correctly",
-                content: {"application/json": {schema: ErrorSchema}},
-            },
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const {index, participantId, token, guess: rawGuess} = c.req.valid("json");
-        const user = await currentUser(c);
-        const guess = rawGuess.trim();
-
-        if (!guess) return c.json({error: "guess is required"}, 400);
-
-        const stub = c.env.GAME_DO.getByName(id);
-        const result = fromRpcResult(await stub.submitGuess(index, participantId, token ?? null, guess, user?.id ?? null));
-        if (result.isErr()) {
-            const {status, body} = hostActionError(result.error);
-            return c.json(body, status);
-        }
-        return c.json(result.value, 200);
-    },
-);
-
-guessRoutes.openapi(
-    createRoute({
-        method: "post",
-        path: "/games/{id}/reveal",
-        tags: ["Guess the Prompt"],
-        summary: "Reveal a round's prompt without guessing",
-        description:
-            "Requires having joined via POST /games/{id}/join first — see that endpoint for why. `index` isn't " +
-            "bounds-checked against this game's actual round count here — see POST /games/{id}/guess's note on " +
-            "the same thing.",
-        request: {
-            params: z.object({id: z.string()}),
-            body: {
-                content: {
-                    "application/json": {
-                        schema: z.object({
-                            index: z.number().int().min(0),
-                            participantId: z.string(),
-                            token: z.string().optional(),
-                        }),
-                    },
-                },
-            },
-        },
-        responses: {
-            200: {
-                description: "Revealed prompt",
-                content: {"application/json": {schema: z.object({prompt: z.string()})}}
-            },
-            403: {
-                description: "Didn't join this game before it started",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-            409: {
-                description: "No such round, or it isn't visible yet (not the active round or a past one)",
-                content: {"application/json": {schema: ErrorSchema}}
-            },
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const {index, participantId, token} = c.req.valid("json");
-        const user = await currentUser(c);
-
-        const stub = c.env.GAME_DO.getByName(id);
-        const result = fromRpcResult(await stub.revealRound(index, participantId, token ?? null, user?.id ?? null));
-        if (result.isErr()) {
-            const {status, body} = hostActionError(result.error);
-            return c.json(body, status);
-        }
-        if (!result.value) return c.json({error: "round not visible yet"}, 409);
-        return c.json({prompt: result.value}, 200);
     },
 );
 
