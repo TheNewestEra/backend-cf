@@ -47,8 +47,8 @@ export const sendFriendRequest = (db: Db, requesterId: string, recipientUsername
                     .where(and(eq(friendships.userId, requesterId), eq(friendships.friendId, recipient.id)))
                     .get()
             )
-                .andThen((friend) => requireFound(friend, "You're already friends."))
-                .map(_ => recipient)
+                .andThen((friend) => friend ? err("You're already friends.") : ok())
+                .map(() => recipient)
         )
         .andThen((recipient) =>
             query(
