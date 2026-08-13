@@ -203,13 +203,13 @@ export const addGroupMember = (db: Db, ownerId: string, groupId: string, friendI
     requireOwnedGroup(db, ownerId, groupId)
         .andThen(_ => query(
             db
-                .select({userId: friendships.userId})
+                .select({friendId: friendships.friendId})
                 .from(friendships)
                 .where(and(eq(friendships.userId, ownerId), eq(friendships.friendId, friendId)))
                 .get()
         ))
         .andThen((friend) => requireFound(friend, "That's not one of your friends."))
-        .map(friend => friend.userId)
+        .map(friend => friend.friendId)
         .andThen((verifiedFriendId) =>
             query(
                 db
