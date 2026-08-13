@@ -15,12 +15,14 @@ export const PuzzleStatusSchema = z
     .nativeEnum(GameSessionStatus)
     .openapi("PuzzleStatus");
 
-/** A joined player's public roster entry — just enough to render an avatar
- * list in the lobby/play page. No id/token here; those stay private to the
- * participant who owns them (see JoinResultSchema). Mirrors Guess the
- * Prompt's own participant roster entry. */
+/** A joined player's public roster entry — enough to render an avatar list
+ * in the lobby/play page and let a client match its own `participantId`
+ * (from `JoinResultSchema`) against a roster entry. No `token` here; that
+ * stays private to the participant who owns it (see JoinResultSchema); `id`
+ * isn't a secret, so it's fine here. Mirrors Guess the Prompt's own
+ * participant roster entry. */
 export const ParticipantPublicSchema = z
-    .object({name: z.string(), color: z.string()})
+    .object({id: z.string(), name: z.string(), color: z.string()})
     .openapi("Participant");
 
 /** A tile currently selected/highlighted by some participant — persisted

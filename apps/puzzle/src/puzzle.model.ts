@@ -59,9 +59,9 @@ export type PuzzleWsAction = (typeof PuzzleWsAction)[keyof typeof PuzzleWsAction
 type PuzzleRow = typeof puzzle.$inferSelect;
 type ParticipantRow = typeof participants.$inferSelect;
 
-/** Narrower than `ParticipantRow` — just the two columns `readPublicState()`'s
+/** Narrower than `ParticipantRow` — just the columns `readPublicState()`'s
  * roster query actually selects. */
-type ParticipantPublic = Pick<ParticipantRow, "name" | "color">;
+type ParticipantPublic = Pick<ParticipantRow, "id" | "name" | "color">;
 
 /** Shape of `readPublicState()`'s "who has what selected" query — a
  * `participants` row filtered to `selectedCell IS NOT NULL` and reshaped
@@ -866,7 +866,7 @@ export class PuzzleDO extends DurableObject<Env> {
         // resetForRegenerate()), so lobbyRemainingMs() already reads null outside
         // the lobby window.
         const participantRows: ParticipantPublic[] = this.db
-            .select({name: participants.name, color: participants.color})
+            .select({id: participants.id, name: participants.name, color: participants.color})
             .from(participants)
             .orderBy(asc(participants.joinedAt))
             .all();
@@ -904,7 +904,7 @@ export class PuzzleDO extends DurableObject<Env> {
             score: row.score,
             solvedBy: row.solvedBy,
             connectedPlayers: this.ctx.getWebSockets().length,
-            participants: participantRows.map((p) => ({name: p.name, color: p.color})),
+            participants: participantRows.map((p) => ({id: p.id, name: p.name, color: p.color})),
             selections: selections.map((s) => ({
                 cell: s.cell,
                 participantId: s.participantId,
