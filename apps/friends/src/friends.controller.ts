@@ -120,12 +120,32 @@ friendsRoutes.openapi(
         const {username} = c.req.valid("json");
         if (!username.trim()) return c.json({error: "username is required"}, 400);
 
-        // `await` on a `ResultAsync` resolves to the plain `Result` it
-        // wraps (see db/result.ts's `query()`) — same shape this handler
-        // already expected before sendFriendRequest() started composing
-        // through neverthrow internally, so nothing else here changes.
         const result = await sendFriendRequest(createDb(c.env.DB), user.id, username.trim());
         if (result.isErr()) return c.json({error: result.error}, 400);
+
+        if (result.value.kind === "requested") {
+            const {requestId, recipientId} = result.value;
+            await c.env.NOTIFICATIONS.push(recipientId, {
+                id: requestId,
+                type: "friend_request",
+                title: "New friend request",
+                body: `${user.username} wants to be friends.`,
+                data: {requestId, username: user.username, color: user.color},
+            }).catch((err) => {
+                console.error("failed to push friend request notification", recipientId, err);
+            });
+        } else {
+            const {otherUserId} = result.value;
+            await c.env.NOTIFICATIONS.push(otherUserId, {
+                type: "message",
+                title: "Friend request accepted",
+                body: `${user.username} accepted your friend request.`,
+                data: {friendId: user.id, username: user.username, color: user.color},
+            }).catch((err) => {
+                console.error("failed to push friend-request-accepted notification", otherUserId, err);
+            });
+        }
+
         return c.json({ok: true as const}, 200);
     },
 );
@@ -143,7 +163,25 @@ friendsRoutes.openapi(
         const user = await currentUser(c);
         if (!user) return c.json(notLoggedIn, 401);
         const {id} = c.req.valid("param");
-        const {status, body} = actionResponse(await acceptFriendRequest(createDb(c.env.DB), id, user.id));
+
+        const result = await acceptFriendRequest(createDb(c.env.DB), id, user.id);
+        if (result.isOk()) {
+            const {requesterId} = result.value;
+            // Live notification for the original requester — best-effort,
+            // see apps/notifications. A generic, non-interactive "message"
+            // (there's nothing left to accept/decline), unlike the
+            // "friend_request" notification that got them here.
+            await c.env.NOTIFICATIONS.push(requesterId, {
+                type: "message",
+                title: "Friend request accepted",
+                body: `${user.username} accepted your friend request.`,
+                data: {friendId: user.id, username: user.username, color: user.color},
+            }).catch((err) => {
+                console.error("failed to push friend-request-accepted notification", requesterId, err);
+            });
+        }
+
+        const {status, body} = actionResponse(result.map(() => undefined));
         return c.json(body, status);
     },
 );
@@ -434,7 +472,11 @@ friendsRoutes.openapi(
         // Reuses the invite's own id as the pushed notification's id.
         await Promise.all(
             invitesResult.value.map((invite: InviteSummary, i: number) =>
-                c.env.NOTIFICATIONS.push(recipientIds[i]!, {id: invite.id, type: "invite", data: invite}).catch((err) => {
+                c.env.NOTIFICATIONS.push(recipientIds[i]!, {
+                    id: invite.id,
+                    type: "invite",
+                    data: invite
+                }).catch((err) => {
                     console.error("failed to push invite notification", recipientIds[i], err);
                 }),
             ),

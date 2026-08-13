@@ -35,8 +35,15 @@ const findUserByUsername = (db: Db, username: string): ResultAsync<{
 
 // --- friend requests -------------------------------------------------------
 
+export type SendFriendRequestResult =
+    | { kind: "requested"; requestId: string; recipientId: string }
+    | { kind: "auto_accepted"; otherUserId: string };
 
-export const sendFriendRequest = (db: Db, requesterId: string, recipientUsername: string): ResultAsync<void, string> =>
+export const sendFriendRequest = (
+    db: Db,
+    requesterId: string,
+    recipientUsername: string,
+): ResultAsync<SendFriendRequestResult, string> =>
     findUserByUsername(db, recipientUsername)
         .andThen((req) => (req.id !== requesterId ? ok(req) : err("forbidden")))
         .andThen((recipient) =>
@@ -65,26 +72,37 @@ export const sendFriendRequest = (db: Db, requesterId: string, recipientUsername
                     .get()
             ).map((reverseRequest) => ({recipient, reverseRequest}))
         )
-        .andThen(({recipient, reverseRequest}) =>
-            reverseRequest
-                ? acceptFriendRequest(db, reverseRequest.id, requesterId)
-                : query(
-                    db
-                        .insert(friendRequests)
-                        .values({
-                            id: crypto.randomUUID(),
-                            requesterId,
-                            recipientId: recipient.id,
-                            status: "pending",
-                            createdAt: Date.now(),
-                            respondedAt: null,
-                        })
-                        .onConflictDoUpdate({
-                            target: [friendRequests.requesterId, friendRequests.recipientId],
-                            set: {status: "pending", createdAt: Date.now(), respondedAt: null},
-                        })
-                ).map(() => undefined)
-        );
+        .andThen(({recipient, reverseRequest}): ResultAsync<SendFriendRequestResult, string> => {
+            if (reverseRequest) {
+                return acceptFriendRequest(db, reverseRequest.id, requesterId).map(
+                    ({requesterId: otherUserId}): SendFriendRequestResult => ({kind: "auto_accepted", otherUserId}),
+                );
+            }
+
+            return query(
+                db
+                    .insert(friendRequests)
+                    .values({
+                        id: crypto.randomUUID(),
+                        requesterId,
+                        recipientId: recipient.id,
+                        status: "pending",
+                        createdAt: Date.now(),
+                        respondedAt: null,
+                    })
+                    .onConflictDoUpdate({
+                        target: [friendRequests.requesterId, friendRequests.recipientId],
+                        set: {status: "pending", createdAt: Date.now(), respondedAt: null},
+                    })
+                    .returning({id: friendRequests.id})
+            )
+                .andThen((rows) => requireFound(rows[0], "Failed to create the friend request."))
+                .map((row): SendFriendRequestResult => ({
+                    kind: "requested",
+                    requestId: row.id,
+                    recipientId: recipient.id
+                }));
+        });
 
 const executeAcceptBatch = (db: Db, requestId: string, requesterId: string, recipientId: string) => {
     const now = Date.now();
@@ -106,7 +124,15 @@ const executeAcceptBatch = (db: Db, requestId: string, requesterId: string, reci
     );
 };
 
-export const acceptFriendRequest = (db: Db, requestId: string, actingUserId: string): ResultAsync<void, string> =>
+/** Returns the original requester's id so the caller (friends.controller.ts,
+ * or sendFriendRequest's own auto-accept branch above) can push them a
+ * live "accepted" notification — see NOTIFICATIONS.push() at each call
+ * site. */
+export const acceptFriendRequest = (
+    db: Db,
+    requestId: string,
+    actingUserId: string,
+): ResultAsync<{ requesterId: string }, string> =>
     query(
         db
             .select({
@@ -121,8 +147,11 @@ export const acceptFriendRequest = (db: Db, requestId: string, actingUserId: str
         .andThen((req) => requireFound(req, "Request not found."))
         .andThen((req) => req.recipientId === actingUserId ? ok(req) : err("forbidden"))
         .andThen((req) => req.status === "pending" ? ok(req) : err("Request already handled."))
-        .andThen((req) => executeAcceptBatch(db, requestId, req.requesterId, req.recipientId))
-        .map(_ => undefined);
+        .andThen((req) =>
+            executeAcceptBatch(db, requestId, req.requesterId, req.recipientId).map(() => ({
+                requesterId: req.requesterId,
+            })),
+        );
 
 export const declineFriendRequest = (db: Db, requestId: string, actingUserId: string): ResultAsync<void, string> =>
     query(
