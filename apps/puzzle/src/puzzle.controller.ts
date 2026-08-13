@@ -1,13 +1,14 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
-import {maxThemeLength} from "@game-worker/shared/game-session";
+import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
+import {currentUser} from "./auth.middleware";
 import {HostBodySchema, puzzleImageKeyFor, puzzleTimeLimitMs, resolveGridSize} from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
-import {PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
+import {JoinResultSchema, PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
 
 export const puzzleRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -17,7 +18,15 @@ puzzleRoutes.openapi(
         path: "/puzzles",
         tags: ["Piece Puzzle"],
         summary: "Create a new puzzle",
-        description: "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. The returned hostToken authorizes regenerate/start for this puzzle (replaying it later gets its own, separate host token). `gridSize`, if given, is clamped to Flagship's configured [min, max] rather than rejected out of range.",
+        description:
+            "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. " +
+            "The returned hostToken authorizes regenerate/start for this puzzle (replaying it later gets its own, " +
+            "separate host token). `gridSize`, if given, is clamped to Flagship's configured [min, max] rather " +
+            "than rejected out of range. The host is auto-joined as this puzzle's first participant — a logged-in " +
+            "caller joins under their account name/color; an anonymous caller must supply `player` (and, " +
+            "optionally, `color`), same as POST /puzzles/{id}/ws's `join` message. `participantId`/`token`/`color` " +
+            "come back already resolved, so the host's client can move/select tiles immediately without sending " +
+            "its own `join` message first.",
         request: {
             body: {
                 content: {
@@ -25,6 +34,15 @@ puzzleRoutes.openapi(
                         schema: z.object({
                             theme: z.string().optional(),
                             gridSize: z.number().int().optional(),
+                            player: z.string().optional().openapi({
+                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
+                            }),
+                            color: z.string().optional().openapi({
+                                description:
+                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                    "in — an account's color is always authoritative.",
+                            }),
                         }),
                     },
                 },
@@ -33,13 +51,26 @@ puzzleRoutes.openapi(
         },
         responses: {
             202: {
-                description: "Generation queued",
-                content: {"application/json": {schema: z.object({puzzleId: z.string(), hostToken: z.string()})}},
+                description: "Generation queued; the host is already joined",
+                content: {
+                    "application/json": {
+                        schema: JoinResultSchema.extend({puzzleId: z.string(), hostToken: z.string()}),
+                    },
+                },
+            },
+            400: {
+                description: "Missing player name (required for an anonymous host)",
+                content: {"application/json": {schema: ErrorSchema}},
             },
         },
     }),
     async (c) => {
-        const body = c.req.valid("json");
+        const body = c.req.valid("json") ?? {};
+        const user = await currentUser(c);
+        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
+        if (!player) return c.json({error: "player is required"}, 400);
+
         const maxTheme = await maxThemeLength(c.env.FLAGS);
         const theme = body.theme?.trim() ? body.theme.trim().slice(0, maxTheme) : null;
         const gridSize = await resolveGridSize(c.env, body.gridSize);
@@ -48,10 +79,14 @@ puzzleRoutes.openapi(
         const puzzleId = crypto.randomUUID();
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
         const hostToken = await stub.init(puzzleId, theme, gridSize, timeLimitMs);
+        // The puzzle is freshly `queued` (a JOINABLE_STATUS), so this can't
+        // actually reject — see puzzle.model.ts's `join()`.
+        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", theme);
         await c.env.PUZZLE_QUEUE.send({puzzleId, theme} satisfies PuzzleQueueMessage);
 
-        return c.json({puzzleId, hostToken}, 202);
+        return c.json({puzzleId, hostToken, ...joined.value}, 202);
     },
 );
 
