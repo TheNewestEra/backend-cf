@@ -1,12 +1,13 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
-import {maxThemeLength} from "@game-worker/shared/game-session";
+import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
+import {currentUser} from "./auth.middleware";
 import {HostBodySchema, imageKeyFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
-import {GamePublicSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
+import {GamePublicSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
 
 export const guessRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -20,12 +21,27 @@ guessRoutes.openapi(
             "Enqueues generation (each round is an AI prompt + image — see GET /games/{id}'s rounds array for how " +
             "many this particular game has); poll GET /games/{id} or connect to the WebSocket for progress. The " +
             "returned hostToken authorizes starting the lobby early for this game (replaying it later gets its " +
-            "own, separate host token).",
+            "own, separate host token). The host is auto-joined as this game's first participant — a logged-in " +
+            "caller joins under their account name/color; an anonymous caller must supply `player` (and, " +
+            "optionally, `color`), same as POST /games/{id}/ws's `join` message. `participantId`/`token`/`color` " +
+            "come back already resolved, so the host's client can guess/reveal immediately without sending its " +
+            "own `join` message first.",
         request: {
             body: {
                 content: {
                     "application/json": {
-                        schema: z.object({theme: z.string().optional()}),
+                        schema: z.object({
+                            theme: z.string().optional(),
+                            player: z.string().optional().openapi({
+                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
+                            }),
+                            color: z.string().optional().openapi({
+                                description:
+                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                    "in — an account's color is always authoritative.",
+                            }),
+                        }),
                     },
                 },
                 required: false,
@@ -33,13 +49,26 @@ guessRoutes.openapi(
         },
         responses: {
             202: {
-                description: "Generation queued",
-                content: {"application/json": {schema: z.object({gameId: z.string(), hostToken: z.string()})}},
+                description: "Generation queued; the host is already joined",
+                content: {
+                    "application/json": {
+                        schema: JoinResultSchema.extend({gameId: z.string(), hostToken: z.string()}),
+                    },
+                },
+            },
+            400: {
+                description: "Missing player name (required for an anonymous host)",
+                content: {"application/json": {schema: ErrorSchema}},
             },
         },
     }),
     async (c) => {
         const body = c.req.valid("json") ?? {};
+        const user = await currentUser(c);
+        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
+        if (!player) return c.json({error: "player is required"}, 400);
+
         const maxTheme = await maxThemeLength(c.env.FLAGS);
         const theme = body.theme?.trim() ? body.theme.trim().slice(0, maxTheme) : null;
 
@@ -51,10 +80,14 @@ guessRoutes.openapi(
         // their own to derive it from. See GameRow's `origin` field.
         const origin = new URL(c.req.url).origin;
         const hostToken = await stub.init(gameId, theme, origin);
+        // The game is freshly `queued` (a JOINABLE_STATUS), so this can't
+        // actually reject — see guess.model.ts's `join()`.
+        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(gameId, "guess", theme);
         await c.env.GAME_QUEUE.send({gameId, theme} satisfies GuessQueueMessage);
 
-        return c.json({gameId, hostToken}, 202);
+        return c.json({gameId, hostToken, ...joined.value}, 202);
     },
 );
 
@@ -129,27 +162,68 @@ guessRoutes.openapi(
             "Creates an independent game instance (its own id, lobby, host token, rounds, and guesses) seeded from " +
             "this one's theme and re-runs generation — it never touches the source game, so anyone can replay a " +
             "game they're spectating/browsing and invite their own friends to the new instance without disrupting " +
-            "whoever's still playing the original.",
-        request: {params: z.object({id: z.string()})},
+            "whoever's still playing the original. The host is auto-joined as this new game's first participant, " +
+            "same as POST /games — a logged-in caller joins under their account name/color; an anonymous caller " +
+            "must supply `player` (and, optionally, `color`). `participantId`/`token`/`color` come back already " +
+            "resolved.",
+        request: {
+            params: z.object({id: z.string()}),
+            body: {
+                content: {
+                    "application/json": {
+                        schema: z.object({
+                            player: z.string().optional().openapi({
+                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
+                            }),
+                            color: z.string().optional().openapi({
+                                description:
+                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                    "in — an account's color is always authoritative.",
+                            }),
+                        }),
+                    },
+                },
+                required: false,
+            },
+        },
         responses: {
             202: {
-                description: "New game's generation queued",
-                content: {"application/json": {schema: z.object({gameId: z.string(), hostToken: z.string()})}},
+                description: "New game's generation queued; the host is already joined",
+                content: {
+                    "application/json": {
+                        schema: JoinResultSchema.extend({gameId: z.string(), hostToken: z.string()}),
+                    },
+                },
+            },
+            400: {
+                description: "Missing player name (required for an anonymous host)",
+                content: {"application/json": {schema: ErrorSchema}},
             },
         },
     }),
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
+        const body = c.req.valid("json") ?? {};
+        const user = await currentUser(c);
+        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
+        if (!player) return c.json({error: "player is required"}, 400);
+
         const source = await c.env.GAME_DO.getByName(sourceId).getState();
 
         const gameId = crypto.randomUUID();
         const stub = c.env.GAME_DO.getByName(gameId);
         const origin = new URL(c.req.url).origin;
         const hostToken = await stub.init(gameId, source.theme, origin);
+        // The game is freshly `queued` (a JOINABLE_STATUS), so this can't
+        // actually reject — see guess.model.ts's `join()`.
+        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(gameId, "guess", source.theme);
         await c.env.GAME_QUEUE.send({gameId, theme: source.theme} satisfies GuessQueueMessage);
 
-        return c.json({gameId, hostToken}, 202);
+        return c.json({gameId, hostToken, ...joined.value}, 202);
     },
 );
 

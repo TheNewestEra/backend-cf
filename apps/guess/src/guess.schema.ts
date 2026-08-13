@@ -343,17 +343,24 @@ export type GameWsClientEventType = (typeof GameWsClientEventType)[keyof typeof 
  * regardless of login state — identity (`userId`/`color`) is resolved once
  * at WebSocket-upgrade time instead (see guess.model.ts's `fetch()` and
  * `ConnectionIdentity`), same as Piece Puzzle's own `PuzzleWsJoinRequestSchema`.
- * A logged-in caller's `color` is always their account's, regardless of
- * what's sent here. Reply comes back as a `GameWsJoinResultMessage` (success)
- * or `GameWsErrorMessage` (already started), addressed only to this socket.
- * `player` isn't length-capped here — Flagship's "max-player-length" flag is
- * async, so it can't back a static schema bound the way this used to;
- * over-length names are truncated instead, at the point `player` actually
- * gets used (see guess.model.ts's `webSocketMessage()`). */
+ * `color` is guest-only: lets an anonymous caller bring whatever color its
+ * own UI already shows for "you" (e.g. a color picked client-side before
+ * ever joining a game) instead of always getting a server-generated one —
+ * ignored for logged-in callers, whose account color is always
+ * authoritative (see guess.model.ts's `join()`). Must look like
+ * `generateColor()`'s own output (`#`+6 hex digits) or it's discarded in
+ * favor of a generated one, same as omitting it entirely. Reply comes back
+ * as a `GameWsJoinResultMessage` (success) or `GameWsErrorMessage` (already
+ * started), addressed only to this socket. `player` isn't length-capped
+ * here — Flagship's "max-player-length" flag is async, so it can't back a
+ * static schema bound the way this used to; over-length names are
+ * truncated instead, at the point `player` actually gets used (see
+ * guess.model.ts's `webSocketMessage()`). */
 export const GameWsJoinRequestSchema = z
     .object({
         type: z.literal(GameWsClientEventType.Join),
         player: z.string().optional(),
+        color: z.string().optional(),
     })
     .openapi("GameWsJoinRequest");
 

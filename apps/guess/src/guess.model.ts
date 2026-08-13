@@ -3,7 +3,7 @@ import type {z} from "@hono/zod-openapi";
 import {and, asc, desc, eq, sql} from "drizzle-orm";
 import {migrate as runMigrations} from "drizzle-orm/durable-sqlite/migrator";
 import {err, ok, type Result} from "neverthrow";
-import {generateColor} from "@game-worker/shared/color";
+import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
@@ -266,15 +266,20 @@ class GameDO extends DurableObject<Env> {
      * arrivals can still spectate over the WebSocket/`getState()` but can't
      * play. Logged-in users are upserted by `userId` (idempotent across
      * reconnects/tab refreshes, no token needed since the session re-proves
-     * identity on every request) and keep their account color; anonymous
-     * guests get a fresh bearer token they must resend with every
+     * identity on every request) and keep their account color (never
+     * `requestedColor` — an account's color is authoritative everywhere else
+     * in the app, so letting it be overridden per-game would be surprising);
+     * anonymous guests get a fresh bearer token they must resend with every
      * guess/reveal (since a free-text name alone isn't a real identity) and
-     * a freshly generated color. Either way, the color is returned so the
-     * caller's own client knows what to render before the next broadcast. */
+     * either their own `requestedColor` (if it's a well-formed hex color —
+     * see `isValidHexColor`) or, absent that, a freshly generated one.
+     * Either way, the color is returned so the caller's own client knows
+     * what to render before the next broadcast. Mirrors `PuzzleDO.join()`. */
     async join(
         userId: string | null,
         playerName: string,
         userColor: string | null,
+        requestedColor: string | null,
     ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>> {
         const validated = this.requireGameRow().andThen((row) =>
             JOINABLE_STATUSES.includes(row.status)
@@ -283,7 +288,11 @@ class GameDO extends DurableObject<Env> {
         );
         if (validated.isErr()) return {ok: false, error: validated.error};
 
-        const color = userColor ?? generateColor();
+        const color = userId
+            ? (userColor ?? generateColor())
+            : requestedColor && isValidHexColor(requestedColor)
+                ? requestedColor
+                : generateColor();
 
         if (userId) {
             this.db
@@ -588,7 +597,9 @@ class GameDO extends DurableObject<Env> {
                 // join() only ever rejects with the "already started" case —
                 // see guess.controller.ts's old POST .../join handler, which
                 // this mirrors.
-                const outcome = fromRpcResult(await this.join(identity.userId, player, identity.color));
+                const outcome = fromRpcResult(
+                    await this.join(identity.userId, player, identity.color, data.color ?? null),
+                );
                 this.reply(ws, GameWsAction.Join, outcome, (joined) => ({type: GameWsEventType.JoinResult, ...joined}));
                 return;
             }
