@@ -14,6 +14,7 @@
 // corrupts both. Depending only on these dependency-free interfaces avoids
 // that entirely — the real RPC stub still satisfies them structurally.
 import type {GameKind} from "./game";
+import type {RpcResult} from "./rpc-result";
 
 export interface AccountRecord {
     id: string;
@@ -55,9 +56,22 @@ export interface LeaderboardRpc {
 /** RPC surface exposed by `apps/puzzle`'s `PuzzleService`. */
 export interface PuzzleRpc {
     getLobbyStatus(puzzleId: string): Promise<{ status: string }>;
+
+    joinAsUser(
+        puzzleId: string,
+        userId: string,
+        username: string,
+        color: string,
+    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>>;
 }
 
 /** RPC surface exposed by `apps/guess`'s `GuessService`. */
 export interface GuessRpc {
     getStatus(gameId: string): Promise<{ status: string }>;
+    joinAsUser(
+        gameId: string,
+        userId: string,
+        username: string,
+        color: string,
+    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>>;
 }

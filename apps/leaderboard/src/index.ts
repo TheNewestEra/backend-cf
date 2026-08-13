@@ -23,10 +23,6 @@ app.doc("/openapi.json", {
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
 
-/** RPC surface for the `guess` and `puzzle` Workers (bound via a `services`
- * entry with `entrypoint: "LeaderboardService"`) — called directly from
- * their Durable Objects (GameDO.submitGuess, PuzzleDO.swapTiles) right
- * after computing a score. */
 export class LeaderboardService extends WorkerEntrypoint<Env> {
     recordScore(input: RecordScoreInput): Promise<void> {
         return recordScore(createDb(this.env.DB), input);

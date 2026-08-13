@@ -43,6 +43,15 @@ export class GuessService extends WorkerEntrypoint<Env> {
         const state = await this.env.GAME_DO.getByName(gameId).getState();
         return {status: state.status};
     }
+
+    async joinAsUser(
+        gameId: string,
+        userId: string,
+        username: string,
+        color: string,
+    ): ReturnType<GameDO["join"]> {
+        return this.env.GAME_DO.getByName(gameId).join(userId, username, color, null);
+    }
 }
 
 export default {

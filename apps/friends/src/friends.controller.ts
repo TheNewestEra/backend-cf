@@ -461,6 +461,13 @@ friendsRoutes.openapi(
         path: "/api/invites/{id}/accept",
         tags: ["Invites"],
         summary: "Accept an invite",
+        description:
+            "Accepting auto-joins the session under the recipient's account — only a logged-in caller can ever " +
+            "reach this endpoint, so unlike the games' own POST .../join-style flows there's no anonymous " +
+            "name/color/token to supply here, just the account's own username/color. The join itself is best-" +
+            "effort: if the session started in the gap between the invite being sent and accepted, the invite " +
+            "is still marked accepted and `playUrl` is still returned — the recipient just lands there able to " +
+            "spectate, not play, same as visiting an already-started session's page directly.",
         request: {params: z.object({id: z.string()})},
         responses: {
             200: {
@@ -480,7 +487,13 @@ friendsRoutes.openapi(
         const result = await respondToInvite(createDb(c.env.DB), id, user.id, true);
         if (result.isErr()) return c.json({error: result.error}, result.error === "forbidden" ? 403 : 400);
 
-        const playUrl = playUrlFor(result.value.kind, result.value.sessionId);
+        const {kind, sessionId} = result.value;
+        const service = kind === "puzzle" ? c.env.PUZZLE : c.env.GUESS;
+        // We are fine with this failing... the user will be able to join via button or be spectator.
+        await service.joinAsUser(sessionId, user.id, user.username, user.color).catch((err) => {
+            console.error("failed to auto-join accepted invite", id, err);
+        });
+        const playUrl = playUrlFor(kind, sessionId);
         return c.json({ok: true as const, playUrl}, 200);
     },
 );

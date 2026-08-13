@@ -43,6 +43,21 @@ export class PuzzleService extends WorkerEntrypoint<Env> {
         const state = await this.env.PUZZLE_DO.getByName(puzzleId).getState();
         return {status: state.status};
     }
+
+    /** Auto-joins a logged-in user to a puzzle's lobby — called by
+     * `friends` right after an invite is accepted, so the recipient lands
+     * already joined instead of having to send their own `join` WS message.
+     * Only reachable for an already-authenticated caller (accepting an
+     * invite requires being logged in), so there's no `requestedColor`/
+     * token to thread through here — see `PuzzleDO.join()`. */
+    async joinAsUser(
+        puzzleId: string,
+        userId: string,
+        username: string,
+        color: string,
+    ): ReturnType<PuzzleDO["join"]> {
+        return this.env.PUZZLE_DO.getByName(puzzleId).join(userId, username, color, null);
+    }
 }
 
 export default {
