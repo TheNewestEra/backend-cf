@@ -1,75 +1,85 @@
 # Drizzle in apps/puzzle
 
-`schema.ts` describes the two tables `PuzzleDO` (a Durable Object) keeps in
-its own built-in SQLite storage: `puzzle` (single-row — exactly one puzzle
-per DO instance) and `participants`. This is a fundamentally different
-story from `apps/accounts`/`apps/browse`/`apps/friends`/`apps/leaderboard`,
-all of which are D1-backed — read on before assuming the same workflow
-applies here.
+`schema.ts` is the source of truth for the two tables `PuzzleDO` (this
+Worker's only Durable Object class) creates in its own storage: `puzzle`
+(single-row — exactly one puzzle per DO instance) and `participants`.
 
-## There is no shared `migrations/` folder, and no `wrangler d1 migrations apply`
+## This is NOT the D1 story
 
-Each of those four apps' tables live in a physical D1 database, migrated
-through one linear, hand-numbered sequence of SQL files that `wrangler d1
-migrations apply` runs and tracks in a `d1_migrations` bookkeeping table.
+`apps/accounts`/`apps/browse`/`apps/friends`/`apps/leaderboard` all share one
+physical D1 database, migrated through a linear, hand-numbered sequence in
+the repo-root `migrations/` folder via `wrangler d1 migrations apply` (see
+each of those apps' `src/db/README.md`). `PuzzleDO` has no D1 binding at all
+(see wrangler.jsonc's comment on that) — it's backed by its own Durable
+Object SQLite storage instead (`new_sqlite_classes: ["PuzzleDO"]`), and
+**every instance of `PuzzleDO` (one per puzzle) has its own private
+database.** There is no shared database to run a migration against, and no
+`wrangler d1 migrations apply` equivalent that reaches into a specific DO
+instance's storage — that CLI command doesn't exist.
 
-`PuzzleDO` doesn't use D1 at all — see `../puzzle.model.ts`'s constructor
-and `wrangler.jsonc`'s `new_sqlite_classes` entry. Every Durable Object
-instance owns its *own*, separate SQLite database (`ctx.storage.sql`), with
-no shared physical database, no `d1_migrations` ledger, and — critically —
-**no external "apply my migrations" command that could reach every existing
-instance**. A `PuzzleDO` instance that was created a year ago and hasn't
-been touched since won't have its schema updated until the next time
-something actually calls into it.
+## The actual bootstrap mechanism: `drizzle-orm/durable-sqlite/migrator`
 
-## The actual bootstrap mechanism: `migrate()`
+Each `PuzzleDO` instance's constructor sets up `this.db` (see `./client.ts`)
+and then calls `migrate()` (see `../puzzle.model.ts`) inside
+`ctx.blockConcurrencyWhile()`, which runs
+`drizzle-orm/durable-sqlite/migrator`'s `migrate(this.db, migrations)` — the
+real Drizzle migrator, not hand-rolled SQL. This runs on **every**
+constructor call, for every instance, for the lifetime of the class; the
+migrator tracks what it's already applied in its own bookkeeping table
+(`__drizzle_migrations`, inside that same instance's storage) and no-ops
+once everything's caught up. Mirrors `apps/guess`'s `GameDO`, which moved to
+this mechanism first — `puzzle` was still on an older, hand-rolled bootstrap
+until this change (see git history for that version of this README).
 
-Instead, `PuzzleDO`'s constructor runs `this.migrate()` (inside
-`ctx.blockConcurrencyWhile`, before anything else touches storage) on
-*every* instantiation. `migrate()` is hand-written, idempotent raw SQL:
+A Durable Object can't read files off disk at runtime, so the generated SQL
+under `./drizzle` (produced by `drizzle-kit generate`, same as every other
+app) has to be wired in as real JS modules instead of read as files:
+`./migrations.ts` is a **hand-written** index that imports each generated
+`.sql` file (resolved to raw text via wrangler.jsonc's `rules` entry —
+`type: "Text"`, `globs: ["**/*.sql"]`; see `../sql-module.d.ts` for the type
+side of that) and `./drizzle/meta/_journal.json`, and default-exports the
+`{journal, migrations}` shape the migrator expects. `drizzle-kit generate`
+does **not** produce `migrations.ts` itself — it's kept in sync by hand
+(see the workflow below).
 
-- `CREATE TABLE IF NOT EXISTS` for both tables — a no-op on an instance that
-  already has them, and creates them fresh on a brand-new instance.
-- For a column added after some instances already existed (`participants.color`,
-  `participants.selected_cell`), an `ALTER TABLE ... ADD COLUMN` wrapped in a
-  `try`/`catch` — SQLite has no `ADD COLUMN IF NOT EXISTS`, so a "duplicate
-  column" failure (meaning this instance already has it) is just swallowed.
+### Known trade-off: pre-existing instances
 
-This is why `migrate()` is deliberately **not** converted to Drizzle/`this.db`
-like every other storage call in `puzzle.model.ts` — there's no Drizzle-driven
-apply step it could plug into anyway, so it stays raw SQL against
-`ctx.storage.sql.exec()` directly.
+Migration `0000` is `drizzle-kit`'s plain generated `CREATE TABLE` output —
+deliberately **not** softened to `CREATE TABLE IF NOT EXISTS`. Any `PuzzleDO`
+instance that already existed before this change (bootstrapped by the old
+hand-rolled `migrate()`) will fail this migration — "table already
+exists" — the next time it's touched, since the migrator's bookkeeping
+table has no record of `0000` ever running against it. This was a
+deliberate, accepted choice (see `puzzle.model.ts`'s `migrate()` doc
+comment for the same note, and `apps/guess/src/db/README.md` for the
+identical trade-off `GameDO` accepted first), not an oversight — there's no
+baseline/backfill shim protecting already-provisioned instances.
 
-## What `schema.ts` is actually for, then
+### Known upstream quirk
 
-Purely descriptive — and kept in sync **by hand**, not generated from
-`migrate()` or vice versa:
+`drizzle-orm/durable-sqlite/migrator`'s own bookkeeping table ends up with
+`hash` always `""` and `id` always `NULL` —
+[drizzle-team/drizzle-orm#4928](https://github.com/drizzle-team/drizzle-orm/issues/4928),
+open upstream as of this writing. Traced through the migrator's own source:
+the apply/skip decision only ever compares `created_at` timestamps, never
+reads `hash`/`id` back, so this doesn't appear to affect correctness — just
+cosmetically broken bookkeeping columns.
 
-1. It gives `drizzle-orm/durable-sqlite`'s typed query builder (`./client.ts`,
-   threaded through `PuzzleDO` as `this.db`) table/column definitions to
-   build `.select()`/`.insert()`/`.update()`/`.delete()` chains against, the
-   same way `apps/browse`'s `schema.ts` does for `drizzle-orm/d1`.
-2. It gives `drizzle-kit generate` something to diff a local baseline
-   snapshot (`./drizzle`, this app's own folder) against — that baseline is
-   **never applied anywhere**; there's no D1/`wrangler d1 migrations apply`
-   involved for a Durable Object at all. It exists purely for tooling/CI
-   drift-check parity with the other four apps (a future drift-check compares
-   `schema.ts` against `migrate()`'s SQL, using this snapshot).
+## What `schema.ts` is for
+
+`puzzle.model.ts`'s `this.db.select()/.insert()/.update()/.delete()` chains
+(via `drizzle-orm/durable-sqlite`, see `./client.ts`) need `schema.ts`'s
+table definitions to type-check and to generate correct SQL. It's the same
+file `drizzle-kit generate` reads to produce `./drizzle`'s migrations, so
+it stays the single source of truth for both.
 
 ## Workflow for an actual future schema change
 
-Three manual edits — nothing here is applied automatically:
-
-1. Edit `../puzzle.model.ts`'s `migrate()` to add the new `CREATE TABLE`
-   column, or (for an existing table) a new idempotent
-   `ALTER TABLE ... ADD COLUMN` wrapped in `try`/`catch`, exactly like the
-   existing `color`/`selected_cell` precedent.
-2. Edit `schema.ts` to match what `migrate()` now produces.
-3. `cd apps/puzzle && npx drizzle-kit generate` to refresh the local
-   `./drizzle` baseline snapshot, so tooling (and the CI drift-check) can
-   see the change.
-
-There's no step 4 — no file gets copied anywhere, and nothing gets
-"applied": every live `PuzzleDO` instance picks up the new column itself,
-lazily, the next time something calls into it and its constructor's
-`migrate()` runs.
+1. Edit `schema.ts`.
+2. `cd apps/puzzle && npx drizzle-kit generate` — emits a new incremental
+   `.sql` file under `./drizzle` (e.g. `0001_add_something.sql`).
+3. Edit `./migrations.ts` by hand: add the new file's import and its
+   `mXXXX` entry (zero-padded to match the journal's `idx`), alongside the
+   existing `m0000`.
+4. Deploy as usual — the next time each `PuzzleDO` instance is touched, its
+   constructor's `migrate()` call picks up and applies the new migration.

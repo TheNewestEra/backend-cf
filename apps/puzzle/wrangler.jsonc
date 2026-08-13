@@ -6,6 +6,19 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  // Lets `./src/db/migrations.ts` import a generated `.sql` file as raw
+  // text at bundle time — required by `drizzle-orm/durable-sqlite/migrator`
+  // (see PuzzleDO's constructor), which needs each migration's SQL as an
+  // in-memory string rather than something read off disk at runtime (a
+  // Durable Object can't do that). Build-level config, not a per-environment
+  // one, so unlike `routes`/bindings below this isn't repeated under `env`.
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.sql"],
+      "fallthrough": true
+    }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1

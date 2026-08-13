@@ -1,15 +1,14 @@
-// Drizzle schema for `PuzzleDO`'s own SQLite storage (`ctx.storage.sql` —
-// see puzzle.model.ts's `migrate()`). Unlike the D1 apps' schema.ts, this
-// isn't the source of truth applied via `wrangler d1 migrations apply` —
-// there's no such mechanism for a Durable Object's own storage. Instead
-// this file is a hand-kept DESCRIPTION of what `migrate()`'s idempotent,
-// hand-rolled `CREATE TABLE`/`ALTER TABLE` bootstrap is expected to produce
-// — it exists purely so `drizzle-orm/durable-sqlite`'s typed query builder
-// (see ./client.ts) has table/column definitions to build queries against,
-// and so `drizzle-kit generate` has something to diff a local baseline
-// snapshot against for tooling/CI-drift-check purposes (see this
-// directory's README). Whenever `migrate()` changes, this file must be
-// updated BY HAND to match — nothing keeps the two in sync automatically.
+// Drizzle schema for `PuzzleDO`'s own Durable Object SQLite storage (see
+// wrangler.jsonc's `new_sqlite_classes: ["PuzzleDO"]`) — NOT a D1-backed
+// schema like accounts/browse/friends/leaderboard's. Each `PuzzleDO`
+// instance (one per puzzle, `env.PUZZLE_DO.getByName(puzzleId)`) owns its
+// own private SQLite database; there is no shared physical database and no
+// `wrangler d1 migrations apply` step anywhere in this story. This IS the
+// source of truth: `drizzle-kit generate` reads it to produce the SQL under
+// ../../drizzle, which `puzzle.model.ts`'s `migrate()` applies via
+// `drizzle-orm/durable-sqlite/migrator` on every instance's construction.
+// See this directory's README for the full story and the workflow for a
+// future schema change. Mirrors apps/guess's own schema.ts.
 
 import {integer, sqliteTable, text} from "drizzle-orm/sqlite-core";
 import type {GameSessionStatus} from "@game-worker/shared/game-session-status";
@@ -25,9 +24,7 @@ import type {GameSessionStatus} from "@game-worker/shared/game-session-status";
 // no re-derivation/duplication needed.
 
 /** Single-row table — exactly one puzzle per `PuzzleDO` instance (see
- * `requireRow()`/`readPublicState()`'s `SELECT * FROM puzzle LIMIT 1`).
- * Columns match `migrate()`'s `CREATE TABLE IF NOT EXISTS puzzle` block
- * verbatim — nothing's been backfilled onto this table since. */
+ * `requireRow()`/`readPublicState()`'s `SELECT * FROM puzzle LIMIT 1`). */
 export const puzzle = sqliteTable("puzzle", {
     id: text("id").primaryKey(),
     theme: text("theme"),
@@ -46,12 +43,7 @@ export const puzzle = sqliteTable("puzzle", {
     createdAt: integer("created_at").notNull(),
 });
 
-/** One row per joined player (host or guest). `color`/`selectedCell` were
- * both backfilled onto this table after some `PuzzleDO` instances already
- * existed — see `migrate()`'s idempotent `ALTER TABLE ... ADD COLUMN` /
- * try-catch block right after the `CREATE TABLE IF NOT EXISTS` — so this
- * describes the table as it looks TODAY, not just what the original
- * `CREATE TABLE` produced. */
+/** One row per joined player (host or guest) — see `join()`. */
 export const participants = sqliteTable("participants", {
     id: text("id").primaryKey(),
     name: text("name").notNull(),

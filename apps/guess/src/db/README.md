@@ -15,10 +15,10 @@ Object SQLite storage instead (`new_sqlite_classes: ["GameDO"]`), and
 **every instance of `GameDO` (one per game) has its own private database.**
 There is no shared database to run a migration against, and no
 `wrangler d1 migrations apply` equivalent that reaches into a specific DO
-instance's storage — that CLI command doesn't exist. `apps/puzzle` is still
-on the older, hand-rolled version of this story (see its own
-`src/db/README.md`) — `guess` moved to the real migrator described below
-first; `puzzle` hasn't (yet).
+instance's storage — that CLI command doesn't exist. `apps/puzzle`'s
+`PuzzleDO` shares this exact same story (see its own `src/db/README.md`) —
+`guess` moved to the real migrator described below first, and `puzzle`
+followed.
 
 ## The actual bootstrap mechanism: `drizzle-orm/durable-sqlite/migrator`
 

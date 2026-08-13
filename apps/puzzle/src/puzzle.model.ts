@@ -1,6 +1,7 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
 import {asc, eq, inArray, isNotNull, sql} from "drizzle-orm";
+import {migrate as runMigrations} from "drizzle-orm/durable-sqlite/migrator";
 import {err, ok, type Result} from "neverthrow";
 import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {maxPlayerLength} from "@game-worker/shared/game-session";
@@ -10,6 +11,7 @@ import {fromRpcResult, toRpcResult, type RpcResult} from "@game-worker/shared/rp
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {createDb, type Db} from "./db/client";
+import migrations from "./db/migrations";
 import {participants, puzzle} from "./db/schema";
 import {puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
 import type {MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
@@ -107,8 +109,12 @@ export class PuzzleDO extends DurableObject<Env> {
 
     constructor(ctx: DurableObjectState, env: Env) {
         super(ctx, env);
-        ctx.blockConcurrencyWhile(async () => this.migrate());
+        // `this.db` has to exist before `migrate()` runs — the real Drizzle
+        // migrator (see `migrate()`'s own doc comment) queries through it,
+        // unlike the old hand-rolled bootstrap this replaced, which only
+        // ever touched `ctx.storage.sql` directly.
         this.db = createDb(ctx.storage);
+        ctx.blockConcurrencyWhile(this.migrate);
     }
 
     async init(puzzleId: string, theme: string | null, gridSize: number, timeLimitMs: number): Promise<string> {
@@ -642,118 +648,25 @@ export class PuzzleDO extends DurableObject<Env> {
         });
     }
 
-    // Stays raw `ctx.storage.sql.exec()` with hand-written SQL — deliberately
-    // NOT converted to `this.db`/Drizzle like every other storage call in
-    // this file. D1 has `wrangler d1 migrations apply` against a shared,
-    // hand-numbered `migrations/` folder to actually run schema changes; a
-    // Durable Object's own SQLite storage has no equivalent external
-    // apply-migrations mechanism at all. Each instance bootstraps its own
-    // schema at first-touch via this idempotent block instead, so it has to
-    // stay hand-written raw SQL rather than something Drizzle's tooling
-    // drives. `./db/schema.ts` is instead a description of what this method
-    // is expected to produce, kept in sync BY HAND whenever this method
-    // changes — see ./db/README.md.
-    private migrate(): void {
-        this.ctx.storage.sql.exec(`
-            CREATE TABLE IF NOT EXISTS puzzle
-            (
-                id
-                TEXT
-                PRIMARY
-                KEY,
-                theme
-                TEXT,
-                prompt
-                TEXT,
-                status
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                'queued',
-                error
-                TEXT,
-                grid_size
-                INTEGER
-                NOT
-                NULL,
-                board
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                '[]',
-                time_limit_ms
-                INTEGER
-                NOT
-                NULL,
-                started_at
-                INTEGER,
-                lobby_ends_at
-                INTEGER,
-                ended_at
-                INTEGER,
-                score
-                INTEGER,
-                solved_by
-                TEXT,
-                host_token
-                TEXT
-                NOT
-                NULL,
-                created_at
-                INTEGER
-                NOT
-                NULL
-            );
-            CREATE TABLE IF NOT EXISTS participants
-            (
-                id
-                TEXT
-                PRIMARY
-                KEY,
-                name
-                TEXT
-                NOT
-                NULL,
-                user_id
-                TEXT,
-                token
-                TEXT,
-                color
-                TEXT
-                NOT
-                NULL
-                DEFAULT
-                '#888888',
-                joined_at
-                INTEGER
-                NOT
-                NULL,
-                selected_cell
-                INTEGER
-            );
-        `);
-        // `color` was added after some DO instances already had this table —
-        // `CREATE TABLE IF NOT EXISTS` only helps brand-new ones, so existing
-        // instances need a backfill too. There's no `ALTER TABLE ... ADD
-        // COLUMN IF NOT EXISTS`, so a "duplicate column" failure (on an
-        // instance that already has it) is just swallowed.
-        try {
-            this.ctx.storage.sql.exec("ALTER TABLE participants ADD COLUMN color TEXT NOT NULL DEFAULT '#888888'");
-        } catch {
-            // Column already exists on this instance — nothing to do.
-        }
-        // Same story for `selected_cell`, added once selection started being
-        // persisted (see `selectTile()`/`deselectTile()`) instead of living
-        // purely in the broadcast. `NULL` default is implicit and correct
-        // here — a pre-existing participant obviously has nothing selected.
-        try {
-            this.ctx.storage.sql.exec("ALTER TABLE participants ADD COLUMN selected_cell INTEGER");
-        } catch {
-            // Column already exists on this instance — nothing to do.
-        }
-    }
+    // Real Drizzle migrations now, replacing the hand-rolled idempotent
+    // `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE` bootstrap this used to run
+    // directly against `ctx.storage.sql`. `drizzle-kit generate` (run from
+    // apps/puzzle) is schema.ts's source of truth for the SQL under
+    // ../../drizzle; `./db/migrations.ts` hand-wires those generated files
+    // in as importable modules (a DO can't read them off disk at runtime)
+    // for `drizzle-orm/durable-sqlite/migrator`'s `migrate()` to apply. See
+    // ./db/README.md for the full story and the workflow for a future
+    // schema change. Mirrors `GameDO`'s own `migrate()`
+    // (apps/guess/src/guess.model.ts), which moved to this same mechanism
+    // first.
+    //
+    // NOTE: migration `0000` is `drizzle-kit`'s plain generated
+    // `CREATE TABLE` output, not `CREATE TABLE IF NOT EXISTS` — deliberately
+    // not softened to tolerate a table that already exists. Any `PuzzleDO`
+    // instance that was already bootstrapped by the old raw-SQL `migrate()`
+    // before this change will fail this migration (table already exists)
+    // the next time it's touched. Accepted trade-off, not an oversight.
+    private migrate = async (): Promise<void> => runMigrations(this.db, migrations);
 
     /** Resolves and authorizes a participant: logged-in callers must be
      * signed in as the same user who joined; anonymous callers must present
