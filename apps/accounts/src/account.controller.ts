@@ -3,6 +3,7 @@ import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {currentUser, logIn, logOut} from "./auth.middleware";
 import {UserSchema} from "./account.schema";
 import {createAccount, verifyCode} from "./account.service";
+import {createDb} from "./db/client";
 
 export const accountRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -54,11 +55,11 @@ accountRoutes.openapi(
     }),
     async (c) => {
         const {username} = c.req.valid("json");
-        const result = await createAccount(c.env.DB, username);
-        if (!result.ok) return c.json({error: result.error}, 400);
+        const result = await createAccount(createDb(c.env.DB), username);
+        if (result.isErr()) return c.json({error: result.error}, 400);
 
-        await logIn(c, result.user.id);
-        return c.json({user: result.user, code: result.code}, 200);
+        await logIn(c, result.value.user.id);
+        return c.json({user: result.value.user, code: result.value.code}, 200);
     },
 );
 
@@ -90,7 +91,7 @@ accountRoutes.openapi(
     }),
     async (c) => {
         const {username, code} = c.req.valid("json");
-        const user = await verifyCode(c.env.DB, username, code);
+        const user = await verifyCode(createDb(c.env.DB), username, code);
         if (!user) return c.json({error: "Incorrect username or code."}, 401);
 
         await logIn(c, user.id);

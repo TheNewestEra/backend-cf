@@ -27,7 +27,17 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     // created and the number of prompts/images generated here disagreeing
     // with each other. See roundCount() in guess.constants.ts.
     const roundCount = (await stub.getState()).rounds.length;
-    const prompts = await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount);
+    // Unwrapped right here rather than propagated further — this queue
+    // consumer's caller (index.ts's `queue()` handler) still drives its
+    // retry off a thrown/rejected promise, same as before
+    // generateRoundPrompts() started returning a `Result` (see that
+    // function's own doc comment in @game-worker/shared/ai).
+    const prompts = (await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount)).match(
+        (prompts) => prompts,
+        (error) => {
+            throw new Error(error);
+        },
+    );
     await stub.setPrompts(prompts);
 
     // Still `generating` — per-round progress from here on is visible via

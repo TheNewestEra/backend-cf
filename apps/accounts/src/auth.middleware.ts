@@ -19,10 +19,10 @@
 import type {Context} from "hono";
 import {currentUserVia, logInVia, logOutVia} from "@game-worker/shared/session";
 import type {AccountsSessionRpc} from "@game-worker/shared/rpc-types";
-import type {Database} from "@game-worker/shared/db";
 import {createSession, deleteSession, getUserBySession} from "./account.service";
+import {createDb, type Db} from "./db/client";
 
-function directSessionRpc(db: Database): AccountsSessionRpc {
+function directSessionRpc(db: Db): AccountsSessionRpc {
     return {
         getUserBySession: (token) => getUserBySession(db, token),
         createSession: (userId) => createSession(db, userId),
@@ -34,10 +34,10 @@ const allowLocalhostCookie = (c: Context<{ Bindings: Env }>) =>
     c.env.FLAGS.getBooleanValue("allow-localhost-cookie", false);
 
 export const currentUser = async (c: Context<{ Bindings: Env }>) =>
-    currentUserVia(c, directSessionRpc(c.env.DB), await allowLocalhostCookie(c));
+    currentUserVia(c, directSessionRpc(createDb(c.env.DB)), await allowLocalhostCookie(c));
 
 export const logIn = async (c: Context<{ Bindings: Env }>, userId: string) =>
-    logInVia(c, directSessionRpc(c.env.DB), userId, await allowLocalhostCookie(c));
+    logInVia(c, directSessionRpc(createDb(c.env.DB)), userId, await allowLocalhostCookie(c));
 
 export const logOut = async (c: Context<{ Bindings: Env }>) =>
-    logOutVia(c, directSessionRpc(c.env.DB), await allowLocalhostCookie(c));
+    logOutVia(c, directSessionRpc(createDb(c.env.DB)), await allowLocalhostCookie(c));

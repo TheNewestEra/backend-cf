@@ -17,8 +17,19 @@ export async function processPuzzle(message: PuzzleQueueMessage, env: Env): Prom
         env.BROWSE.markCatalogGenerating(puzzleId)
     ]);
 
-    // If a theme is given use it else generate one for the user
-    const prompt = theme ?? await generateImagePrompt(env.AI, env.FLAGS);
+    // If a theme is given use it else generate one for the user. Unwrapped
+    // via `.match()` right here rather than propagated further — this
+    // queue consumer's caller (index.ts's `queue()` handler) still drives
+    // its retry off a thrown/rejected promise, same as before generateImagePrompt()
+    // started returning a `Result` (see that function's own doc comment).
+    const prompt =
+        theme ??
+        (await generateImagePrompt(env.AI, env.FLAGS)).match(
+            (text) => text,
+            (error) => {
+                throw new Error(error);
+            },
+        );
     const key = puzzleImageKeyFor(puzzleId);
 
     // Gen the

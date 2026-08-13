@@ -1,11 +1,16 @@
 import {DurableObject} from "cloudflare:workers";
 import type {z} from "@hono/zod-openapi";
+import {asc, eq, inArray, isNotNull, sql} from "drizzle-orm";
+import {err, ok, type Result} from "neverthrow";
 import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
+import {fromRpcResult, toRpcResult, type RpcResult} from "@game-worker/shared/rpc-result";
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
+import {createDb, type Db} from "./db/client";
+import {participants, puzzle} from "./db/schema";
 import {puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
 import type {MoveResultSchema, PuzzlePublicSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
 import {PuzzleWsClientEventType, PuzzleWsClientMessageSchema, PuzzleWsEventType} from "./puzzle.schema";
@@ -27,48 +32,44 @@ interface ConnectionIdentity {
     color: string | null;
 }
 
-// The `Record<string, SqlStorageValue>` bound is what `storage.sql.exec<T>`
-// requires its row type to satisfy.
-interface PuzzleRow extends Record<string, SqlStorageValue> {
-    id: string;
-    theme: string | null;
-    prompt: string | null;
-    status: PuzzleStatus;
-    error: string | null;
-    grid_size: number;
-    board: string;
-    time_limit_ms: number;
-    started_at: number | null;
-    lobby_ends_at: number | null;
-    ended_at: number | null;
-    score: number | null;
-    solved_by: string | null;
-    host_token: string;
-    created_at: number;
-}
+/** The `action` values `PuzzleWsErrorMessage` (see puzzle.schema.ts's
+ * `PuzzleWsErrorMessageSchema`) tags a rejected client message with —
+ * matches that schema's own `z.enum([...])` literal-for-literal, so an
+ * `as const` object rather than a TS `enum` (same pattern as
+ * `PuzzleWsEventType`/`PuzzleWsClientEventType`): a TS `enum` member isn't
+ * assignable to the schema's plain string-literal union without a cast,
+ * where this is. Used by `webSocketMessage()`'s `reply()` helper below. */
+export const PuzzleWsAction = {
+    Unknown: "unknown",
+    Join: "join",
+    Move: "move",
+    Select: "select",
+    Deselect: "deselect",
+} as const;
+export type PuzzleWsAction = (typeof PuzzleWsAction)[keyof typeof PuzzleWsAction];
 
-interface ParticipantRow extends Record<string, SqlStorageValue> {
-    id: string;
-    name: string;
-    user_id: string | null;
-    token: string | null;
-    color: string;
-    joined_at: number;
-    /** The cell this participant currently has selected/highlighted, or
-     * `null` if none — see `selectTile()`/`deselectTile()`. Persisted (not
-     * just broadcast) so a reconnecting client can restore it from the next
-     * `state` snapshot's `selections` (see `readPublicState()`). */
-    selected_cell: number | null;
-}
+// Row types come straight from the Drizzle table definitions (./db/schema.ts)
+// rather than a hand-written interface — `drizzle-orm/durable-sqlite`'s
+// query builder doesn't need the `Record<string, SqlStorageValue>` bound
+// the raw `ctx.storage.sql.exec<T>()` calls this replaced used to require.
+// `puzzle.status`'s inferred type is `GameSessionStatus` (see schema.ts's
+// comment on why it isn't typed against `PuzzleStatus` directly) — the same
+// set of string literals as `PuzzleStatus` below, so the two are freely
+// interchangeable.
+type PuzzleRow = typeof puzzle.$inferSelect;
+type ParticipantRow = typeof participants.$inferSelect;
 
-interface ParticipantPublic extends Record<string, SqlStorageValue> {
-    name: string;
-    color: string;
-}
+/** Narrower than `ParticipantRow` — just the two columns `readPublicState()`'s
+ * roster query actually selects. */
+type ParticipantPublic = Pick<ParticipantRow, "name" | "color">;
 
-interface SelectionRow extends Record<string, SqlStorageValue> {
+/** Shape of `readPublicState()`'s "who has what selected" query — a
+ * `participants` row filtered to `selectedCell IS NOT NULL` and reshaped
+ * (`selectedCell` -> `cell`, `id` -> `participantId`) to match
+ * `PuzzlePublic.selections`' own field names one-for-one. */
+interface SelectionRow {
     cell: number;
-    participant_id: string;
+    participantId: string;
     name: string;
     color: string;
 }
@@ -102,25 +103,37 @@ const JOINABLE_STATUSES: readonly PuzzleStatus[] = [
  * resetting this one in place.
  */
 export class PuzzleDO extends DurableObject<Env> {
+    private readonly db: Db;
+
     constructor(ctx: DurableObjectState, env: Env) {
         super(ctx, env);
         ctx.blockConcurrencyWhile(async () => this.migrate());
+        this.db = createDb(ctx.storage);
     }
 
     async init(puzzleId: string, theme: string | null, gridSize: number, timeLimitMs: number): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
-        this.ctx.storage.sql.exec(
-            `INSERT INTO puzzle (id, theme, prompt, status, error, grid_size, board, time_limit_ms,
-                                 started_at, lobby_ends_at, ended_at, score, solved_by, host_token, created_at)
-             VALUES (?, ?, NULL, 'queued', NULL, ?, '[]', ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
-            puzzleId,
-            theme,
-            gridSize,
-            timeLimitMs,
-            hostToken,
-            Date.now(),
-        );
+        this.db
+            .insert(puzzle)
+            .values({
+                id: puzzleId,
+                theme,
+                prompt: null,
+                status: GameSessionStatus.Queued,
+                error: null,
+                gridSize,
+                board: "[]",
+                timeLimitMs,
+                startedAt: null,
+                lobbyEndsAt: null,
+                endedAt: null,
+                score: null,
+                solvedBy: null,
+                hostToken,
+                createdAt: Date.now(),
+            })
+            .run();
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
         return hostToken;
     }
@@ -144,19 +157,26 @@ export class PuzzleDO extends DurableObject<Env> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
-        this.ctx.storage.sql.exec(
-            `INSERT INTO puzzle (id, theme, prompt, status, error, grid_size, board, time_limit_ms,
-                                 started_at, lobby_ends_at, ended_at, score, solved_by, host_token, created_at)
-             VALUES (?, ?, ?, 'waiting', NULL, ?, '[]', ?, NULL, ?, NULL, NULL, NULL, ?, ?)`,
-            puzzleId,
-            theme,
-            prompt,
-            gridSize,
-            timeLimitMs,
-            endsAt,
-            hostToken,
-            Date.now(),
-        );
+        this.db
+            .insert(puzzle)
+            .values({
+                id: puzzleId,
+                theme,
+                prompt,
+                status: GameSessionStatus.Waiting,
+                error: null,
+                gridSize,
+                board: "[]",
+                timeLimitMs,
+                startedAt: null,
+                lobbyEndsAt: endsAt,
+                endedAt: null,
+                score: null,
+                solvedBy: null,
+                hostToken,
+                createdAt: Date.now(),
+            })
+            .run();
         await this.ctx.storage.setAlarm(endsAt);
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
         return hostToken;
@@ -169,14 +189,14 @@ export class PuzzleDO extends DurableObject<Env> {
     // --- RPC: read-only snapshot (HTTP polling + WebSocket connect) --------
 
     async setGenerating(): Promise<void> {
-        this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'generating'");
+        this.db.update(puzzle).set({status: GameSessionStatus.Generating}).run();
         this.broadcast({type: WsEventType.Status, status: GameSessionStatus.Generating});
     }
 
     // --- RPC: progress updates from the queue consumer ----------------------
 
     async setError(message: string): Promise<void> {
-        this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'error', error = ?", message);
+        this.db.update(puzzle).set({status: GameSessionStatus.Error, error: message}).run();
         this.broadcast({type: WsEventType.Status, status: GameSessionStatus.Error, error: message});
     }
 
@@ -184,11 +204,10 @@ export class PuzzleDO extends DurableObject<Env> {
      * so players can gather, and the host can preview/regenerate/start early. */
     async setReady(prompt: string): Promise<void> {
         const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
-        this.ctx.storage.sql.exec(
-            "UPDATE puzzle SET prompt = ?, status = 'waiting', error = NULL, lobby_ends_at = ?",
-            prompt,
-            endsAt,
-        );
+        this.db
+            .update(puzzle)
+            .set({prompt, status: GameSessionStatus.Waiting, error: null, lobbyEndsAt: endsAt})
+            .run();
         await this.ctx.storage.setAlarm(endsAt);
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
     }
@@ -199,43 +218,54 @@ export class PuzzleDO extends DurableObject<Env> {
      * mid-game, so wiping it out from under them is no longer this action's
      * job — see POST /puzzles/{id}/replay instead, which spins up a whole
      * new instance. */
-    async resetForRegenerate(hostToken: string): Promise<string | null> {
-        const row = this.requireRow();
-        this.assertHost(row, hostToken);
-        if (!JOINABLE_STATUSES.includes(row.status)) {
-            throw new Error("regenerate is only available before the puzzle starts");
-        }
+    async resetForRegenerate(hostToken: string): Promise<RpcResult<string | null>> {
+        const validated = this.requireRow()
+            .andThen((row) => this.assertHost(row, hostToken))
+            .andThen((row) =>
+                JOINABLE_STATUSES.includes(row.status)
+                    ? ok(row)
+                    : err("regenerate is only available before the puzzle starts"),
+            );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+        const row = validated.value;
+
         await this.ctx.storage.deleteAlarm();
-        this.ctx.storage.sql.exec(
-            `UPDATE puzzle
-             SET prompt        = NULL,
-                 status        = 'queued',
-                 error         = NULL,
-                 board         = '[]',
-                 started_at = NULL,
-                 lobby_ends_at = NULL,
-                 ended_at = NULL,
-                 score = NULL,
-                 solved_by = NULL`,
-        );
+        this.db
+            .update(puzzle)
+            .set({
+                prompt: null,
+                status: GameSessionStatus.Queued,
+                error: null,
+                board: "[]",
+                startedAt: null,
+                lobbyEndsAt: null,
+                endedAt: null,
+                score: null,
+                solvedBy: null,
+            })
+            .run();
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
-        return row.theme;
+        return toRpcResult(ok(row.theme));
     }
 
     // --- RPC: host-only lobby actions ----------------------------------------
 
     /** Ends the lobby countdown immediately and starts play. */
-    async startNow(hostToken: string): Promise<void> {
-        const row = this.requireRow();
-        this.assertHost(row, hostToken);
-        if (row.status !== GameSessionStatus.Waiting) throw new Error("puzzle is not waiting to start");
-        await this.beginPlaying(row.id, row.grid_size, row.time_limit_ms);
+    async startNow(hostToken: string): Promise<RpcResult<void>> {
+        const validated = this.requireRow()
+            .andThen((row) => this.assertHost(row, hostToken))
+            .andThen((row) => (row.status === GameSessionStatus.Waiting ? ok(row) : err("puzzle is not waiting to start")));
+        if (validated.isErr()) return {ok: false, error: validated.error};
+
+        const row = validated.value;
+        await this.beginPlaying(row.id, row.gridSize, row.timeLimitMs);
+        return toRpcResult(ok(undefined));
     }
 
     /** Registers a player as allowed to move tiles in this puzzle, only
      * while it hasn't started (see JOINABLE_STATUSES) — once it's `playing`
-     * this throws, so late arrivals can still spectate over the
-     * WebSocket/`getState()` but can't play. Called from `webSocketMessage()`
+     * this resolves to an `Err`, so late arrivals can still spectate over
+     * the WebSocket/`getState()` but can't play. Called from `webSocketMessage()`
      * for a `join` client message, using the identity resolved once at that
      * socket's `fetch()`/upgrade time (see `ConnectionIdentity`). Logged-in
      * users are upserted by `userId` (idempotent across reconnects/tab
@@ -254,44 +284,41 @@ export class PuzzleDO extends DurableObject<Env> {
         playerName: string,
         userColor: string | null,
         requestedColor: string | null,
-    ): Promise<{ participantId: string; token: string | null; color: string }> {
-        const row = this.requireRow();
-        if (!JOINABLE_STATUSES.includes(row.status)) {
-            throw new Error("puzzle has already started; you can spectate but not join");
-        }
+    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>> {
+        const validated = this.requireRow().andThen((row) =>
+            JOINABLE_STATUSES.includes(row.status)
+                ? ok(row)
+                : err("puzzle has already started; you can spectate but not join"),
+        );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+
         const color = userId
             ? (userColor ?? generateColor())
             : requestedColor && isValidHexColor(requestedColor)
-              ? requestedColor
-              : generateColor();
+                ? requestedColor
+                : generateColor();
 
         if (userId) {
-            this.ctx.storage.sql.exec(
-                `INSERT INTO participants (id, name, user_id, token, color, joined_at)
-                 VALUES (?, ?, ?, NULL, ?, ?) ON CONFLICT(id) DO
-                UPDATE SET name = excluded.name, color = excluded.color`,
-                userId,
-                playerName,
-                userId,
-                color,
-                Date.now(),
-            );
+            this.db
+                .insert(participants)
+                .values({id: userId, name: playerName, userId, token: null, color, joinedAt: Date.now()})
+                .onConflictDoUpdate({
+                    target: participants.id,
+                    set: {name: sql`excluded.name`, color: sql`excluded.color`},
+                })
+                .run();
             this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
-            return {participantId: userId, token: null, color};
+            return toRpcResult(ok({participantId: userId, token: null, color}));
         }
 
         const participantId = crypto.randomUUID();
         const token = crypto.randomUUID();
-        this.ctx.storage.sql.exec(
-            "INSERT INTO participants (id, name, user_id, token, color, joined_at) VALUES (?, ?, NULL, ?, ?, ?)",
-            participantId,
-            playerName,
-            token,
-            color,
-            Date.now(),
-        );
+        this.db
+            .insert(participants)
+            .values({id: participantId, name: playerName, userId: null, token, color, joinedAt: Date.now()})
+            .run();
         this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
-        return {participantId, token, color};
+        return toRpcResult(ok({participantId, token, color}));
     }
 
     // --- RPC: joining --------------------------------------------------------
@@ -307,23 +334,27 @@ export class PuzzleDO extends DurableObject<Env> {
         cellA: number,
         cellB: number,
         userId: string | null,
-    ): Promise<MoveResult> {
-        const participant = this.requireParticipant(participantId, token, userId);
-        const row = this.requireRow();
-        if (row.status !== GameSessionStatus.Playing) throw new Error("puzzle is not in progress");
-
-        const cellCount = row.grid_size * row.grid_size;
-        if (
-            !Number.isInteger(cellA) ||
-            !Number.isInteger(cellB) ||
-            cellA === cellB ||
-            cellA < 0 ||
-            cellA >= cellCount ||
-            cellB < 0 ||
-            cellB >= cellCount
-        ) {
-            throw new Error("invalid cell indices");
-        }
+    ): Promise<RpcResult<MoveResult>> {
+        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
+            this.requireRow().andThen((row) => {
+                if (row.status !== GameSessionStatus.Playing) return err("puzzle is not in progress");
+                const cellCount = row.gridSize * row.gridSize;
+                if (
+                    !Number.isInteger(cellA) ||
+                    !Number.isInteger(cellB) ||
+                    cellA === cellB ||
+                    cellA < 0 ||
+                    cellA >= cellCount ||
+                    cellB < 0 ||
+                    cellB >= cellCount
+                ) {
+                    return err("invalid cell indices");
+                }
+                return ok({participant, row});
+            }),
+        );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+        const {participant, row} = validated.value;
 
         const board: number[] = JSON.parse(row.board);
         [board[cellA], board[cellB]] = [board[cellB]!, board[cellA]!];
@@ -337,31 +368,34 @@ export class PuzzleDO extends DurableObject<Env> {
         // `clearTileSelections`), so this just keeps the persisted picture
         // (`readPublicState()`'s `selections`) in sync with that for anyone
         // who reconnects afterward.
-        this.ctx.storage.sql.exec(
-            "UPDATE participants SET selected_cell = NULL WHERE selected_cell IN (?, ?)",
-            cellA,
-            cellB,
-        );
+        this.db
+            .update(participants)
+            .set({selectedCell: null})
+            .where(inArray(participants.selectedCell, [cellA, cellB]))
+            .run();
 
         const solved = board.every((tile, cell) => tile === cell);
 
         if (solved) {
             const endedAt = Date.now();
-            const elapsedMs = endedAt - (row.started_at ?? endedAt);
-            const remainingMs = Math.max(0, row.time_limit_ms - elapsedMs);
+            const elapsedMs = endedAt - (row.startedAt ?? endedAt);
+            const remainingMs = Math.max(0, row.timeLimitMs - elapsedMs);
             const [minSolvedScore, maxScore] = await Promise.all([
                 puzzleMinSolvedScore(this.env),
                 puzzleMaxScore(this.env),
             ]);
-            const score = Math.max(minSolvedScore, Math.round((remainingMs / row.time_limit_ms) * maxScore));
+            const score = Math.max(minSolvedScore, Math.round((remainingMs / row.timeLimitMs) * maxScore));
 
-            this.ctx.storage.sql.exec(
-                "UPDATE puzzle SET board = ?, status = 'solved', ended_at = ?, score = ?, solved_by = ?",
-                JSON.stringify(board),
-                endedAt,
-                score,
-                participant.name,
-            );
+            this.db
+                .update(puzzle)
+                .set({
+                    board: JSON.stringify(board),
+                    status: GameSessionStatus.Solved,
+                    endedAt,
+                    score,
+                    solvedBy: participant.name,
+                })
+                .run();
             await this.ctx.storage.deleteAlarm();
             this.broadcast({
                 type: PuzzleWsEventType.Solved,
@@ -373,12 +407,12 @@ export class PuzzleDO extends DurableObject<Env> {
             });
             this.updateCatalogPlayStatus(row.id, "finished");
             if (userId) await this.env.LEADERBOARD.recordScore({userId, kind: "puzzle", sessionId: row.id, score});
-            return {status: GameSessionStatus.Solved, board, solved: true, score};
+            return toRpcResult(ok({status: GameSessionStatus.Solved, board, solved: true, score}));
         }
 
-        this.ctx.storage.sql.exec("UPDATE puzzle SET board = ?", JSON.stringify(board));
+        this.db.update(puzzle).set({board: JSON.stringify(board)}).run();
         this.broadcast({type: PuzzleWsEventType.Move, cellA, cellB, by: participant.name, color: participant.color});
-        return {status: GameSessionStatus.Playing, board, solved: false, score: null};
+        return toRpcResult(ok({status: GameSessionStatus.Playing, board, solved: false, score: null}));
     }
 
     /** Records and broadcasts that a player has selected/highlighted a
@@ -397,27 +431,30 @@ export class PuzzleDO extends DurableObject<Env> {
         token: string | null,
         cell: number,
         userId: string | null,
-    ): Promise<void> {
-        const participant = this.requireParticipant(participantId, token, userId);
-        const row = this.requireRow();
-        if (row.status !== GameSessionStatus.Playing) throw new Error("puzzle is not in progress");
-
-        const cellCount = row.grid_size * row.grid_size;
-        if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount) {
-            throw new Error("invalid cell index");
-        }
+    ): Promise<RpcResult<void>> {
+        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
+            this.requireRow().andThen((row) => {
+                if (row.status !== GameSessionStatus.Playing) return err("puzzle is not in progress");
+                const cellCount = row.gridSize * row.gridSize;
+                if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount) return err("invalid cell index");
+                return ok(participant);
+            }),
+        );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+        const participant = validated.value;
 
         if (participant.selectedCell !== null && participant.selectedCell !== cell) {
             this.broadcast({type: PuzzleWsEventType.TileDeselected, cell: participant.selectedCell});
         }
 
-        this.ctx.storage.sql.exec("UPDATE participants SET selected_cell = ? WHERE id = ?", cell, participantId);
+        this.db.update(participants).set({selectedCell: cell}).where(eq(participants.id, participantId)).run();
         this.broadcast({
             type: PuzzleWsEventType.TileSelected,
             cell,
             player: participant.name,
             color: participant.color
         });
+        return toRpcResult(ok(undefined));
     }
 
     /** The flip side of `selectTile()` — clears this participant's current
@@ -425,27 +462,42 @@ export class PuzzleDO extends DurableObject<Env> {
      * every other connected client drops the highlight too. A no-op if
      * nothing's currently selected, same idea as `webSocketClose()`
      * tolerating a socket that was never really tracked. */
-    async deselectTile(participantId: string, token: string | null, userId: string | null): Promise<void> {
-        const participant = this.requireParticipant(participantId, token, userId);
-        const row = this.requireRow();
-        if (row.status !== GameSessionStatus.Playing) throw new Error("puzzle is not in progress");
+    async deselectTile(participantId: string, token: string | null, userId: string | null): Promise<RpcResult<void>> {
+        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
+            this.requireRow().andThen((row) =>
+                row.status !== GameSessionStatus.Playing ? err("puzzle is not in progress") : ok(participant),
+            ),
+        );
+        if (validated.isErr()) return {ok: false, error: validated.error};
+        const participant = validated.value;
 
-        if (participant.selectedCell === null) return;
+        if (participant.selectedCell === null) return toRpcResult(ok(undefined));
 
-        this.ctx.storage.sql.exec("UPDATE participants SET selected_cell = NULL WHERE id = ?", participantId);
+        this.db.update(participants).set({selectedCell: null}).where(eq(participants.id, participantId)).run();
         this.broadcast({type: PuzzleWsEventType.TileDeselected, cell: participant.selectedCell});
+        return toRpcResult(ok(undefined));
     }
 
     // --- RPC: player interaction ---------------------------------------------
 
     async alarm(): Promise<void> {
-        const row = this.requireRow();
+        // Not part of `PuzzleDO`'s RPC surface — there's no caller to hand a
+        // `Result` back to, and the DO alarm subsystem's own retry policy is
+        // exactly what an uncaught rejection here should drive, same as a
+        // thrown error always did — so `requireRow()`'s `Err` is rethrown
+        // rather than propagated as a value.
+        const row = this.requireRow().match(
+            (row) => row,
+            (error) => {
+                throw new Error(error);
+            },
+        );
         if (row.status === GameSessionStatus.Waiting) {
-            await this.beginPlaying(row.id, row.grid_size, row.time_limit_ms);
+            await this.beginPlaying(row.id, row.gridSize, row.timeLimitMs);
             return;
         }
         if (row.status === GameSessionStatus.Playing) {
-            this.ctx.storage.sql.exec("UPDATE puzzle SET status = 'timeout', ended_at = ?, score = 0", Date.now());
+            this.db.update(puzzle).set({status: GameSessionStatus.Timeout, endedAt: Date.now(), score: 0}).run();
             this.broadcast({type: PuzzleWsEventType.Timeout});
             this.updateCatalogPlayStatus(row.id, "finished");
         }
@@ -463,7 +515,10 @@ export class PuzzleDO extends DurableObject<Env> {
         const user = await currentUserFromRequestVia(request, this.env.ACCOUNTS);
         const pair = new WebSocketPair();
         this.ctx.acceptWebSocket(pair[1]);
-        pair[1].serializeAttachment({userId: user?.id ?? null, color: user?.color ?? null} satisfies ConnectionIdentity);
+        pair[1].serializeAttachment({
+            userId: user?.id ?? null,
+            color: user?.color ?? null
+        } satisfies ConnectionIdentity);
         this.send(pair[1], {type: PuzzleWsEventType.State, ...this.readPublicState()});
         // Let every other connected client know the player count changed.
         this.broadcast({type: WsEventType.Presence, connectedPlayers: this.ctx.getWebSockets().length});
@@ -472,6 +527,17 @@ export class PuzzleDO extends DurableObject<Env> {
 
     // --- alarm: drives both the lobby auto-start and the countdown timeout --
 
+    /** Dispatches one parsed client message to its RPC and replies once,
+     * to the sending socket only — broadcasts to everyone else still happen
+     * inside the RPC itself (`join()`/`swapTiles()`/`selectTile()`/
+     * `deselectTile()`), same as before. Each arm's own validation (e.g.
+     * `player` being non-empty, `cellA !== cellB`) is checked up front and
+     * short-circuits with a `PuzzleWsErrorMessage` the same way a rejected
+     * RPC call would; the RPC call itself already returns a
+     * `RpcResult` (see @game-worker/shared/rpc-result) instead of throwing, so there's
+     * no `try/catch` here at all — just `fromRpcResult()` to rehydrate a
+     * real `neverthrow` `Result`, and `reply()` to `.match()` it into
+     * whichever message actually goes back to the sender. */
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
         if (typeof message !== "string") return;
         if (message === "ping") {
@@ -483,12 +549,12 @@ export class PuzzleDO extends DurableObject<Env> {
         try {
             json = JSON.parse(message);
         } catch {
-            this.send(ws, {type: PuzzleWsEventType.Error, action: "unknown", error: "malformed message"});
+            this.send(ws, {type: PuzzleWsEventType.Error, action: PuzzleWsAction.Unknown, error: "malformed message"});
             return;
         }
         const parsed = PuzzleWsClientMessageSchema.safeParse(json);
         if (!parsed.success) {
-            this.send(ws, {type: PuzzleWsEventType.Error, action: "unknown", error: "invalid message"});
+            this.send(ws, {type: PuzzleWsEventType.Error, action: PuzzleWsAction.Unknown, error: "invalid message"});
             return;
         }
 
@@ -499,19 +565,16 @@ export class PuzzleDO extends DurableObject<Env> {
             case PuzzleWsClientEventType.Join: {
                 const player = data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "";
                 if (!player) {
-                    this.send(ws, {type: PuzzleWsEventType.Error, action: "join", error: "player is required"});
+                    this.send(ws, {type: PuzzleWsEventType.Error, action: PuzzleWsAction.Join, error: "player is required"});
                     return;
                 }
-                try {
-                    const joined = await this.join(identity.userId, player, identity.color, data.color ?? null);
-                    this.send(ws, {type: PuzzleWsEventType.JoinResult, ...joined});
-                } catch (err) {
-                    // join() only ever throws the "already started" case —
-                    // see puzzle.controller.ts's old POST .../join handler,
-                    // which this mirrors.
-                    const errorMessage = err instanceof Error ? err.message : "unable to join";
-                    this.send(ws, {type: PuzzleWsEventType.Error, action: "join", error: errorMessage});
-                }
+                // join() only ever rejects with the "already started" case —
+                // see puzzle.controller.ts's old POST .../join handler,
+                // which this mirrors.
+                const outcome = fromRpcResult(
+                    await this.join(identity.userId, player, identity.color, data.color ?? null),
+                );
+                this.reply(ws, PuzzleWsAction.Join, outcome, (joined) => ({type: PuzzleWsEventType.JoinResult, ...joined}));
                 return;
             }
             case PuzzleWsClientEventType.Move: {
@@ -519,40 +582,51 @@ export class PuzzleDO extends DurableObject<Env> {
                 if (cellA === cellB) {
                     this.send(ws, {
                         type: PuzzleWsEventType.Error,
-                        action: "move",
+                        action: PuzzleWsAction.Move,
                         error: "cellA and cellB must be different",
                     });
                     return;
                 }
-                try {
-                    await this.swapTiles(participantId, token ?? null, cellA, cellB, identity.userId);
-                } catch (err) {
-                    const errorMessage = err instanceof Error ? err.message : "move rejected";
-                    this.send(ws, {type: PuzzleWsEventType.Error, action: "move", error: errorMessage});
-                }
+                const outcome = fromRpcResult(
+                    await this.swapTiles(participantId, token ?? null, cellA, cellB, identity.userId),
+                );
+                this.reply(ws, PuzzleWsAction.Move, outcome);
                 return;
             }
             case PuzzleWsClientEventType.Select: {
                 const {cell, participantId, token} = data;
-                try {
-                    await this.selectTile(participantId, token ?? null, cell, identity.userId);
-                } catch (err) {
-                    const errorMessage = err instanceof Error ? err.message : "select rejected";
-                    this.send(ws, {type: PuzzleWsEventType.Error, action: "select", error: errorMessage});
-                }
+                const outcome = fromRpcResult(await this.selectTile(participantId, token ?? null, cell, identity.userId));
+                this.reply(ws, PuzzleWsAction.Select, outcome);
                 return;
             }
             case PuzzleWsClientEventType.Deselect: {
                 const {participantId, token} = data;
-                try {
-                    await this.deselectTile(participantId, token ?? null, identity.userId);
-                } catch (err) {
-                    const errorMessage = err instanceof Error ? err.message : "deselect rejected";
-                    this.send(ws, {type: PuzzleWsEventType.Error, action: "deselect", error: errorMessage});
-                }
+                const outcome = fromRpcResult(await this.deselectTile(participantId, token ?? null, identity.userId));
+                this.reply(ws, PuzzleWsAction.Deselect, outcome);
                 return;
             }
         }
+    }
+
+    /** Folds a `fromRpcResult()`-rehydrated `Result` into the single reply
+     * `webSocketMessage()` sends the originating socket for one action:
+     * `toMessage(value)` on `Ok` — default "nothing", since `swapTiles()`/
+     * `selectTile()`/`deselectTile()` already broadcast their own result,
+     * which reaches the sender too as just another connected client — or a
+     * `PuzzleWsErrorMessage` tagged with `action` on `Err`. */
+    private reply<T>(
+        ws: WebSocket,
+        action: PuzzleWsAction,
+        outcome: Result<T, string>,
+        toMessage: (value: T) => PuzzleWsMessage | null = () => null,
+    ): void {
+        outcome.match(
+            (value) => {
+                const message = toMessage(value);
+                if (message) this.send(ws, message);
+            },
+            (error) => this.send(ws, {type: PuzzleWsEventType.Error, action, error}),
+        );
     }
 
     // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
@@ -568,6 +642,17 @@ export class PuzzleDO extends DurableObject<Env> {
         });
     }
 
+    // Stays raw `ctx.storage.sql.exec()` with hand-written SQL — deliberately
+    // NOT converted to `this.db`/Drizzle like every other storage call in
+    // this file. D1 has `wrangler d1 migrations apply` against a shared,
+    // hand-numbered `migrations/` folder to actually run schema changes; a
+    // Durable Object's own SQLite storage has no equivalent external
+    // apply-migrations mechanism at all. Each instance bootstraps its own
+    // schema at first-touch via this idempotent block instead, so it has to
+    // stay hand-written raw SQL rather than something Drizzle's tooling
+    // drives. `./db/schema.ts` is instead a description of what this method
+    // is expected to produce, kept in sync BY HAND whenever this method
+    // changes — see ./db/README.md.
     private migrate(): void {
         this.ctx.storage.sql.exec(`
             CREATE TABLE IF NOT EXISTS puzzle
@@ -672,31 +757,30 @@ export class PuzzleDO extends DurableObject<Env> {
 
     /** Resolves and authorizes a participant: logged-in callers must be
      * signed in as the same user who joined; anonymous callers must present
-     * the token issued at join time. Throws `Error("forbidden: ...")` for
-     * either failure — `webSocketMessage()` (the sole caller, for `move`/
-     * `select`/`deselect` client messages) turns that into a
-     * `PuzzleWsErrorMessage` addressed to the sending socket, same idea as
-     * the `hostActionError` (shared/http-exceptions.ts) mapping to a 403
-     * that the still-HTTP host-only actions below use — someone who never
-     * joined can still spectate, they just can't act. Returns the joined
-     * display name/color (to record on the move and broadcast alongside it)
-     * plus the cell they currently have selected, if any (see
+     * the token issued at join time. `Err("forbidden: ...")` for either
+     * failure — every caller (`swapTiles()`/`selectTile()`/`deselectTile()`)
+     * folds that straight into its own `RpcResult` (see
+     * shared/rpc-result.ts), which `webSocketMessage()`'s `reply()` then surfaces
+     * as a `PuzzleWsErrorMessage` addressed to the sending socket, same idea
+     * as the `hostActionError` (shared/http-exceptions.ts) mapping to a 403
+     * that the host-only actions above use — someone who never joined can
+     * still spectate, they just can't act. Resolves to the joined display
+     * name/color (to record on the move and broadcast alongside it) plus
+     * the cell they currently have selected, if any (see
      * `selectTile()`/`deselectTile()`). */
     private requireParticipant(
         participantId: string,
         token: string | null,
         userId: string | null,
-    ): { name: string; color: string; selectedCell: number | null } {
-        const row = this.ctx.storage.sql
-            .exec<ParticipantRow>("SELECT * FROM participants WHERE id = ?", participantId)
-            .toArray()[0];
-        if (!row) throw new Error("forbidden: join the puzzle before playing");
-        if (row.user_id) {
-            if (row.user_id !== userId) throw new Error("forbidden: not your participant id");
+    ): Result<{ name: string; color: string; selectedCell: number | null }, string> {
+        const row = this.db.select().from(participants).where(eq(participants.id, participantId)).get();
+        if (!row) return err("forbidden: join the puzzle before playing");
+        if (row.userId) {
+            if (row.userId !== userId) return err("forbidden: not your participant id");
         } else if (!token || token !== row.token) {
-            throw new Error("forbidden: invalid participant token");
+            return err("forbidden: invalid participant token");
         }
-        return {name: row.name, color: row.color, selectedCell: row.selected_cell};
+        return ok({name: row.name, color: row.color, selectedCell: row.selectedCell});
     }
 
     // --- internals -----------------------------------------------------------
@@ -705,11 +789,18 @@ export class PuzzleDO extends DurableObject<Env> {
     private async beginPlaying(puzzleId: string, gridSize: number, timeLimitMs: number): Promise<void> {
         const board = shuffledBoard(gridSize);
         const startedAt = Date.now();
-        this.ctx.storage.sql.exec(
-            "UPDATE puzzle SET status = 'playing', board = ?, started_at = ?, lobby_ends_at = NULL, ended_at = NULL, score = NULL, solved_by = NULL",
-            JSON.stringify(board),
-            startedAt,
-        );
+        this.db
+            .update(puzzle)
+            .set({
+                status: GameSessionStatus.Playing,
+                board: JSON.stringify(board),
+                startedAt,
+                lobbyEndsAt: null,
+                endedAt: null,
+                score: null,
+                solvedBy: null,
+            })
+            .run();
         await this.ctx.storage.setAlarm(startedAt + timeLimitMs);
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
         this.updateCatalogPlayStatus(puzzleId, "active");
@@ -731,20 +822,20 @@ export class PuzzleDO extends DurableObject<Env> {
         );
     }
 
-    private assertHost(row: PuzzleRow, hostToken: string): void {
-        if (!hostToken || hostToken !== row.host_token) {
-            throw new Error("forbidden: only the host can do that");
-        }
+    /** Passes `row` through unchanged on success, so callers can chain it
+     * straight into a further `.andThen()` (see `startNow()`/
+     * `resetForRegenerate()`) without re-fetching it. */
+    private assertHost(row: PuzzleRow, hostToken: string): Result<PuzzleRow, string> {
+        return hostToken && hostToken === row.hostToken ? ok(row) : err("forbidden: only the host can do that");
     }
 
-    private requireRow(): PuzzleRow {
-        const row = this.ctx.storage.sql.exec<PuzzleRow>("SELECT * FROM puzzle LIMIT 1").toArray()[0];
-        if (!row) throw new Error("puzzle not initialized");
-        return row;
+    private requireRow(): Result<PuzzleRow, string> {
+        const row = this.db.select().from(puzzle).limit(1).get();
+        return row ? ok(row) : err("puzzle not initialized");
     }
 
     private readPublicState(): PuzzlePublic {
-        const row = this.ctx.storage.sql.exec<PuzzleRow>("SELECT * FROM puzzle LIMIT 1").toArray()[0];
+        const row = this.db.select().from(puzzle).limit(1).get();
         if (!row) {
             return {
                 id: "",
@@ -767,24 +858,35 @@ export class PuzzleDO extends DurableObject<Env> {
         }
 
         const remainingMs =
-            row.status === GameSessionStatus.Playing && row.started_at !== null
-                ? Math.max(0, row.time_limit_ms - (Date.now() - row.started_at))
+            row.status === GameSessionStatus.Playing && row.startedAt !== null
+                ? Math.max(0, row.timeLimitMs - (Date.now() - row.startedAt))
                 : null;
         // `row.status === "waiting"` isn't checked separately here — `lobby_ends_at`
         // is always nulled out the moment the lobby ends (see beginPlaying()/
         // resetForRegenerate()), so lobbyRemainingMs() already reads null outside
         // the lobby window.
-        const participants = this.ctx.storage.sql
-            .exec<ParticipantPublic>("SELECT name, color FROM participants ORDER BY joined_at ASC")
-            .toArray();
+        const participantRows: ParticipantPublic[] = this.db
+            .select({name: participants.name, color: participants.color})
+            .from(participants)
+            .orderBy(asc(participants.joinedAt))
+            .all();
         // Only ever non-empty while `playing` (selectTile()/deselectTile()
         // both require it), but read unconditionally rather than gated on
         // status — cheap, and one less thing that could drift out of sync.
-        const selections = this.ctx.storage.sql
-            .exec<SelectionRow>(
-                "SELECT selected_cell AS cell, id AS participant_id, name, color FROM participants WHERE selected_cell IS NOT NULL",
-            )
-            .toArray();
+        // `cell`'s non-null assertion is safe: `isNotNull()` below is the
+        // exact same filter the original `WHERE selected_cell IS NOT NULL`
+        // applied, Drizzle's inferred column type just can't express that.
+        const selections: SelectionRow[] = this.db
+            .select({
+                cell: participants.selectedCell,
+                participantId: participants.id,
+                name: participants.name,
+                color: participants.color,
+            })
+            .from(participants)
+            .where(isNotNull(participants.selectedCell))
+            .all()
+            .map((s) => ({...s, cell: s.cell!}));
 
         return {
             id: row.id,
@@ -792,20 +894,20 @@ export class PuzzleDO extends DurableObject<Env> {
             prompt: row.prompt,
             status: row.status,
             error: row.error ?? undefined,
-            gridSize: row.grid_size,
+            gridSize: row.gridSize,
             board: JSON.parse(row.board),
-            timeLimitMs: row.time_limit_ms,
-            startedAt: row.started_at,
+            timeLimitMs: row.timeLimitMs,
+            startedAt: row.startedAt,
             remainingMs,
-            lobbyRemainingMs: lobbyRemainingMs(row.lobby_ends_at),
-            endedAt: row.ended_at,
+            lobbyRemainingMs: lobbyRemainingMs(row.lobbyEndsAt),
+            endedAt: row.endedAt,
             score: row.score,
-            solvedBy: row.solved_by,
+            solvedBy: row.solvedBy,
             connectedPlayers: this.ctx.getWebSockets().length,
-            participants: participants.map((p) => ({name: p.name, color: p.color})),
+            participants: participantRows.map((p) => ({name: p.name, color: p.color})),
             selections: selections.map((s) => ({
                 cell: s.cell,
-                participantId: s.participant_id,
+                participantId: s.participantId,
                 player: s.name,
                 color: s.color,
             })),

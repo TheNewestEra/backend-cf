@@ -12,6 +12,7 @@
     "./ai": "./src/ai.ts",
     "./session": "./src/session.ts",
     "./rpc-types": "./src/rpc-types.ts",
+    "./rpc-result": "./src/rpc-result.ts",
     "./color": "./src/color.ts",
     "./lobby": "./src/lobby.ts",
     "./game": "./src/game.ts",
@@ -23,6 +24,7 @@
   "dependencies": {
     "@hono/zod-openapi": "^1.5.2",
     "hono": "^4.13.1",
+    "neverthrow": "^8.2.0",
     "zod": "^4.4.3"
   }
 }

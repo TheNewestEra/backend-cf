@@ -2,6 +2,7 @@ import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
+import {createDb} from "./db/client";
 import {leaderboardRoutes} from "./leaderboard.controller";
 import {recordScore, type RecordScoreInput} from "./leaderboard.service";
 
@@ -28,7 +29,7 @@ app.get("/docs", swaggerUI({url: "/openapi.json"}));
  * after computing a score. */
 export class LeaderboardService extends WorkerEntrypoint<Env> {
     recordScore(input: RecordScoreInput): Promise<void> {
-        return recordScore(this.env.DB, input);
+        return recordScore(createDb(this.env.DB), input);
     }
 }
 

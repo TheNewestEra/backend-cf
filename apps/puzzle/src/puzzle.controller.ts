@@ -4,6 +4,7 @@ import {maxThemeLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
+import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {HostBodySchema, puzzleImageKeyFor, puzzleTimeLimitMs, resolveGridSize} from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
 import {PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
@@ -109,14 +110,13 @@ puzzleRoutes.openapi(
         const {id: puzzleId} = c.req.valid("param");
         const {hostToken} = c.req.valid("json");
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
-        try {
-            const theme = await stub.resetForRegenerate(hostToken ?? "");
-            await c.env.PUZZLE_QUEUE.send({puzzleId, theme} satisfies PuzzleQueueMessage);
-            return c.json({ok: true as const}, 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
+        const result = fromRpcResult(await stub.resetForRegenerate(hostToken ?? ""));
+        if (result.isErr()) {
+            const {status, body} = hostActionError(result.error);
             return c.json(body, status);
         }
+        await c.env.PUZZLE_QUEUE.send({puzzleId, theme: result.value} satisfies PuzzleQueueMessage);
+        return c.json({ok: true as const}, 200);
     },
 );
 
@@ -140,13 +140,12 @@ puzzleRoutes.openapi(
         const {id} = c.req.valid("param");
         const {hostToken} = c.req.valid("json");
         const stub = c.env.PUZZLE_DO.getByName(id);
-        try {
-            await stub.startNow(hostToken ?? "");
-            return c.json({ok: true as const}, 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
+        const result = fromRpcResult(await stub.startNow(hostToken ?? ""));
+        if (result.isErr()) {
+            const {status, body} = hostActionError(result.error);
             return c.json(body, status);
         }
+        return c.json({ok: true as const}, 200);
     },
 );
 

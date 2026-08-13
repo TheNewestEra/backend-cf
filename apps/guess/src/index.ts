@@ -3,7 +3,7 @@ import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {guessRoutes} from "./guess.controller";
-import {GameDO, type GameStatus} from "./guess.model";
+import GameDO, {type GameStatus} from "./guess.model";
 import {GameWsMessageSchema} from "./guess.schema";
 import {type GuessQueueMessage, processGuessGame} from "./guess.queue";
 
@@ -12,14 +12,6 @@ export {GameDO};
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
 app.use("*", corsMiddleware);
-app.use("*", async (c, next) => {
-    const contentType = c.req.header("Content-Type");
-    if (contentType && /^application\/json/i.test(contentType) && c.req.method !== "GET" && c.req.method !== "HEAD") {
-        const text = await c.req.text();
-        c.req.raw = new Request(c.req.raw, {body: text.trim() ? text : "{}"});
-    }
-    await next();
-});
 app.route("/", guessRoutes);
 
 app.openAPIRegistry.register("GameWsMessage", GameWsMessageSchema);

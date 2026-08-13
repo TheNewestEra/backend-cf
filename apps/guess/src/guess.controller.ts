@@ -3,6 +3,7 @@ import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
+import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUser} from "./auth.middleware";
 import {HostBodySchema, imageKeyFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
@@ -106,13 +107,12 @@ guessRoutes.openapi(
         const {id} = c.req.valid("param");
         const {hostToken} = c.req.valid("json");
         const stub = c.env.GAME_DO.getByName(id);
-        try {
-            await stub.startNow(hostToken ?? "");
-            return c.json({ok: true as const}, 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
+        const result = fromRpcResult(await stub.startNow(hostToken ?? ""));
+        if (result.isErr()) {
+            const {status, body} = hostActionError(result.error);
             return c.json(body, status);
         }
+        return c.json({ok: true as const}, 200);
     },
 );
 
@@ -188,16 +188,15 @@ guessRoutes.openapi(
         if (!player) return c.json({error: "player is required"}, 400);
 
         const stub = c.env.GAME_DO.getByName(id);
-        try {
-            return c.json(await stub.join(user?.id ?? null, player, user?.color ?? null), 200);
-        } catch (err) {
-            // join() only ever throws the "already started" case (never a
-            // "forbidden: ..." one), so this is always a 409 — unlike the
-            // participant-gated actions below, there's no host/participant
-            // check to fail here.
-            const message = err instanceof Error ? err.message : "unable to join";
-            return c.json({error: message}, 409);
+        const result = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null));
+        if (result.isErr()) {
+            // join() only ever rejects with the "already started" case
+            // (never a "forbidden: ..." one), so this is always a 409 —
+            // unlike the participant-gated actions below, there's no
+            // host/participant check to fail here.
+            return c.json({error: result.error}, 409);
         }
+        return c.json(result.value, 200);
     },
 );
 
@@ -249,12 +248,12 @@ guessRoutes.openapi(
         if (!guess) return c.json({error: "guess is required"}, 400);
 
         const stub = c.env.GAME_DO.getByName(id);
-        try {
-            return c.json(await stub.submitGuess(index, participantId, token ?? null, guess, user?.id ?? null), 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
+        const result = fromRpcResult(await stub.submitGuess(index, participantId, token ?? null, guess, user?.id ?? null));
+        if (result.isErr()) {
+            const {status, body} = hostActionError(result.error);
             return c.json(body, status);
         }
+        return c.json(result.value, 200);
     },
 );
 
@@ -303,14 +302,13 @@ guessRoutes.openapi(
         const user = await currentUser(c);
 
         const stub = c.env.GAME_DO.getByName(id);
-        try {
-            const prompt = await stub.revealRound(index, participantId, token ?? null, user?.id ?? null);
-            if (!prompt) return c.json({error: "round not visible yet"}, 409);
-            return c.json({prompt}, 200);
-        } catch (err) {
-            const {status, body} = hostActionError(err);
+        const result = fromRpcResult(await stub.revealRound(index, participantId, token ?? null, user?.id ?? null));
+        if (result.isErr()) {
+            const {status, body} = hostActionError(result.error);
             return c.json(body, status);
         }
+        if (!result.value) return c.json({error: "round not visible yet"}, 409);
+        return c.json({prompt: result.value}, 200);
     },
 );
 
@@ -349,14 +347,6 @@ guessRoutes.openapi(
         const index = Number(rawIndex);
         if (!Number.isInteger(index) || index < 0) return c.notFound();
 
-        // Spoiler gate: only serve a round's image once it's been played (the
-        // active round, or one that's already resolved) — never a round that's
-        // merely generated and waiting its turn. See ROUND_VISIBLE_STATUSES.
-        // The upper bound on `index` is enforced implicitly here too: an
-        // out-of-range index just means `state.rounds[index]` is undefined,
-        // same as any other not-visible round — this game's round count is
-        // per-game (see roundCount() in guess.constants.ts), not a static
-        // import-time value to check against.
         const state = await c.env.GAME_DO.getByName(gameId).getState();
         const round = state.rounds[index];
         if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return c.notFound();

@@ -4,6 +4,7 @@ import {GameKindSchema} from "@game-worker/shared/game";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {CatalogEntrySchema, CatalogSort, CatalogSortSchema, PlayStatusSchema,} from "./catalog.schema";
 import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
+import {createDb} from "./db/client";
 
 const DEFAULT_LIMIT = 24;
 const MAX_LIMIT = 60;
@@ -45,7 +46,7 @@ browseRoutes.openapi(
         const origin = new URL(c.req.url).origin;
 
         const entries = await listCatalog(
-            c.env.DB,
+            createDb(c.env.DB),
             {
                 kind: kind ?? null,
                 sort: sort ?? CatalogSort.Recent,
@@ -93,9 +94,9 @@ browseRoutes.openapi(
         const {id} = c.req.valid("param");
         const {stars, rater} = c.req.valid("json");
 
-        const result = await submitRating(c.env.DB, id, stars, rater?.trim().slice(0, MAX_RATER_LENGTH) || null);
-        if (!result) return c.json({error: "not found"}, 404);
-        return c.json(result, 200);
+        const result = await submitRating(createDb(c.env.DB), id, stars, rater?.trim().slice(0, MAX_RATER_LENGTH) || null);
+        if (result.isErr()) return c.json({error: result.error}, 404);
+        return c.json(result.value, 200);
     },
 );
 
@@ -121,7 +122,7 @@ browseRoutes.openapi(
     }),
     async (c) => {
         const {id} = c.req.valid("param");
-        const key = await getThumbnailKey(c.env.DB, id);
+        const key = await getThumbnailKey(createDb(c.env.DB), id);
         if (!key) return c.notFound();
 
         const object = await c.env.IMAGES.get(key);

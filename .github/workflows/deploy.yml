@@ -132,7 +132,11 @@ jobs:
   # rather than trying to path-filter it correctly. Applied via
   # apps/accounts's wrangler.jsonc, which points migrations_dir at the
   # repo-root migrations/ folder; every D1-bound service in a given
-  # environment points at that same physical database.
+  # environment points at that same physical database. (Some of that
+  # folder's SQL originates from an app's own Drizzle schema — see
+  # ./drizzle-check.yml and apps/friends/src/db/README.md — but that's a
+  # hand-copy step upstream of here; this job itself doesn't know or care
+  # where the SQL came from.)
   provision:
     needs: [typecheck, resolve]
     if: needs.resolve.outputs.provision_needed == 'true'
