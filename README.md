@@ -23,19 +23,26 @@ can render a live roster of who's in the lobby and in what color.
 
 ## Architecture: one Worker per service, connected by RPC
 
-This is an npm-workspaces monorepo — six independently deployable Cloudflare
-Workers under `apps/*`, sharing common code from `packages/shared` (not
-itself deployed). Each service owns a slice of the single shared D1 database
-(`game-worker-catalog`) and, where relevant, its own Durable Object class:
+This is an npm-workspaces monorepo — seven independently deployable
+Cloudflare Workers under `apps/*`, sharing common code from `packages/shared`
+(not itself deployed). Each service owns a slice of the single shared D1
+database (`game-worker-catalog`) and, where relevant, its own Durable Object
+class:
 
 | Service (`apps/…`) | Owns | RPC it exposes | RPC it calls |
 |---|---|---|---|
 | `accounts` | `users`, `sessions` | `AccountsService`: session + user lookups | — |
 | `browse` | `catalog`, `ratings` | `CatalogService`: catalog status writes | — |
 | `leaderboard` | `leaderboard_entries` | `LeaderboardService`: `recordScore` | accounts |
-| `friends` | friends/groups/invites tables, `UserDO` | — | accounts, puzzle, guess |
+| `notifications` | `notifications`, `NotificationDO` | `NotificationsService`: `send`/`sendMany`/`push`/`pushMany` | accounts |
+| `friends` | friends/groups/invites tables | — | accounts, puzzle, guess, notifications |
 | `guess` | `GameDO` | `GuessService`: `getStatus` | accounts, browse, leaderboard |
 | `puzzle` | `PuzzleDO` | `PuzzleService`: `getLobbyStatus` | accounts, browse, leaderboard |
+
+`notifications` is the one shared, general-purpose channel every other
+service pushes a user-facing message through — see "Notifications" below.
+It's the direct successor to what used to be `friends`' own invite-only
+`UserDO`.
 
 Two access patterns are both in play, deliberately:
 
@@ -310,6 +317,39 @@ accounts depend on it.
   request, and every join broadcasts a `player_joined` event so connected
   clients can render a live, colored roster.
 
+### Notifications (`apps/notifications`)
+
+The one shared, general-purpose channel every service uses to push a
+user-facing message — the direct successor to what used to be `friends`'
+own invite-only `UserDO`. Nothing here is hardcoded to invites, or to any
+other specific kind of message: a notification's `type` is a free-form
+string (`"invite"`, `"friend_request"`, `"system"`, whatever a future
+feature needs) carrying opaque, caller-defined `data`, so a brand-new kind
+of notification is just a new `type` string a caller starts sending — never
+a schema or API change in this service.
+
+- **Creating a notification is server-to-server only**, via the
+  `NotificationsService` RPC entrypoint (`services` binding +
+  `entrypoint: "NotificationsService"`) — there is no HTTP endpoint to
+  notify an arbitrary user, only to manage your own inbox. Two independent
+  choices a caller makes per call:
+  - **`send`/`sendMany`** persist a row in this service's own
+    `notifications` table (recoverable via `GET /api/notifications` if the
+    recipient was offline) *and* push it live. Use this for anything that
+    doesn't already have its own durable "what's pending" store.
+  - **`push`/`pushMany`** skip persistence and only push live — for a
+    caller that already owns its own source of truth (e.g. `friends`'
+    `game_invites` + `GET /api/invites/pending`), so the same fact isn't
+    kept in two places able to drift apart.
+- **Live delivery**: `NotificationDO` (one instance per user id, routed via
+  `getByName(userId)`) holds that user's open WebSocket connections and
+  broadcasts to all of them the instant `send`/`push` runs. A client opens
+  one via `GET /api/notifications/ws` — same shape as every game DO's
+  WebSocket, just for account-wide messages instead of one game's state.
+- **Inbox**: `GET /api/notifications` lists this user's unread, persisted
+  notifications; `POST /api/notifications/:id/read` and
+  `POST /api/notifications/read-all` clear them.
+
 ### Friends & invites (`apps/friends`)
 
 - **Friends** (`GET /api/friends`): request by username
@@ -323,12 +363,13 @@ accounts depend on it.
   fans out to every member of a group (`groupId`) — one `game_invites` row
   per recipient either way. Accepting (`POST /api/invites/:id/accept`)
   returns a `playUrl` the client redirects to.
-- **Live delivery** (`notifications.model.ts`): the recipient doesn't have
-  to be on the friends page to see an invite — a client can open a
-  WebSocket to `GET /api/notifications/ws`, backed by a `UserDO` (one
-  instance per user id). `POST /api/invites` pushes to it right after the
-  D1 write. D1 (`game_invites`) stays the source of truth — `GET
-  /api/invites/pending` covers anything sent while a client was offline.
+- **Live delivery**: the recipient doesn't have to be on the friends page to
+  see an invite — `POST /api/invites` calls `NOTIFICATIONS.push()` (see
+  "Notifications" below) right after the D1 write, so a connected client
+  gets it instantly over `apps/notifications`' shared WebSocket instead of
+  `friends` owning a delivery channel of its own. D1 (`game_invites`) stays
+  the source of truth either way — `GET /api/invites/pending` covers
+  anything sent while a client was offline, same as before.
 - Every mutating friends/groups/invites route requires a session and
   returns 401/403 on cross-user access (stealing someone else's group,
   accepting someone else's invite).
@@ -336,7 +377,7 @@ accounts depend on it.
 ## One-time setup
 
 ```sh
-npm install                                          # installs all six apps + the shared package
+npm install                                          # installs all seven apps + the shared package
 
 wrangler r2 bucket create game-guess-images           # shared by guess + puzzle
 wrangler queues create game-generation
@@ -422,7 +463,7 @@ The actual per-service deploy steps (checkout, `npm ci`, `wrangler deploy`)
 live once in the reusable `.github/workflows/deploy-service.yml`
 (`workflow_call`); `deploy.yml` just calls it once per service with three
 `with:` values (`service`, `working_directory`, `environment`) instead of
-repeating the same six-step block six times.
+repeating the same six-step block once per service.
 
 Two ways it runs:
 

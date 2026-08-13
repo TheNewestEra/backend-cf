@@ -35,9 +35,9 @@ name: Deploy Workers
 # via workflow_dispatch's `services` input, in dependency order, before
 # switching that environment over to normal fully-parallel runs:
 #   1. accounts, browse
-#   2. leaderboard            (binds ACCOUNTS)
-#   3. guess, puzzle          (bind ACCOUNTS, BROWSE, LEADERBOARD)
-#   4. friends                (binds ACCOUNTS, PUZZLE)
+#   2. leaderboard, notifications   (bind ACCOUNTS)
+#   3. guess, puzzle                (bind ACCOUNTS, BROWSE, LEADERBOARD)
+#   4. friends                      (binds ACCOUNTS, PUZZLE, GUESS, NOTIFICATIONS)
 #
 # Each deploying service also gets its Angular client package (re)published
 # via the reusable ./publish-client.yml workflow, in its own matrix job that

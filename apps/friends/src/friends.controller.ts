@@ -316,7 +316,7 @@ friendsRoutes.openapi(
         path: "/api/invites/pending",
         tags: ["Invites"],
         summary: "List invites sent to this user while they were offline",
-        description: "New invites while connected arrive over the notifications WebSocket instead; this is not polled. Returns an empty list for anonymous visitors rather than 401 so the fetch can run unconditionally.",
+        description: "New invites while connected arrive over apps/notifications' WebSocket instead (see POST /api/invites below); this is not polled. Returns an empty list for anonymous visitors rather than 401 so the fetch can run unconditionally.",
         responses: {
             200: {
                 description: "Pending invites",
@@ -336,21 +336,6 @@ friendsRoutes.openapi(
         return c.json({invites}, 200);
     },
 );
-
-/** Real-time delivery channel for this user's invites — see
- * notifications.model.ts. One UserDO instance per user id, holding a
- * WebSocket per open tab. Not OpenAPI-documented: this is a WebSocket
- * upgrade. */
-friendsRoutes.get("/api/notifications/ws", async (c) => {
-    if (c.req.header("Upgrade") !== "websocket") {
-        return c.text("Expected WebSocket", 426);
-    }
-    const user = await currentUser(c);
-    if (!user) return c.text("not logged in", 401);
-
-    const stub = c.env.USER_DO.getByName(user.id);
-    return stub.fetch(c.req.raw);
-});
 
 friendsRoutes.openapi(
     createRoute({
@@ -441,14 +426,17 @@ friendsRoutes.openapi(
 
         // D1 writes above are what actually matter — a dropped push just
         // means the recipient sees it on their next page load/reconnect
-        // instead of instantly, via GET /api/invites/pending.
+        // instead of instantly, via GET /api/invites/pending. Delivery-only
+        // (`push`, not `send`): `game_invites` is already this invite's
+        // source of truth, so a second, persisted copy in apps/notifications'
+        // own inbox table would just be two copies of the same fact able to
+        // drift — see @game-worker/shared/rpc-types' `NotificationsRpc`.
+        // Reuses the invite's own id as the pushed notification's id.
         await Promise.all(
             invitesResult.value.map((invite: InviteSummary, i: number) =>
-                c.env.USER_DO.getByName(recipientIds[i]!)
-                    .notifyInvite(invite)
-                    .catch((err) => {
-                        console.error("failed to push invite notification", recipientIds[i], err);
-                    }),
+                c.env.NOTIFICATIONS.push(recipientIds[i]!, {id: invite.id, type: "invite", data: invite}).catch((err) => {
+                    console.error("failed to push invite notification", recipientIds[i], err);
+                }),
             ),
         );
         return c.json({ok: true as const, invited: recipientIds.length}, 200);

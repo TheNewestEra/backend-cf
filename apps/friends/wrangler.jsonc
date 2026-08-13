@@ -47,23 +47,33 @@
       "binding": "GUESS",
       "service": "game-guess-worker",
       "entrypoint": "GuessService"
+    },
+    {
+      "binding": "NOTIFICATIONS",
+      "service": "game-notifications-worker",
+      "entrypoint": "NotificationsService"
     }
   ],
-  // One DO instance per user (getByName(userId)) — a pure WebSocket
-  // delivery channel for game invites, no storage of its own (see
-  // notifications.model.ts).
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "USER_DO",
-        "class_name": "UserDO"
-      }
-    ]
-  },
+  // The old per-user `UserDO` (an invite-only WebSocket relay) has moved to
+  // apps/notifications' `NotificationDO`, reached via the NOTIFICATIONS
+  // binding above instead of a Durable Object namespace binding of this
+  // Worker's own — see apps/notifications/wrangler.jsonc and this app's
+  // friends.controller.ts (`POST /api/invites` now calls
+  // `NOTIFICATIONS.push()`). `deleted_classes` below actually decommissions
+  // the class (rather than just dropping its binding, which would leave it
+  // running, unreachable, forever) — safe here specifically because
+  // `UserDO` never stored anything in its own `ctx.storage`, just relayed
+  // live WebSocket messages.
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": [
+        "UserDO"
+      ]
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": [
         "UserDO"
       ]
     }
@@ -105,20 +115,23 @@
           "binding": "GUESS",
           "service": "game-guess-worker-staging",
           "entrypoint": "GuessService"
+        },
+        {
+          "binding": "NOTIFICATIONS",
+          "service": "game-notifications-worker-staging",
+          "entrypoint": "NotificationsService"
         }
       ],
-      "durable_objects": {
-        "bindings": [
-          {
-            "name": "USER_DO",
-            "class_name": "UserDO"
-          }
-        ]
-      },
       "migrations": [
         {
           "tag": "v1",
           "new_sqlite_classes": [
+            "UserDO"
+          ]
+        },
+        {
+          "tag": "v2",
+          "deleted_classes": [
             "UserDO"
           ]
         }
@@ -175,20 +188,23 @@
           "binding": "GUESS",
           "service": "game-guess-worker-prod",
           "entrypoint": "GuessService"
+        },
+        {
+          "binding": "NOTIFICATIONS",
+          "service": "game-notifications-worker-prod",
+          "entrypoint": "NotificationsService"
         }
       ],
-      "durable_objects": {
-        "bindings": [
-          {
-            "name": "USER_DO",
-            "class_name": "UserDO"
-          }
-        ]
-      },
       "migrations": [
         {
           "tag": "v1",
           "new_sqlite_classes": [
+            "UserDO"
+          ]
+        },
+        {
+          "tag": "v2",
+          "deleted_classes": [
             "UserDO"
           ]
         }

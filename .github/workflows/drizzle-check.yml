@@ -61,7 +61,7 @@ jobs:
         # alongside services.json's d1_services if a service starts or
         # stops owning D1 tables, or add/remove a DO-storage app here
         # directly.
-        service: [accounts, browse, friends, guess, leaderboard, puzzle]
+        service: [accounts, browse, friends, guess, leaderboard, notifications, puzzle]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

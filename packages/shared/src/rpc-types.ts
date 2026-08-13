@@ -75,3 +75,39 @@ export interface GuessRpc {
         color: string,
     ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>>;
 }
+
+/** Input shared by every `NotificationsRpc` write below — `type` is a
+ * free-form string (e.g. "invite", "friend_request", "system"), not a
+ * closed enum, so a brand-new kind of notification never needs a change
+ * here. `data` is opaque, caller-defined JSON. */
+export interface NotificationInput {
+    type: string;
+    title?: string;
+    body?: string;
+    data?: unknown;
+}
+
+/** A persisted notification, as returned by `NotificationsRpc.send()`. */
+export interface NotificationRecord {
+    id: string;
+    type: string;
+    title: string | null;
+    body: string | null;
+    data: unknown;
+    createdAt: number;
+    readAt: number | null;
+}
+
+/** RPC surface exposed by `apps/notifications`' `NotificationsService` —
+ * the main way any service pushes a user-facing message. `send`/`sendMany`
+ * persist a durable inbox row (recoverable via that service's own
+ * `GET /api/notifications`) and push it live; `push`/`pushMany` skip
+ * persistence and only push live, for a caller (e.g. `apps/friends`) that
+ * already owns its own source of truth for "what's pending". See
+ * apps/notifications/src/index.ts for the full rationale. */
+export interface NotificationsRpc {
+    send(userId: string, input: NotificationInput): Promise<RpcResult<NotificationRecord>>;
+    sendMany(userIds: string[], input: NotificationInput): Promise<void>;
+    push(userId: string, input: NotificationInput & { id?: string }): Promise<void>;
+    pushMany(userIds: string[], input: NotificationInput & { id?: string }): Promise<void>;
+}

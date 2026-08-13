@@ -2,9 +2,6 @@ import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {friendsRoutes} from "./friends.controller";
-import {UserDO} from "./notifications.model";
-
-export {UserDO};
 
 const app = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -17,9 +14,8 @@ app.doc("/openapi.json", {
         title: "Friends Service API",
         version: "1.0.0",
         description:
-            "Friends, groups, and game invites. The notifications WebSocket upgrade endpoint " +
-            "(`/api/notifications/ws`) isn't representable in OpenAPI 3 and is omitted from this spec, though " +
-            "it's a real, functioning route.",
+            "Friends, groups, and game invites. Real-time invite delivery is not a route here at all — see " +
+            "apps/notifications, which every service (this one included) pushes user-facing messages through.",
     },
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));

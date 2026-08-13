@@ -1,5 +1,5 @@
 {
   "//": "Single source of truth for which Workers this pipeline knows about (see deploy.yml). Adding a new service under apps/<name> is just a new entry here — no workflow_dispatch input, job, or matrix entry to add. Convention assumed by deploy.yml/publish-client.yml: source lives in apps/<name>, published client package is @thenewestera/<name>-ng.",
-  "services": ["accounts", "browse", "leaderboard", "guess", "puzzle", "friends"],
-  "d1_services": ["accounts", "browse", "leaderboard", "friends"]
+  "services": ["accounts", "browse", "leaderboard", "guess", "puzzle", "notifications", "friends"],
+  "d1_services": ["accounts", "browse", "leaderboard", "notifications", "friends"]
 }

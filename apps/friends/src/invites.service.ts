@@ -11,8 +11,8 @@ export type InviteSummary = z.infer<typeof InviteSummarySchema>;
 export type InviteKind = InviteSummary["kind"];
 
 /** Returns the created invite's public shape so the caller can push it over
- * the recipient's notifications DO WebSocket without a round-trip read back
- * from D1. */
+ * the recipient's apps/notifications WebSocket (via `NOTIFICATIONS.push()`)
+ * without a round-trip read back from D1. */
 export const createInvite = (
     db: Db,
     inviterId: string,
