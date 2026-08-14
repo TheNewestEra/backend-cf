@@ -175,6 +175,24 @@ export const removeFriend = (db: Db, userId: string, friendId: string): ResultAs
         db.batch([
             db.delete(friendships).where(and(eq(friendships.userId, userId), eq(friendships.friendId, friendId))),
             db.delete(friendships).where(and(eq(friendships.userId, friendId), eq(friendships.friendId, userId))),
+            db.delete(friendGroupMembers).where(
+                and(
+                    eq(friendGroupMembers.friendId, friendId),
+                    inArray(
+                        friendGroupMembers.groupId,
+                        db.select({id: friendGroups.id}).from(friendGroups).where(eq(friendGroups.ownerId, userId)),
+                    ),
+                ),
+            ),
+            db.delete(friendGroupMembers).where(
+                and(
+                    eq(friendGroupMembers.friendId, userId),
+                    inArray(
+                        friendGroupMembers.groupId,
+                        db.select({id: friendGroups.id}).from(friendGroups).where(eq(friendGroups.ownerId, friendId)),
+                    ),
+                ),
+            ),
         ]),
     ).map(_ => undefined);
 
