@@ -236,6 +236,11 @@ export const GameWsGuessMessageSchema = z
         color: z.string(),
         correct: z.boolean(),
         score: z.number().nullable(),
+        guess: z
+            .string()
+            .optional()
+            .openapi({description: "What was actually typed — only present when `correct` is false; omitted on a correct guess so this broadcast can't spoil the prompt for anyone still guessing this round"}),
+        createdAt: z.number().openapi({description: "Epoch ms this guess was recorded — same instant as the `guesses` row's own `createdAt`"}),
     })
     .openapi("GameWsGuessMessage");
 

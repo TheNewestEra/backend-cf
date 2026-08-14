@@ -381,6 +381,7 @@ class GameDO extends DurableObject<Env> {
             ? scoreForGuess(round.startedAt, round.timeLimitMs, await guessMaxScore(this.env), await guessMinScore(this.env))
             : null;
 
+        const createdAt = Date.now();
         this.db
             .insert(guesses)
             .values({
@@ -390,7 +391,7 @@ class GameDO extends DurableObject<Env> {
                 guess,
                 correct: correct ? 1 : 0,
                 score,
-                createdAt: Date.now(),
+                createdAt,
             })
             .run();
 
@@ -412,6 +413,8 @@ class GameDO extends DurableObject<Env> {
             color: participant.color,
             correct,
             score,
+            ...(correct ? {} : {guess}),
+            createdAt,
         });
 
         if (correct) {
