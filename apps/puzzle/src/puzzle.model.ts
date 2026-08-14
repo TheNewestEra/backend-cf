@@ -1024,12 +1024,13 @@ function shuffledBoard(gridSize: number): number[] {
  * correctly-placed tile instead of per correct guess, and by whoever
  * placed it rather than only whoever happens to make the puzzle's last
  * move. `matchesDelta` is how many of this move's two cells went from
- * wrong to right (0 or negative means the move didn't improve the board —
- * same "wrong guess earns nothing" rule as `scoreForGuess()`, so this
- * returns `null` rather than a number for those). `startedAt` is only
- * null for a puzzle somehow being scored before `beginPlaying()` ran;
- * treated as "just started" (max score) rather than throwing, same
- * fallback `scoreForGuess()` uses for its own `startedAt`. */
+ * wrong to right (0 means the move didn't improve the board at all — a
+ * "wrong move", unlike `scoreForGuess()`'s "wrong guess earns nothing"
+ * rule, still earns a flat consolation point here rather than nothing, so
+ * this never returns `null`). `startedAt` is only null for a puzzle
+ * somehow being scored before `beginPlaying()` ran; treated as "just
+ * started" (max score) rather than throwing, same fallback
+ * `scoreForGuess()` uses for its own `startedAt`. */
 function scoreForMove(
     startedAt: number | null,
     limitMs: number,
@@ -1037,8 +1038,8 @@ function scoreForMove(
     minScore: number,
     matchesDelta: number,
     cellCount: number,
-): number | null {
-    if (matchesDelta <= 0) return null;
+): number {
+    if (matchesDelta <= 0) return 1;
     const elapsedMs = Date.now() - (startedAt ?? Date.now());
     const remainingMs = Math.max(0, limitMs - elapsedMs);
     const maxPerTile = maxScore / cellCount;
