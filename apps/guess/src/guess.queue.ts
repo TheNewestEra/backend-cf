@@ -11,10 +11,19 @@ import {RoundStatus} from "./guess.schema";
 export interface GuessQueueMessage {
     gameId: string;
     theme: string | null;
+    // Whether `theme` (once resolved) should be recorded as picked-for-this-
+    // game rather than typed in — always the enqueuing caller's own call,
+    // never re-derived here from `theme === null`, since `theme` is
+    // non-null on *both* a normal user-given creation and a regenerate
+    // enqueue (which seeds a brand-new instance from a finished game's own
+    // theme, auto-generated or not — see guess.controller.ts's
+    // `/regenerate`, which carries the source's `themeGenerated` straight
+    // through rather than re-deriving it).
+    themeGenerated: boolean;
 }
 
 export async function processGuessGame(message: GuessQueueMessage, env: Env): Promise<void> {
-    const {gameId, theme} = message;
+    const {gameId, theme, themeGenerated} = message;
     const stub = env.GAME_DO.getByName(gameId);
 
     await stub.setStatus(GameSessionStatus.Generating);
@@ -31,14 +40,20 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     // consumer's caller (index.ts's `queue()` handler) still drives its
     // retry off a thrown/rejected promise, same as before
     // generateRoundPrompts() started returning a `Result` (see that
-    // function's own doc comment in @game-worker/shared/ai).
-    const prompts = (await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount)).match(
-        (prompts) => prompts,
+    // function's own doc comment in @game-worker/shared/ai). `resolvedTheme`
+    // is `theme` itself when given, otherwise whatever the model settled on
+    // (a Flagship preset, or its own idea) — see `setPrompts()`'s own doc
+    // comment for why it's persisted right alongside the prompts it produced.
+    const {theme: resolvedTheme, prompts} = (await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount)).match(
+        (value) => value,
         (error) => {
             throw new Error(error);
         },
     );
-    await stub.setPrompts(prompts);
+    await Promise.all([
+        stub.setPrompts(prompts, resolvedTheme, themeGenerated),
+        env.BROWSE.updateCatalogTheme(gameId, resolvedTheme, themeGenerated),
+    ]);
 
     // Still `generating` — per-round progress from here on is visible via
     // each round's own pending/generating/ready/error status instead of a

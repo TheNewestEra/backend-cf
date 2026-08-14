@@ -29,6 +29,7 @@ import {
     guessMaxScore,
     guessMinScore,
     guessTimeLimitSeconds,
+    imageKeyFor,
     imageUrlPathFor,
     postRoundSeconds,
     roundCount,
@@ -82,8 +83,8 @@ export type GameWsAction = (typeof GameWsAction)[keyof typeof GameWsAction];
  * playable, so letting someone join at that point would let them play a
  * game already in progress rather than just spectate it; `waiting` is the
  * lobby itself, still open to joiners same as Piece Puzzle's; `error` is a
- * dead end with nothing left to join (replay creates a fresh instance
- * instead). */
+ * dead end with nothing left to join (replay/regenerate both create a
+ * fresh instance instead). */
 const JOINABLE_STATUSES: readonly GameStatus[] = [
     GameSessionStatus.Queued,
     GameSessionStatus.Generating,
@@ -113,7 +114,10 @@ const JOINABLE_STATUSES: readonly GameStatus[] = [
  * the host's `startNow()`. The creator ("host") gets a one-time secret
  * token back from `init()`, never broadcast or included in `getState()`,
  * which their browser must present to start early — same contract as
- * `PuzzleDO`'s `host_token`.
+ * `PuzzleDO`'s `host_token`. Neither replaying nor regenerating a finished
+ * game reuses this token at all — see POST /games/{id}/replay and
+ * POST /games/{id}/regenerate, both of which spin up a whole new instance
+ * (and a new host token) rather than resetting this one in place.
  */
 class GameDO extends DurableObject<Env> {
     // Threaded through as a class field (rather than a parameter, unlike
@@ -152,6 +156,7 @@ class GameDO extends DurableObject<Env> {
             .values({
                 id: gameId,
                 theme,
+                themeGenerated: 0,
                 status: "queued",
                 error: null,
                 hostToken,
@@ -169,6 +174,7 @@ class GameDO extends DurableObject<Env> {
                 target: game.id,
                 set: {
                     theme: sql`excluded.theme`,
+                    themeGenerated: 0,
                     status: "queued",
                     error: null,
                     hostToken: sql`excluded.host_token`,
@@ -187,8 +193,63 @@ class GameDO extends DurableObject<Env> {
         return hostToken;
     }
 
-    // --- RPC: create a brand new game's state (never called twice for the
-    // same id — /replay always targets a fresh, independent gameId) --------
+    // --- RPC: create a brand new game (never called twice for the same id —
+    // /replay always targets a fresh, independent gameId) -------------------
+
+    /** Creates a brand-new game instance already sitting in the waiting room
+     * with every round's prompt/image already known — used by
+     * POST /games/{id}/replay, which reuses a *finished* game's rounds
+     * (their images copied into this new id's R2 keys by the caller) rather
+     * than spending a fresh round of AI calls. Never called twice for the
+     * same id, same as `init()`. Returns a fresh host token — whoever
+     * replays becomes this new instance's host, independent of who hosted
+     * the original. `themeGenerated` is carried over from the source game
+     * as-is (see guess.controller.ts's `/replay`) — whether a theme was
+     * typed in or picked for it is a property of the theme itself, not of
+     * this particular instance, so a replay of an auto-generated theme is
+     * still an auto-generated theme even though `theme` here is now a
+     * concrete, known string either way. Mirrors `PuzzleDO.initFromSource()`. */
+    async initFromSource(
+        gameId: string,
+        theme: string | null,
+        origin: string,
+        prompts: string[],
+        themeGenerated: boolean,
+    ): Promise<string> {
+        await this.ctx.storage.deleteAlarm();
+        const hostToken = crypto.randomUUID();
+        const now = Date.now();
+        const endsAt = lobbyEndsAt(now, await lobbyCountdownSeconds(this.env.FLAGS));
+        this.db.delete(guesses).run();
+        this.db.delete(rounds).run();
+        this.db.delete(participants).run();
+        this.db
+            .insert(game)
+            .values({
+                id: gameId,
+                theme,
+                themeGenerated: themeGenerated ? 1 : 0,
+                status: "waiting",
+                error: null,
+                hostToken,
+                origin,
+                lobbyEndsAt: endsAt,
+                postRoundIndex: null,
+                postRoundEndsAt: null,
+                roundCount: prompts.length,
+                createdAt: now,
+            })
+            .run();
+        prompts.forEach((prompt, idx) => {
+            this.db
+                .insert(rounds)
+                .values({idx, prompt, status: "ready", imageKey: imageKeyFor(gameId, idx), readyAt: now})
+                .run();
+        });
+        await this.ctx.storage.setAlarm(endsAt);
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
+        return hostToken;
+    }
 
     getState(): GamePublic {
         return this.readPublicState();
@@ -206,11 +267,26 @@ class GameDO extends DurableObject<Env> {
 
     // --- RPC: progress updates from the queue consumer ---------------------
 
-    async setPrompts(prompts: string[]): Promise<void> {
+    /** `theme` is the resolved theme these prompts were written around — the
+     * caller's own if they gave one, otherwise whatever
+     * `generateRoundPrompts()` (a Flagship preset, or the model's own idea)
+     * came back with; `themeGenerated` says which case it was. Writing both
+     * here (rather than a separate RPC) keeps "the theme became known" and
+     * "the prompts it produced" a single atomic update, since they're
+     * always resolved together by the same `generateRoundPrompts()` call —
+     * see guess.queue.ts's `processGuessGame()`. */
+    async setPrompts(prompts: string[], theme: string, themeGenerated: boolean): Promise<void> {
+        this.db.update(game).set({theme, themeGenerated: themeGenerated ? 1 : 0}).run();
         prompts.forEach((prompt, idx) => {
             this.db.update(rounds).set({prompt}).where(eq(rounds.idx, idx)).run();
         });
         this.broadcast({type: GameWsEventType.PromptsReady, count: prompts.length});
+        // Full state push (not just the PromptsReady one above) so clients
+        // pick up the now-resolved theme/themeGenerated straight away —
+        // otherwise a freeform game's theme wouldn't show up until
+        // `setReady()`'s own broadcast, once every image has *also*
+        // finished generating.
+        this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
     }
 
     async setRoundStatus(index: number, status: RoundStatus, error?: string): Promise<void> {
@@ -995,6 +1071,7 @@ class GameDO extends DurableObject<Env> {
         return {
             id: gameRow?.id ?? "",
             theme: gameRow?.theme ?? null,
+            themeGenerated: gameRow?.themeGenerated === 1,
             status: gameRow?.status ?? GameSessionStatus.Queued,
             error: gameRow?.error ?? undefined,
             rounds: roundRows.map((r) => ({

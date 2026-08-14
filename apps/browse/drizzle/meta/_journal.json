@@ -15,6 +15,20 @@
       "when": 1786651186889,
       "tag": "0001_organic_lady_vermin",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786729321719,
+      "tag": "0002_tidy_captain_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786730931791,
+      "tag": "0003_greedy_lila_cheney",
+      "breakpoints": true
     }
   ]
 }

@@ -14,10 +14,12 @@
 // durable-sqlite/migrator source).
 import journal from "../../drizzle/meta/_journal.json";
 import m0000 from "../../drizzle/0000_absent_thanos.sql";
+import m0001 from "../../drizzle/0001_flimsy_emma_frost.sql";
 
 export default {
     journal,
     migrations: {
         m0000,
+        m0001,
     },
 };

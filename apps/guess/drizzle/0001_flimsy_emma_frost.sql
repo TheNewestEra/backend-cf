@@ -1,0 +1,1 @@
+ALTER TABLE `game` ADD `theme_generated` integer DEFAULT 0 NOT NULL;

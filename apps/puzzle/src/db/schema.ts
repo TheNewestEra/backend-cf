@@ -38,6 +38,13 @@ import type {GameSessionStatus} from "@game-worker/shared/game-session-status";
 export const puzzle = sqliteTable("puzzle", {
     id: text("id").primaryKey(),
     theme: text("theme"),
+    // Set once the theme is actually known — either the caller's own
+    // (verbatim) or, when they didn't give one, whatever the prompt model
+    // resolved to (a Flagship preset, or one it invented itself) — see
+    // PuzzleDO.setReady()/@game-worker/shared/ai's `generateImagePrompt()`.
+    // 0/1 rather than a real boolean column, same convention apps/guess's
+    // own `game.theme_generated` uses.
+    themeGenerated: integer("theme_generated").notNull().default(0),
     prompt: text("prompt"),
     status: text("status").notNull().default("queued").$type<GameSessionStatus>(),
     error: text("error"),

@@ -83,6 +83,7 @@ export const RoundPublicSchema = z
             }),
     })
     .openapi("Round");
+export type RoundPublic = z.infer<typeof RoundPublicSchema>;
 
 /** A single participant's running total across every `correct` guess this
  * game — sorted highest-first, so index 0 is always the leader. Present
@@ -109,6 +110,12 @@ export const GamePublicSchema = z
     .object({
         id: z.string(),
         theme: z.string().nullable(),
+        themeGenerated: z.boolean().openapi({
+            description:
+                "Whether `theme` was picked for this game (a Flagship preset, or the prompt model's own idea) " +
+                "rather than typed in by whoever created it — null/false until generation resolves a theme for a " +
+                "game that started with none.",
+        }),
         status: GameStatusSchema,
         error: z.string().optional(),
         rounds: z.array(RoundPublicSchema),

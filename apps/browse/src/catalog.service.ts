@@ -13,20 +13,39 @@ import {catalog, ratings} from "./db/schema";
  * recorded either way, as a point-in-time snapshot (same pattern `theme`
  * already uses) rather than a live join back to `users` at read time — an
  * anonymous host has no persisted `users` row to join against, so the
- * snapshot is what makes their chosen name/color displayable at all. */
-export const insertCatalogEntry = (
+ * snapshot is what makes their chosen name/color displayable at all.
+ *
+ * `replayOf`, when given, is the source catalog id a guess/puzzle `/replay`
+ * endpoint is creating this entry from. Resolves `rootId` off that source
+ * row (its own `rootId`, or its `id` if it's the chain's root itself) in a
+ * separate read rather than a single INSERT...SELECT — one extra round
+ * trip, but keeps this function's shape a plain `.values()` insert like
+ * every other write in this file, and `replayOf` never names a row that
+ * doesn't already exist (the caller always creates the source entry first),
+ * so `source` is only ever missing for data that predates this column.
+ *
+ * `themeGenerated` records whether `theme` was picked for this entry rather
+ * than typed in — see `updateCatalogTheme` below for the write that backfills
+ * the real value once generation resolves one for a themeless entry. */
+export const insertCatalogEntry = async (
     db: Db,
     id: string,
     kind: GameKind,
     theme: string | null,
     creator: {id: string | null; name: string; color: string},
-): Promise<D1Response> =>
-    db
+    replayOf?: string | null,
+    themeGenerated?: boolean,
+): Promise<D1Response> => {
+    const rootId = replayOf
+        ? ((await db.select({rootId: catalog.rootId}).from(catalog).where(eq(catalog.id, replayOf)).get())?.rootId ?? replayOf)
+        : id;
+    return db
         .insert(catalog)
         .values({
             id,
             kind,
             theme,
+            themeGenerated: themeGenerated ? 1 : 0,
             status: CatalogStatus.Generating,
             thumbnailKey: null,
             playStatus: PlayStatus.Joinable,
@@ -35,9 +54,22 @@ export const insertCatalogEntry = (
             createdBy: creator.id,
             creatorName: creator.name,
             creatorColor: creator.color,
+            replayOf: replayOf ?? null,
+            rootId,
             createdAt: Date.now(),
             updatedAt: Date.now(),
         })
+        .run();
+};
+
+/** Backfills `theme`/`themeGenerated` once generation actually resolves a
+ * theme for an entry that started with none — see CatalogRpc's own doc
+ * comment (@game-worker/shared/rpc-types) for the full contract. */
+export const updateCatalogTheme = (db: Db, id: string, theme: string, themeGenerated: boolean): Promise<D1Response> =>
+    db
+        .update(catalog)
+        .set({theme, themeGenerated: themeGenerated ? 1 : 0, updatedAt: Date.now()})
+        .where(eq(catalog.id, id))
         .run();
 
 export const updatePlayStatus = (db: Db, id: string, playStatus: PlayStatus): Promise<D1Response> =>
@@ -82,6 +114,13 @@ export interface ListCatalogOptions {
  * matching the raw-SQL `CASE` this replaced. */
 const ratingRatio = sql`CASE WHEN ${catalog.ratingCount} > 0 THEN ${catalog.ratingSum} * 1.0 / ${catalog.ratingCount} ELSE -1 END`;
 
+/** Groups a possibly-pre-`root_id` row into its replay chain — see
+ * db/schema.ts's `rootId` doc comment for why a null falls back to the
+ * row's own id rather than a real chain lookup. Shared by every place
+ * `listCatalog` needs "which chain is this row part of", so the grouping
+ * subquery and the join condition that reads it back can't drift apart. */
+const familyId = sql`COALESCE(${catalog.rootId}, ${catalog.id})`;
+
 export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalogOptions, origin: string): Promise<CatalogEntry[]> => {
     const friendIdsList = opts.createdByFriendsOf ? await friends.getFriendIds(opts.createdByFriendsOf) : null;
     // A viewer with no friends yet can't have any "created by friends"
@@ -98,9 +137,38 @@ export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalog
 
     const orderBy = opts.sort === CatalogSort.Rating ? [desc(ratingRatio), desc(catalog.createdAt)] : [desc(catalog.createdAt)];
 
-    const rows = await db
-        .select()
+    const family = db
+        .select({
+            familyId: familyId.as("family_id"),
+            maxCreatedAt: sql<number>`MAX(${catalog.createdAt})`.as("max_created_at"),
+            instanceCount: sql<number>`COUNT(*)`.as("instance_count"),
+        })
         .from(catalog)
+        .where(and(...conditions))
+        .groupBy(familyId)
+        .as("family");
+
+    const rows = await db
+        .select({
+            id: catalog.id,
+            kind: catalog.kind,
+            theme: catalog.theme,
+            themeGenerated: catalog.themeGenerated,
+            status: catalog.status,
+            thumbnailKey: catalog.thumbnailKey,
+            playStatus: catalog.playStatus,
+            ratingSum: catalog.ratingSum,
+            ratingCount: catalog.ratingCount,
+            createdBy: catalog.createdBy,
+            creatorName: catalog.creatorName,
+            creatorColor: catalog.creatorColor,
+            replayOf: catalog.replayOf,
+            createdAt: catalog.createdAt,
+            updatedAt: catalog.updatedAt,
+            replayCount: sql<number>`${family.instanceCount} - 1`,
+        })
+        .from(catalog)
+        .innerJoin(family, sql`${familyId} = ${family.familyId} AND ${catalog.createdAt} = ${family.maxCreatedAt}`)
         .where(and(...conditions))
         .orderBy(...orderBy)
         .limit(opts.limit)
@@ -145,10 +213,31 @@ export const submitRating = async (db: Db, catalogId: string, stars: number, rat
     });
 };
 
-const toPublic = (row: typeof catalog.$inferSelect, origin: string): CatalogEntry => ({
+/** What `listCatalog`'s row shape actually is: every `catalog` column
+ * `CatalogEntry` needs, plus `replayCount` (computed by the `family` join,
+ * not a real column — see `listCatalog`). */
+type CatalogRow = Pick<
+    typeof catalog.$inferSelect,
+    | "id"
+    | "kind"
+    | "theme"
+    | "themeGenerated"
+    | "thumbnailKey"
+    | "playStatus"
+    | "ratingSum"
+    | "ratingCount"
+    | "createdBy"
+    | "creatorName"
+    | "creatorColor"
+    | "replayOf"
+    | "createdAt"
+> & {replayCount: number};
+
+const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
     id: row.id,
     kind: row.kind,
     theme: row.theme,
+    themeGenerated: row.themeGenerated === 1,
     thumbnailUrl: row.thumbnailKey ? new URL(`/api/catalog/${row.id}/thumbnail`, origin) : null,
     playUrl: playUrlFor(row.kind, row.id),
     playStatus: row.playStatus,
@@ -161,4 +250,6 @@ const toPublic = (row: typeof catalog.$inferSelect, origin: string): CatalogEntr
     // comment on `insertCatalogEntry` for why it's a snapshot rather than a
     // live join.
     creator: row.creatorName ? {userId: row.createdBy, name: row.creatorName, color: row.creatorColor ?? "#888888"} : null,
+    replayOf: row.replayOf,
+    replayCount: row.replayCount,
 });

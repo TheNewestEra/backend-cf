@@ -28,6 +28,13 @@ export const catalog = sqliteTable(
         id: text("id").primaryKey(), // same id as the GameDO/PuzzleDO instance
         kind: text("kind").notNull().$type<GameKind>(),
         theme: text("theme"),
+        // Whether `theme` was picked for this entry (a Flagship preset, or
+        // the prompt model's own idea) rather than typed in by its creator —
+        // see CatalogRpc's `insertCatalogEntry`/`updateCatalogTheme` doc
+        // comments (@game-worker/shared/rpc-types) for how/when it's set.
+        // 0/1, same boolean-as-integer convention as guess/puzzle's own
+        // `theme_generated` columns.
+        themeGenerated: integer("theme_generated").notNull().default(0),
         status: text("status").notNull().default("generating").$type<CatalogStatus>(),
         thumbnailKey: text("thumbnail_key"), // R2 key, set once generation succeeds
         // Live play status, separate from `status` (which only ever reflects
@@ -46,6 +53,23 @@ export const catalog = sqliteTable(
         createdBy: text("created_by"), // account id of the creating user; null for anonymous hosts
         creatorName: text("creator_name"),
         creatorColor: text("creator_color"),
+        // `replayOf`/`rootId` model a replay chain — see
+        // migrations/0010_catalog_replay.sql's header comment. `replayOf` is
+        // the entry replayed *from* (one hop back), null for an entry that
+        // was created directly. `rootId` is resolved once at insert time to
+        // the chain's very first entry's id (itself, if this entry started
+        // the chain) so `listCatalog` can group a whole chain with a single
+        // `GROUP BY root_id` instead of a recursive walk back through
+        // `replayOf` on every read; nullable only because a column added via
+        // `ALTER TABLE` can't backfill itself off another column of the same
+        // row (SQLite computes a constant default, not an expression) — every
+        // row `insertCatalogEntry` writes from here on always sets it, same
+        // "nullable only for rows that predate the column" shape as
+        // `createdBy`/`creatorName` above. Every reader treats a null the
+        // same as `id` itself (`COALESCE(root_id, id)`) rather than special-
+        // casing it.
+        replayOf: text("replay_of"),
+        rootId: text("root_id"),
         createdAt: integer("created_at").notNull(),
         updatedAt: integer("updated_at").notNull(),
     },
@@ -58,6 +82,9 @@ export const catalog = sqliteTable(
         index("idx_catalog_kind_created").on(table.kind, sql`${table.createdAt} desc`),
         index("idx_catalog_play_status_created").on(table.playStatus, sql`${table.createdAt} desc`),
         index("idx_catalog_created_by").on(table.createdBy),
+        // Grouping index for `listCatalog`'s "one card per replay chain"
+        // query — same DESC-on-created_at shape as the indexes above.
+        index("idx_catalog_root_created").on(table.rootId, sql`${table.createdAt} desc`),
     ],
 );
 

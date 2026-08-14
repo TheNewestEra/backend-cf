@@ -10,6 +10,7 @@ import {
     markCatalogError,
     markCatalogGenerating,
     markCatalogReady,
+    updateCatalogTheme,
     updatePlayStatus,
 } from "./catalog.service";
 import {createDb} from "./db/client";
@@ -38,8 +39,14 @@ export class CatalogService extends WorkerEntrypoint<Env> {
         kind: GameKind,
         theme: string | null,
         creator: {id: string | null; name: string; color: string},
+        replayOf?: string | null,
+        themeGenerated?: boolean,
     ): Promise<D1Response> {
-        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme, creator);
+        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme, creator, replayOf, themeGenerated);
+    }
+
+    updateCatalogTheme(id: string, theme: string, themeGenerated: boolean): Promise<D1Response> {
+        return updateCatalogTheme(createDb(this.env.DB), id, theme, themeGenerated);
     }
 
     markCatalogGenerating(id: string): Promise<D1Response> {

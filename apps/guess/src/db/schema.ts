@@ -3,14 +3,12 @@
 // schema like accounts/browse/friends/leaderboard's. Each `GameDO` instance
 // (one per game, `env.GAME_DO.getByName(gameId)`) owns its own private
 // SQLite database; there is no shared physical database and no
-// `wrangler d1 migrations apply` step anywhere in this story. This file
-// describes the four tables as `guess.model.ts`'s `migrate()` actually
-// leaves them TODAY — i.e. after its `CREATE TABLE IF NOT EXISTS` block
-// *and* every idempotent `ALTER TABLE ... ADD COLUMN` that has since run
-// against it — not just the original `CREATE TABLE`'s columns. See this
-// directory's README for why `migrate()` stays hand-written raw SQL rather
-// than something drizzle-kit drives, and for the workflow to follow when
-// changing either it or this file.
+// `wrangler d1 migrations apply` step anywhere in this story. This IS the
+// source of truth: `drizzle-kit generate` reads it to produce the SQL under
+// ../../drizzle, which `guess.model.ts`'s `migrate()` applies via
+// `drizzle-orm/durable-sqlite/migrator` on every instance's construction.
+// See this directory's README for the full story and the workflow for a
+// future schema change. Mirrors apps/puzzle's own schema.ts.
 
 import {integer, sqliteTable, text} from "drizzle-orm/sqlite-core";
 import type {GameSessionStatus} from "@game-worker/shared/game-session-status";
@@ -27,6 +25,13 @@ import type {RoundStatus} from "../guess.schema";
 export const game = sqliteTable("game", {
     id: text("id").primaryKey(),
     theme: text("theme"),
+    // Set once the theme is actually known — either the caller's own
+    // (verbatim) or, when they didn't give one, whatever the prompt model
+    // resolved to (a Flagship preset, or one it invented itself) — see
+    // GameDO.setPrompts()/@game-worker/shared/ai's `generateRoundPrompts()`.
+    // 0/1 rather than a real boolean column, same convention every other
+    // boolean-shaped column in this codebase uses (e.g. `guesses.correct`).
+    themeGenerated: integer("theme_generated").notNull().default(0),
     status: text("status").notNull().default("queued").$type<GameSessionStatus>(),
     error: text("error"),
     hostToken: text("host_token").notNull().default(""),

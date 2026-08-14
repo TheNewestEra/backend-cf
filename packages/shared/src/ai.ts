@@ -16,10 +16,28 @@ async function pickPresetTheme(flags: Flagship): Promise<string | null> {
     return themes[Math.floor(Math.random() * themes.length)] ?? null;
 }
 
+/** What `generateRoundPrompts` resolves to: the theme it actually used
+ * alongside the generated round prompts. `theme` is never empty — see that
+ * function's own doc comment for how it's resolved. */
+export interface RoundPromptsResult {
+    theme: string;
+    prompts: string[];
+}
+
 /**
  * Asks a text model for exactly `roundCount` short image-generation prompts
  * around a theme (or a theme of its own choosing). These prompts double as
  * the hidden "answers" players guess once they see the generated image.
+ *
+ * The model is always asked to hand back a `theme` alongside `prompts` —
+ * when `theme` (or a Flagship preset — see `pickPresetTheme`) is already
+ * known, `resolvedTheme` is used as-is and the model's own echo is
+ * discarded; only when neither is available (the model was told to "pick
+ * any fun theme yourself") does its returned theme become the answer,
+ * since that's the only place that text exists at all — giving the caller
+ * (guess.queue.ts) something concrete to persist and show players instead
+ * of leaving a freeform game's theme forever unknown.
+ *
  * `ai.run()` itself is left to throw on genuine infra failure (network,
  * binding misconfiguration) — only the two *expected* validation failures
  * (malformed/wrong-count model output) resolve to an `Err` rather than
@@ -35,7 +53,7 @@ export async function generateRoundPrompts(
     flags: Flagship,
     theme: string | null,
     roundCount: number,
-): Promise<Result<string[], string>> {
+): Promise<Result<RoundPromptsResult, string>> {
     const resolvedTheme = theme ?? await pickPresetTheme(flags);
     const themeInstruction = resolvedTheme
         ? `The theme is: "${resolvedTheme}".`
@@ -45,6 +63,14 @@ export async function generateRoundPrompts(
     const promptsJsonSchema = {
         type: "object",
         properties: {
+            theme: {
+                type: "string",
+                minLength: 1,
+                maxLength: 100,
+                description:
+                    "The theme these prompts were written around — echo the given theme back verbatim, or name " +
+                    "the one you picked.",
+            },
             prompts: {
                 type: "array",
                 items: {type: "string", minLength: 3, maxLength: 200},
@@ -52,7 +78,7 @@ export async function generateRoundPrompts(
                 maxItems: roundCount,
             },
         },
-        required: ["prompts"],
+        required: ["theme", "prompts"],
     } as const;
 
     const result = await ai.run(model as typeof DEFAULT_PROMPT_MODEL, {
@@ -75,9 +101,9 @@ export async function generateRoundPrompts(
         },
     });
 
-    return extractPrompts(result).andThen((prompts) =>
+    return extractThemeAndPrompts(result).andThen(({theme: modelTheme, prompts}) =>
         prompts.length === roundCount
-            ? ok(prompts)
+            ? ok({theme: resolvedTheme ?? modelTheme, prompts})
             : err(`expected ${roundCount} prompts, model returned ${prompts.length}`),
     );
 }
@@ -89,31 +115,57 @@ function unwrapResponse(result: unknown): unknown {
     return (result as { response?: unknown } | undefined)?.response ?? result;
 }
 
-function extractText(result: unknown): string | undefined {
-    const response = unwrapResponse(result);
-    return typeof response === "string" ? response : undefined;
-}
-
-function extractPrompts(result: unknown): Result<string[], string> {
+function extractThemeAndPrompts(result: unknown): Result<RoundPromptsResult, string> {
     const response = unwrapResponse(result);
     const parsed = typeof response === "string" ? JSON.parse(response) : response;
-    const prompts = (parsed as { prompts?: unknown } | undefined)?.prompts;
+    const obj = parsed as { theme?: unknown; prompts?: unknown } | undefined;
+    const theme = typeof obj?.theme === "string" ? obj.theme.trim() : "";
+    if (!theme) return err("model did not return a `theme` string");
+    const prompts = obj?.prompts;
     if (!Array.isArray(prompts) || !prompts.every((p) => typeof p === "string")) {
         return err("model did not return a `prompts` string array");
     }
-    return ok(prompts.map((p) => p.trim()).filter(Boolean));
+    return ok({theme, prompts: prompts.map((p) => p.trim()).filter(Boolean)});
+}
+
+/** What `generateImagePrompt` resolves to: the theme it actually used
+ * alongside the single generated image prompt — same shape/resolution
+ * rules as `RoundPromptsResult`, just for Piece Puzzle's one image instead
+ * of Guess the Prompt's several. */
+export interface ImagePromptResult {
+    theme: string;
+    prompt: string;
 }
 
 /**
- * Asks a text model for a single vivid image prompt — used by the puzzle
- * game when the player doesn't supply their own theme. Steers the model
- * toward a Flagship-configured preset theme when one's available, otherwise
- * leaves the theme entirely up to the model, same as before.
+ * Asks a text model for a single vivid image prompt plus a short theme
+ * label describing it — used by the puzzle game when the player doesn't
+ * supply their own theme. Steers the model toward a Flagship-configured
+ * preset theme when one's available (in which case `theme` on the result
+ * is that same preset, not re-asked of the model — see
+ * `generateRoundPrompts`'s doc comment for why); otherwise leaves the
+ * theme entirely up to the model, whose own label becomes the answer.
  */
-export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<Result<string, string>> {
-    const theme = await pickPresetTheme(flags);
-    const themeInstruction = theme ? ` The theme is: "${theme}".` : "";
+export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<Result<ImagePromptResult, string>> {
+    const presetTheme = await pickPresetTheme(flags);
+    const themeInstruction = presetTheme ? ` The theme is: "${presetTheme}".` : " Invent a fun theme yourself.";
     const model = await promptModel(flags);
+
+    const promptJsonSchema = {
+        type: "object",
+        properties: {
+            theme: {
+                type: "string",
+                minLength: 1,
+                maxLength: 100,
+                description:
+                    "A short label (2-6 words) for the theme this prompt is about — echo the given theme back " +
+                    "verbatim, or name the one you invented.",
+            },
+            prompt: {type: "string", minLength: 3, maxLength: 200},
+        },
+        required: ["theme", "prompt"],
+    } as const;
 
     const result = await ai.run(model as typeof DEFAULT_PROMPT_MODEL, {
         messages: [
@@ -128,10 +180,24 @@ export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<Resu
                 content: `Write one fun image prompt, suitable for a sliding picture puzzle.${themeInstruction}`,
             },
         ],
+        response_format: {
+            type: "json_schema",
+            json_schema: promptJsonSchema,
+        },
     });
 
-    const text = extractText(result)?.trim();
-    return text ? ok(text) : err("model returned no prompt");
+    return extractThemeAndPrompt(result).map(({theme: modelTheme, prompt}) => ({theme: presetTheme ?? modelTheme, prompt}));
+}
+
+function extractThemeAndPrompt(result: unknown): Result<ImagePromptResult, string> {
+    const response = unwrapResponse(result);
+    const parsed = typeof response === "string" ? JSON.parse(response) : response;
+    const obj = parsed as { theme?: unknown; prompt?: unknown } | undefined;
+    const theme = typeof obj?.theme === "string" ? obj.theme.trim() : "";
+    const prompt = typeof obj?.prompt === "string" ? obj.prompt.trim() : "";
+    if (!theme) return err("model did not return a `theme` string");
+    if (!prompt) return err("model returned no prompt");
+    return ok({theme, prompt});
 }
 
 export async function generateImage(

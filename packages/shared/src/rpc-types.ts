@@ -48,13 +48,34 @@ export interface CatalogRpc {
      * entry to); `name`/`color` are the host's resolved display name/color
      * at creation time (an account's, or an anonymous host's chosen/
      * generated one) — see catalog.service.ts's `insertCatalogEntry` for
-     * why these are stored as a snapshot rather than joined live. */
+     * why these are stored as a snapshot rather than joined live. `replayOf`
+     * is the source catalog id when this entry was created by a /replay
+     * endpoint (guess/puzzle both pass it through); omitted/null for a
+     * freshly created game/puzzle. Lets browse group a replay chain into one
+     * card instead of listing each instance's (for Piece Puzzle,
+     * byte-identical) thumbnail separately — see catalog.service.ts's
+     * `listCatalog`. `themeGenerated` says whether `theme` was picked for
+     * this entry rather than typed in by its creator — for a fresh game/
+     * puzzle this is just `theme === null` at creation time (the real theme,
+     * if one gets auto-picked, isn't known until generation resolves it —
+     * see `updateCatalogTheme` below); for a replay it's carried over from
+     * the source entry as-is, since that's a property of the theme itself. */
     insertCatalogEntry(
         id: string,
         kind: GameKind,
         theme: string | null,
         creator: {id: string | null; name: string; color: string},
+        replayOf?: string | null,
+        themeGenerated?: boolean,
     ): Promise<void>;
+    /** Backfills `theme`/`themeGenerated` once generation actually resolves
+     * a theme for an entry that started with none — called alongside
+     * GameDO/PuzzleDO's own `setPrompts()`/`setReady()` (see guess.queue.ts/
+     * puzzle.queue.ts), never on its own. A no-op for an entry that already
+     * had a user-given theme (the call still happens, just re-writes the
+     * same value — see those queue consumers' own doc comments for why they
+     * don't bother branching on it). */
+    updateCatalogTheme(id: string, theme: string, themeGenerated: boolean): Promise<void>;
     markCatalogGenerating(id: string): Promise<void>;
     markCatalogReady(id: string, thumbnailKey: string): Promise<void>;
     markCatalogError(id: string): Promise<void>;

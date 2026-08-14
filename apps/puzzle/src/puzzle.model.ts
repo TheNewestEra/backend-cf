@@ -85,9 +85,9 @@ interface SelectionRow {
 }
 
 /** Statuses in which play hasn't started yet — the only window during which
- * joining (and, separately, the host's "regenerate") is allowed. Once a
- * puzzle is `playing` it's in progress, so letting someone join then would
- * let them play a match already underway rather than just spectate it. */
+ * joining is allowed. Once a puzzle is `playing` it's in progress, so
+ * letting someone join then would let them play a match already underway
+ * rather than just spectate it. */
 const JOINABLE_STATUSES: readonly PuzzleStatus[] = [
     GameSessionStatus.Queued,
     GameSessionStatus.Generating,
@@ -105,12 +105,12 @@ const JOINABLE_STATUSES: readonly PuzzleStatus[] = [
  * still connected.
  *
  * The creator ("host") gets a one-time secret token back from `init()`,
- * which their browser stores and must present to regenerate or start
- * early. It's never included in any broadcast or `getState()` — it only
- * ever leaves the DO once, in the creation response. Replaying a finished
- * puzzle doesn't reuse this token at all — see POST /puzzles/{id}/replay,
- * which spins up a whole new instance (and a new host token) instead of
- * resetting this one in place.
+ * which their browser stores and must present to start early. It's never
+ * included in any broadcast or `getState()` — it only ever leaves the DO
+ * once, in the creation response. Neither replaying nor regenerating a
+ * finished puzzle reuses this token at all — see POST /puzzles/{id}/replay
+ * and POST /puzzles/{id}/regenerate, both of which spin up a whole new
+ * instance (and a new host token) rather than resetting this one in place.
  */
 export class PuzzleDO extends DurableObject<Env> {
     private readonly db: Db;
@@ -133,6 +133,7 @@ export class PuzzleDO extends DurableObject<Env> {
             .values({
                 id: puzzleId,
                 theme,
+                themeGenerated: 0,
                 prompt: null,
                 status: GameSessionStatus.Queued,
                 error: null,
@@ -160,13 +161,19 @@ export class PuzzleDO extends DurableObject<Env> {
      * by the caller) rather than spending a fresh AI call. Never called
      * twice for the same id, same as `init()`. Returns a fresh host token —
      * whoever replays becomes this new instance's host, independent of who
-     * hosted the original. */
+     * hosted the original. `themeGenerated` is carried over from the source
+     * puzzle as-is (see puzzle.controller.ts's `/replay`) — whether a theme
+     * was typed in or picked for it is a property of the theme itself, not
+     * of this particular instance, so a replay of an auto-generated theme
+     * is still an auto-generated theme even though `theme` here is now a
+     * concrete, known string either way. */
     async initFromSource(
         puzzleId: string,
         theme: string | null,
         gridSize: number,
         timeLimitMs: number,
         prompt: string,
+        themeGenerated: boolean,
     ): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
@@ -176,6 +183,7 @@ export class PuzzleDO extends DurableObject<Env> {
             .values({
                 id: puzzleId,
                 theme,
+                themeGenerated: themeGenerated ? 1 : 0,
                 prompt,
                 status: GameSessionStatus.Waiting,
                 error: null,
@@ -215,58 +223,23 @@ export class PuzzleDO extends DurableObject<Env> {
     }
 
     /** Image is ready — enter the waiting room rather than starting instantly,
-     * so players can gather, and the host can preview/regenerate/start early. */
-    async setReady(prompt: string): Promise<void> {
+     * so players can gather, and the host can preview/start early.
+     * `theme` is the resolved theme this prompt was written around — the
+     * caller's own if they gave one, otherwise whatever
+     * `generateImagePrompt()` (a Flagship preset, or the model's own idea)
+     * came back with; `themeGenerated` says which case it was. Writing both
+     * here (rather than a separate RPC) keeps "the theme became known" and
+     * "the image it produced" a single atomic update, since they're always
+     * resolved together by the same `generateImagePrompt()` call — see
+     * puzzle.queue.ts's `processPuzzle()`. */
+    async setReady(prompt: string, theme: string, themeGenerated: boolean): Promise<void> {
         const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
         this.db
             .update(puzzle)
-            .set({prompt, status: GameSessionStatus.Waiting, error: null, lobbyEndsAt: endsAt})
+            .set({prompt, theme, themeGenerated: themeGenerated ? 1 : 0, status: GameSessionStatus.Waiting, error: null, lobbyEndsAt: endsAt})
             .run();
         await this.ctx.storage.setAlarm(endsAt);
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
-    }
-
-    /** Starts a fresh generation run — new AI image, new prompt. Returns the
-     * theme to re-enqueue with; keeps the same host token. Only available
-     * pre-start: once the puzzle is `playing`, other joined players are
-     * mid-game, so wiping it out from under them is no longer this action's
-     * job — see POST /puzzles/{id}/replay instead, which spins up a whole
-     * new instance. */
-    async resetForRegenerate(hostToken: string): Promise<RpcResult<string | null>> {
-        const validated = this.requireRow()
-            .andThen((row) => this.assertHost(row, hostToken))
-            .andThen((row) =>
-                JOINABLE_STATUSES.includes(row.status)
-                    ? ok(row)
-                    : err("regenerate is only available before the puzzle starts"),
-            );
-        if (validated.isErr()) return {ok: false, error: validated.error};
-        const row = validated.value;
-
-        await this.ctx.storage.deleteAlarm();
-        this.db
-            .update(puzzle)
-            .set({
-                prompt: null,
-                status: GameSessionStatus.Queued,
-                error: null,
-                board: "[]",
-                startedAt: null,
-                lobbyEndsAt: null,
-                endedAt: null,
-                solvedBy: null,
-                scoredCells: "[]",
-            })
-            .run();
-        // Always empty at this point in practice — moves only ever get
-        // logged (and cells only ever get marked scored) while `playing`
-        // (see `swapTiles()`), and regenerate is only reachable pre-play
-        // (JOINABLE_STATUSES, checked above) — but cleared explicitly
-        // anyway rather than relying on that invariant, same defensive
-        // spirit as the rest of this reset.
-        this.db.delete(moves).run();
-        this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
-        return toRpcResult(ok(row.theme));
     }
 
     // --- RPC: host-only lobby actions ----------------------------------------
@@ -593,7 +566,7 @@ export class PuzzleDO extends DurableObject<Env> {
             const results = await this.finalizePuzzle(row.id, GameSessionStatus.Timeout, Date.now(), null);
             this.broadcast({type: PuzzleWsEventType.Timeout, results});
         }
-        // Any other status means the puzzle moved on (solved, regenerated, etc.)
+        // Any other status means the puzzle moved on (solved, errored, etc.)
         // before this stale alarm fired — nothing to do.
     }
 
@@ -901,8 +874,8 @@ export class PuzzleDO extends DurableObject<Env> {
     }
 
     /** Passes `row` through unchanged on success, so callers can chain it
-     * straight into a further `.andThen()` (see `startNow()`/
-     * `resetForRegenerate()`) without re-fetching it. */
+     * straight into a further `.andThen()` (see `startNow()`) without
+     * re-fetching it. */
     private assertHost(row: PuzzleRow, hostToken: string): Result<PuzzleRow, string> {
         return hostToken && hostToken === row.hostToken ? ok(row) : err("forbidden: only the host can do that");
     }
@@ -918,6 +891,7 @@ export class PuzzleDO extends DurableObject<Env> {
             return {
                 id: "",
                 theme: null,
+                themeGenerated: false,
                 prompt: null,
                 status: GameSessionStatus.Queued,
                 gridSize: 0,
@@ -940,9 +914,8 @@ export class PuzzleDO extends DurableObject<Env> {
                 ? Math.max(0, row.timeLimitMs - (Date.now() - row.startedAt))
                 : null;
         // `row.status === "waiting"` isn't checked separately here — `lobby_ends_at`
-        // is always nulled out the moment the lobby ends (see beginPlaying()/
-        // resetForRegenerate()), so lobbyRemainingMs() already reads null outside
-        // the lobby window.
+        // is always nulled out the moment the lobby ends (see beginPlaying()),
+        // so lobbyRemainingMs() already reads null outside the lobby window.
         const participantRows: ParticipantPublic[] = this.db
             .select({id: participants.id, name: participants.name, color: participants.color})
             .from(participants)
@@ -985,6 +958,7 @@ export class PuzzleDO extends DurableObject<Env> {
         return {
             id: row.id,
             theme: row.theme,
+            themeGenerated: row.themeGenerated === 1,
             prompt: row.prompt,
             status: row.status,
             error: row.error ?? undefined,

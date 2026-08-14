@@ -51,6 +51,12 @@ export const PuzzlePublicSchema = z
     .object({
         id: z.string(),
         theme: z.string().nullable(),
+        themeGenerated: z.boolean().openapi({
+            description:
+                "Whether `theme` was picked for this puzzle (a Flagship preset, or the prompt model's own idea) " +
+                "rather than typed in by whoever created it — false until generation resolves a theme for a " +
+                "puzzle that started with none.",
+        }),
         prompt: z.string().nullable(),
         status: PuzzleStatusSchema,
         error: z.string().optional(),
@@ -102,13 +108,6 @@ export const JoinResultSchema = z
         color: z.string(),
     })
     .openapi("JoinResult");
-
-export const ReplayResultSchema = z
-    .object({
-        puzzleId: z.string(),
-        hostToken: z.string(),
-    })
-    .openapi("ReplayResult");
 
 // --- WebSocket message shapes ---------------------------------------------
 //

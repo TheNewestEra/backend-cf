@@ -57,6 +57,12 @@ export const CatalogEntrySchema = z
         id: z.string(),
         kind: GameKindSchema,
         theme: z.string().nullable(),
+        themeGenerated: z.boolean().openapi({
+            description:
+                "Whether `theme` was picked for this entry (a Flagship preset, or the prompt model's own idea) " +
+                "rather than typed in by its creator — false until generation resolves a theme for an entry that " +
+                "started with none.",
+        }),
         thumbnailUrl: z.string().nullable(),
         playUrl: z.string(),
         playStatus: PlayStatusSchema,
@@ -64,6 +70,15 @@ export const CatalogEntrySchema = z
         ratingCount: z.number().int().nonnegative(),
         createdAt: z.number().int().positive(),
         creator: CatalogCreatorSchema.nullable().openapi({description: "Null only for entries that predate creator tracking"}),
+        replayOf: z.string().nullable().openapi({
+            description: "Catalog id this entry was replayed from, one hop back; null if it wasn't a replay of anything",
+        }),
+        replayCount: z.number().int().nonnegative().openapi({
+            description:
+                "How many other instances (in either direction along the replay chain) currently represent this " +
+                "same replay chain — this entry is always the newest of them, since listCatalog collapses a chain " +
+                "down to a single card. 0 means this entry has never been replayed and isn't itself a replay.",
+        }),
     })
     .openapi("CatalogEntry");
 

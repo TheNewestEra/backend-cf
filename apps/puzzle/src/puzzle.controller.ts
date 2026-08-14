@@ -8,7 +8,7 @@ import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUser} from "./auth.middleware";
 import {HostBodySchema, puzzleImageKeyFor, puzzleTimeLimitMs, resolveGridSize} from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
-import {JoinResultSchema, PuzzlePublicSchema, ReplayResultSchema} from "./puzzle.schema";
+import {JoinResultSchema, PuzzlePublicSchema} from "./puzzle.schema";
 
 export const puzzleRoutes = new OpenAPIHono<{ Bindings: Env }>();
 
@@ -20,8 +20,11 @@ puzzleRoutes.openapi(
         summary: "Create a new puzzle",
         description:
             "Enqueues generation (one AI image); poll GET /puzzles/{id} or connect to the WebSocket for progress. " +
-            "The returned hostToken authorizes regenerate/start for this puzzle (replaying it later gets its own, " +
-            "separate host token). `gridSize`, if given, is clamped to Flagship's configured [min, max] rather " +
+            "Without `theme`, one gets picked for you (a Flagship preset, or the prompt model's own idea) — " +
+            "PuzzlePublic's `theme`/`themeGenerated` report what was actually used once generation resolves it. " +
+            "The returned hostToken authorizes starting the lobby early for this puzzle (regenerating/replaying " +
+            "it later both spin up their own new instance with its own, separate host token — neither needs or " +
+            "reuses this one). `gridSize`, if given, is clamped to Flagship's configured [min, max] rather " +
             "than rejected out of range. The host is auto-joined as this puzzle's first participant — a logged-in " +
             "caller joins under their account name/color; an anonymous caller must supply `player` (and, " +
             "optionally, `color`), same as POST /puzzles/{id}/ws's `join` message. `participantId`/`token`/`color` " +
@@ -83,8 +86,21 @@ puzzleRoutes.openapi(
         // actually reject — see puzzle.model.ts's `join()`.
         const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
         if (joined.isErr()) return c.json({error: joined.error}, 400);
-        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", theme, {id: user?.id ?? null, name: player, color: joined.value.color});
-        await c.env.PUZZLE_QUEUE.send({puzzleId, theme} satisfies PuzzleQueueMessage);
+        // `theme === null` is the only signal that will ever exist for "will
+        // this puzzle's theme end up picked rather than typed in" — capture
+        // it now, since by the time generation resolves a theme
+        // (puzzle.queue.ts) `theme` itself is indistinguishable from a
+        // user-given one.
+        const themeGenerated = theme === null;
+        await c.env.BROWSE.insertCatalogEntry(
+            puzzleId,
+            "puzzle",
+            theme,
+            {id: user?.id ?? null, name: player, color: joined.value.color},
+            null,
+            themeGenerated,
+        );
+        await c.env.PUZZLE_QUEUE.send({puzzleId, theme, themeGenerated} satisfies PuzzleQueueMessage);
 
         return c.json({puzzleId, hostToken, ...joined.value}, 202);
     },
@@ -127,31 +143,93 @@ puzzleRoutes.openapi(
         method: "post",
         path: "/puzzles/{id}/regenerate",
         tags: ["Piece Puzzle"],
-        summary: "Host-only: start a fresh generation run (new image, same theme)",
+        summary: "Start a brand-new puzzle with the same theme, freshly generated",
+        description:
+            "Only once this puzzle is finished (solved/timeout). Creates an independent puzzle instance (its own " +
+            "id, lobby, and host token) seeded from this one's theme and re-runs generation (a fresh AI image) — " +
+            "it never touches the source puzzle, so anyone can regenerate a puzzle they're spectating/browsing " +
+            "and invite their own friends to the new lobby without disrupting anyone still viewing the original. " +
+            "Same as POST /puzzles/{id}/replay except the new instance's image is freshly generated rather than " +
+            "copied — see that endpoint instead if you want the exact same image. The host is auto-joined as " +
+            "this new puzzle's first participant, same as POST /puzzles — a logged-in caller joins under their " +
+            "account name/color; an anonymous caller must supply `player` (and, optionally, `color`). " +
+            "`participantId`/`token`/`color` come back already resolved.",
         request: {
             params: z.object({id: z.string()}),
-            body: {content: {"application/json": {schema: HostBodySchema}}, required: false},
+            body: {
+                content: {
+                    "application/json": {
+                        schema: z.object({
+                            player: z.string().optional().openapi({
+                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
+                            }),
+                            color: z.string().optional().openapi({
+                                description:
+                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                    "in — an account's color is always authoritative.",
+                            }),
+                        }),
+                    },
+                },
+                required: false,
+            },
         },
         responses: {
-            200: {description: "Regeneration queued", content: {"application/json": {schema: OkSchema}}},
-            403: {description: "Missing/incorrect host token", content: {"application/json": {schema: ErrorSchema}}},
+            202: {
+                description: "New puzzle's generation queued; the host is already joined",
+                content: {
+                    "application/json": {
+                        schema: JoinResultSchema.extend({puzzleId: z.string(), hostToken: z.string()}),
+                    },
+                },
+            },
+            400: {
+                description: "Missing player name (required for an anonymous host)",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
             409: {
-                description: "Puzzle not in a state that allows this",
-                content: {"application/json": {schema: ErrorSchema}}
+                description: "Source puzzle isn't finished yet",
+                content: {"application/json": {schema: ErrorSchema}},
             },
         },
     }),
     async (c) => {
-        const {id: puzzleId} = c.req.valid("param");
-        const {hostToken} = c.req.valid("json");
-        const stub = c.env.PUZZLE_DO.getByName(puzzleId);
-        const result = fromRpcResult(await stub.resetForRegenerate(hostToken ?? ""));
-        if (result.isErr()) {
-            const {status, body} = hostActionError(result.error);
-            return c.json(body, status);
+        const {id: sourceId} = c.req.valid("param");
+        const body = c.req.valid("json") ?? {};
+        const user = await currentUser(c);
+        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
+        if (!player) return c.json({error: "player is required"}, 400);
+
+        const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
+        if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
+            return c.json({error: "puzzle must be finished before regenerating"}, 409);
         }
-        await c.env.PUZZLE_QUEUE.send({puzzleId, theme: result.value} satisfies PuzzleQueueMessage);
-        return c.json({ok: true as const}, 200);
+
+        // Re-evaluate rather than reusing source.timeLimitMs: the flag may
+        // have changed since the source puzzle was created, and a
+        // regenerate is a fresh play session that should get today's time
+        // limit — same reasoning as POST /puzzles/{id}/replay.
+        const timeLimitMs = await puzzleTimeLimitMs(c.env);
+        const puzzleId = crypto.randomUUID();
+        const stub = c.env.PUZZLE_DO.getByName(puzzleId);
+        const hostToken = await stub.init(puzzleId, source.theme, source.gridSize, timeLimitMs);
+        // The puzzle is freshly `queued` (a JOINABLE_STATUS), so this can't
+        // actually reject — see puzzle.model.ts's `join()`.
+        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        if (joined.isErr()) return c.json({error: joined.error}, 400);
+        await c.env.BROWSE.insertCatalogEntry(
+            puzzleId,
+            "puzzle",
+            source.theme,
+            {id: user?.id ?? null, name: player, color: joined.value.color},
+            sourceId,
+            source.themeGenerated,
+        );
+        await c.env.PUZZLE_QUEUE.send({puzzleId, theme: source.theme, themeGenerated: source.themeGenerated} satisfies PuzzleQueueMessage);
+
+        return c.json({puzzleId, hostToken, ...joined.value}, 202);
     },
 );
 
@@ -194,12 +272,45 @@ puzzleRoutes.openapi(
             "Only once this puzzle is finished (solved/timeout). Creates an independent puzzle instance " +
             "(its own id, lobby, and host token) that reuses the same image without a fresh AI call — it " +
             "never touches the source puzzle, so anyone can replay a puzzle they're spectating/browsing and " +
-            "invite their own friends to the new lobby without disrupting anyone still viewing the original.",
-        request: {params: z.object({id: z.string()})},
+            "invite their own friends to the new lobby without disrupting anyone still viewing the original. " +
+            "Same as POST /puzzles/{id}/regenerate except the new instance's image is copied rather than " +
+            "freshly generated — see that endpoint instead if you want a fresh take on the same theme. " +
+            "The host is auto-joined as this new puzzle's first participant, same as POST /puzzles — a " +
+            "logged-in caller joins under their account name/color; an anonymous caller must supply `player` " +
+            "(and, optionally, `color`). `participantId`/`token`/`color` come back already resolved.",
+        request: {
+            params: z.object({id: z.string()}),
+            body: {
+                content: {
+                    "application/json": {
+                        schema: z.object({
+                            player: z.string().optional().openapi({
+                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
+                            }),
+                            color: z.string().optional().openapi({
+                                description:
+                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                    "in — an account's color is always authoritative.",
+                            }),
+                        }),
+                    },
+                },
+                required: false,
+            },
+        },
         responses: {
-            201: {
-                description: "New puzzle created, waiting in its lobby",
-                content: {"application/json": {schema: ReplayResultSchema}}
+            202: {
+                description: "New puzzle created, waiting in its lobby; the host is already joined",
+                content: {
+                    "application/json": {
+                        schema: JoinResultSchema.extend({puzzleId: z.string(), hostToken: z.string()}),
+                    },
+                },
+            },
+            400: {
+                description: "Missing player name (required for an anonymous host)",
+                content: {"application/json": {schema: ErrorSchema}},
             },
             409: {
                 description: "Source puzzle isn't finished yet, or has no image",
@@ -209,13 +320,12 @@ puzzleRoutes.openapi(
     }),
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
-        // Unlike POST /puzzles, nobody's auto-joined as host here (the 201
-        // response has no participantId/token — whoever replays joins
-        // separately over the WebSocket, same as any other player), so
-        // there's no `player` display name to snapshot yet for an
-        // anonymous replayer. A logged-in caller's account name is known
-        // regardless, so that's still recorded as the creator.
+        const body = c.req.valid("json") ?? {};
         const user = await currentUser(c);
+        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
+        if (!player) return c.json({error: "player is required"}, 400);
+
         const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
         if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
             return c.json({error: "puzzle must be finished before replaying"}, 409);
@@ -239,15 +349,29 @@ puzzleRoutes.openapi(
         // a fresh play session that should get today's time limit.
         const timeLimitMs = await puzzleTimeLimitMs(c.env);
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
-        const hostToken = await stub.initFromSource(puzzleId, source.theme, source.gridSize, timeLimitMs, source.prompt);
-        await c.env.BROWSE.insertCatalogEntry(puzzleId, "puzzle", source.theme, {
-            id: user?.id ?? null,
-            name: user?.username ?? "Anonymous",
-            color: user?.color ?? "#888888",
-        });
+        const hostToken = await stub.initFromSource(
+            puzzleId,
+            source.theme,
+            source.gridSize,
+            timeLimitMs,
+            source.prompt,
+            source.themeGenerated,
+        );
+        // The puzzle is freshly `waiting` (a JOINABLE_STATUS), so this can't
+        // actually reject — see puzzle.model.ts's `join()`.
+        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        if (joined.isErr()) return c.json({error: joined.error}, 400);
+        await c.env.BROWSE.insertCatalogEntry(
+            puzzleId,
+            "puzzle",
+            source.theme,
+            {id: user?.id ?? null, name: player, color: joined.value.color},
+            sourceId,
+            source.themeGenerated,
+        );
         await c.env.BROWSE.markCatalogReady(puzzleId, puzzleImageKeyFor(puzzleId));
 
-        return c.json({puzzleId, hostToken}, 201);
+        return c.json({puzzleId, hostToken, ...joined.value}, 202);
     },
 );
 
