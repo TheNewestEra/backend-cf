@@ -141,8 +141,8 @@ export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalog
             familyId: familyId.as("family_id"),
             maxCreatedAt: sql<number>`MAX(${catalog.createdAt})`.as("max_created_at"),
             instanceCount: sql<number>`COUNT(*)`.as("instance_count"),
-            ratingSum: sql<number>`SUM(${catalog.ratingSum})`.as("rating_sum"),
-            ratingCount: sql<number>`SUM(${catalog.ratingCount})`.as("rating_count"),
+            ratingSum: sql<number>`SUM(${catalog.ratingSum})`.as("total_rating_sum"),
+            ratingCount: sql<number>`SUM(${catalog.ratingCount})`.as("total_rating_count"),
         })
         .from(catalog)
         .where(and(...conditions))
