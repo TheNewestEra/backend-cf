@@ -7,14 +7,20 @@ import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
-import {fromRpcResult, toRpcResult, type RpcResult} from "@game-worker/shared/rpc-result";
+import {fromRpcResult, type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
 import {WsEventType} from "@game-worker/shared/ws-messages";
 import {createDb, type Db} from "./db/client";
 import migrations from "./db/migrations";
 import {moves, participants, puzzle} from "./db/schema";
 import {puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
-import type {MoveResultSchema, PuzzlePublicSchema, PuzzleResultSchema, PuzzleStatusSchema, PuzzleWsMessageSchema,} from "./puzzle.schema";
+import type {
+    MoveResultSchema,
+    PuzzlePublicSchema,
+    PuzzleResultSchema,
+    PuzzleStatusSchema,
+    PuzzleWsMessageSchema,
+} from "./puzzle.schema";
 import {PuzzleWsClientEventType, PuzzleWsClientMessageSchema, PuzzleWsEventType} from "./puzzle.schema";
 
 export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
@@ -32,6 +38,7 @@ export type PuzzleWsMessage = z.infer<typeof PuzzleWsMessageSchema>;
  * `currentUser(c)` returning `null` used to mean over HTTP. */
 interface ConnectionIdentity {
     userId: string | null;
+    username: string | null;
     color: string | null;
 }
 
@@ -283,9 +290,12 @@ export class PuzzleDO extends DurableObject<Env> {
      * for a `join` client message, using the identity resolved once at that
      * socket's `fetch()`/upgrade time (see `ConnectionIdentity`). Logged-in
      * users are upserted by `userId` (idempotent across reconnects/tab
-     * refreshes) and keep their account color (never `requestedColor` — an
-     * account's color is authoritative everywhere else in the app, so
-     * letting it be overridden per-puzzle would be surprising); anonymous
+     * refreshes) and keep their account name and color (`playerName` is only
+     * ever the client-supplied name for an anonymous caller — the caller
+     * resolves it from the account's own `username` for a logged-in one,
+     * same as `userColor` is never `requestedColor` — an account's identity
+     * is authoritative everywhere else in the app, so letting either be
+     * overridden per-puzzle would be surprising); anonymous
      * guests get a fresh bearer token they must resend with every `move`/
      * `select`/`deselect` message (since a free-text name alone isn't a real
      * identity, and a new WebSocket connection has no memory of a previous
@@ -318,7 +328,13 @@ export class PuzzleDO extends DurableObject<Env> {
                 .values({id: userId, name: playerName, userId, token: null, color, joinedAt: Date.now()})
                 .onConflictDoUpdate({
                     target: participants.id,
-                    set: {name: sql`excluded.name`, color: sql`excluded.color`},
+                    set: {
+                        name: sql`excluded
+                        .
+                        name`, color: sql`excluded
+                        .
+                        color`
+                    },
                 })
                 .run();
             this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
@@ -442,7 +458,13 @@ export class PuzzleDO extends DurableObject<Env> {
         // `GameDO.submitGuess()`'s `totalScore`.
         const totalScore =
             this.db
-                .select({total: sql<number>`COALESCE(SUM(${moves.score}), 0)`})
+                .select({
+                    total: sql<number>`COALESCE(SUM(
+                    ${moves.score}
+                    ),
+                    0
+                    )`
+                })
                 .from(moves)
                 .where(eq(moves.participantId, participantId))
                 .get()?.total ?? 0;
@@ -470,7 +492,14 @@ export class PuzzleDO extends DurableObject<Env> {
             return toRpcResult(ok({status: GameSessionStatus.Solved, board, solved: true, score, totalScore}));
         }
 
-        this.broadcast({type: PuzzleWsEventType.Move, cellA, cellB, by: participant.name, color: participant.color, score});
+        this.broadcast({
+            type: PuzzleWsEventType.Move,
+            cellA,
+            cellB,
+            by: participant.name,
+            color: participant.color,
+            score
+        });
         return toRpcResult(ok({status: GameSessionStatus.Playing, board, solved: false, score, totalScore}));
     }
 
@@ -580,6 +609,7 @@ export class PuzzleDO extends DurableObject<Env> {
         this.ctx.acceptWebSocket(pair[1]);
         pair[1].serializeAttachment({
             userId: user?.id ?? null,
+            username: user?.username ?? null,
             color: user?.color ?? null
         } satisfies ConnectionIdentity);
         this.send(pair[1], {type: PuzzleWsEventType.State, ...this.readPublicState()});
@@ -621,19 +651,26 @@ export class PuzzleDO extends DurableObject<Env> {
             return;
         }
 
-        const identity = (ws.deserializeAttachment() as ConnectionIdentity | null) ?? {userId: null, color: null};
+        const identity = (ws.deserializeAttachment() as ConnectionIdentity | null) ?? {
+            userId: null,
+            username: null,
+            color: null,
+        };
         const data = parsed.data;
 
         switch (data.type) {
             case PuzzleWsClientEventType.Join: {
-                const player = data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "";
+                const player = identity.userId
+                    ? (identity.username ?? "")
+                    : (data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "");
                 if (!player) {
-                    this.send(ws, {type: PuzzleWsEventType.Error, action: PuzzleWsAction.Join, error: "player is required"});
+                    this.send(ws, {
+                        type: PuzzleWsEventType.Error,
+                        action: PuzzleWsAction.Join,
+                        error: "player is required"
+                    });
                     return;
                 }
-                // join() only ever rejects with the "already started" case —
-                // see puzzle.controller.ts's old POST .../join handler,
-                // which this mirrors.
                 const outcome = fromRpcResult(
                     await this.join(identity.userId, player, identity.color, data.color ?? null),
                 );
@@ -790,7 +827,7 @@ export class PuzzleDO extends DurableObject<Env> {
         puzzleId: string,
         status: "solved" | "timeout",
         endedAt: number,
-        solvedBy: {name: string; color: string} | null,
+        solvedBy: { name: string; color: string } | null,
     ): Promise<PuzzleResult[]> {
         await this.ctx.storage.deleteAlarm();
         this.db
@@ -798,7 +835,9 @@ export class PuzzleDO extends DurableObject<Env> {
             .set({status, endedAt, solvedBy: solvedBy?.name ?? null})
             .run();
 
-        const totalExpr = sql<number>`SUM(${moves.score})`;
+        const totalExpr = sql<number>`SUM(
+        ${moves.score}
+        )`;
         const results: PuzzleResult[] = this.db
             .select({participantId: moves.participantId, score: totalExpr})
             .from(moves)
@@ -817,11 +856,11 @@ export class PuzzleDO extends DurableObject<Env> {
             scorerIds.length === 0
                 ? []
                 : this.db
-                      .select({id: participants.id, userId: participants.userId})
-                      .from(participants)
-                      .where(inArray(participants.id, scorerIds))
-                      .all()
-                      .flatMap((p) => (p.userId ? [[p.id, p.userId] as const] : [])),
+                    .select({id: participants.id, userId: participants.userId})
+                    .from(participants)
+                    .where(inArray(participants.id, scorerIds))
+                    .all()
+                    .flatMap((p) => (p.userId ? [[p.id, p.userId] as const] : [])),
         );
 
         await Promise.all(
@@ -829,7 +868,12 @@ export class PuzzleDO extends DurableObject<Env> {
                 const userId = userIdByParticipant.get(participantId);
                 if (!userId) return [];
                 return [
-                    this.env.LEADERBOARD.recordScore({userId, kind: "puzzle", sessionId: puzzleId, score}).catch((err) => {
+                    this.env.LEADERBOARD.recordScore({
+                        userId,
+                        kind: "puzzle",
+                        sessionId: puzzleId,
+                        score
+                    }).catch((err) => {
                         console.error("failed to record puzzle score", puzzleId, participantId, err);
                     }),
                 ];
@@ -927,7 +971,9 @@ export class PuzzleDO extends DurableObject<Env> {
         // recomputed here (rather than incrementally tracked) so it can't
         // drift from that figure. Mirrors `GameDO.readPublicState()`'s own
         // `results` query.
-        const totalExpr = sql<number>`SUM(${moves.score})`;
+        const totalExpr = sql<number>`SUM(
+        ${moves.score}
+        )`;
         const results = this.db
             .select({participantId: moves.participantId, total: totalExpr})
             .from(moves)

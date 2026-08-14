@@ -57,6 +57,7 @@ type ParticipantRow = typeof participants.$inferSelect;
  * Puzzle's `PuzzleDO`'s own `ConnectionIdentity`. */
 interface ConnectionIdentity {
     userId: string | null;
+    username: string | null;
     color: string | null;
 }
 
@@ -266,10 +267,13 @@ class GameDO extends DurableObject<Env> {
      * arrivals can still spectate over the WebSocket/`getState()` but can't
      * play. Logged-in users are upserted by `userId` (idempotent across
      * reconnects/tab refreshes, no token needed since the session re-proves
-     * identity on every request) and keep their account color (never
-     * `requestedColor` — an account's color is authoritative everywhere else
-     * in the app, so letting it be overridden per-game would be surprising);
-     * anonymous guests get a fresh bearer token they must resend with every
+     * identity on every request) and keep their account name and color
+     * (`playerName` is only ever the client-supplied name for an anonymous
+     * caller — the caller resolves it from the account's own `username` for
+     * a logged-in one, same as `userColor` is never `requestedColor` — an
+     * account's identity is authoritative everywhere else in the app, so
+     * letting either be overridden per-game would be surprising); anonymous
+     * guests get a fresh bearer token they must resend with every
      * guess/reveal (since a free-text name alone isn't a real identity) and
      * either their own `requestedColor` (if it's a well-formed hex color —
      * see `isValidHexColor`) or, absent that, a freshly generated one.
@@ -544,6 +548,7 @@ class GameDO extends DurableObject<Env> {
         this.ctx.acceptWebSocket(pair[1]);
         pair[1].serializeAttachment({
             userId: user?.id ?? null,
+            username: user?.username ?? null,
             color: user?.color ?? null,
         } satisfies ConnectionIdentity);
         this.send(pair[1], {type: GameWsEventType.State, ...this.readPublicState()});
@@ -587,19 +592,22 @@ class GameDO extends DurableObject<Env> {
             return;
         }
 
-        const identity = (ws.deserializeAttachment() as ConnectionIdentity | null) ?? {userId: null, color: null};
+        const identity = (ws.deserializeAttachment() as ConnectionIdentity | null) ?? {
+            userId: null,
+            username: null,
+            color: null,
+        };
         const data = parsed.data;
 
         switch (data.type) {
             case GameWsClientEventType.Join: {
-                const player = data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "";
+                const player = identity.userId
+                    ? (identity.username ?? "")
+                    : (data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "");
                 if (!player) {
                     this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Join, error: "player is required"});
                     return;
                 }
-                // join() only ever rejects with the "already started" case —
-                // see guess.controller.ts's old POST .../join handler, which
-                // this mirrors.
                 const outcome = fromRpcResult(
                     await this.join(identity.userId, player, identity.color, data.color ?? null),
                 );
