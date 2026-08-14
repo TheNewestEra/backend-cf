@@ -116,10 +116,10 @@ export interface LeaderboardEntry {
     kind: LeaderboardKind | null;
     /** Epoch ms of this user's most recent scoring event counted in `score`. */
     lastPlayedAt: number;
-    /** Whether this row's user is a friend of the requesting viewer. Only
-     * ever set by `topScores` (and only when it's given a logged-in
-     * viewer) — every `friendScores` row is a friend by construction, so
-     * it's left undefined there rather than redundantly always-true. */
+    /** Whether this row's user is a friend of the requesting viewer. Set by
+     * `topScores` when it's given a logged-in viewer, and by `friendScores`
+     * for every row except the viewer's own (every other row there is a
+     * friend by construction). Left undefined when there's no session. */
     isFriend?: boolean;
 }
 
@@ -246,7 +246,11 @@ export async function friendScores(
 
     const hasMore = rawResults.length > FRIENDS_PAGE_SIZE;
     const results = await withUserInfo(accounts, rawResults.slice(0, FRIENDS_PAGE_SIZE));
-    const entries = results.map((row, i) => toEntry(row, offset + i + 1, query.kind));
+    const entries = results.map((row, i) => {
+        const entry = toEntry(row, offset + i + 1, query.kind);
+        entry.isFriend = row.userId !== userId;
+        return entry;
+    });
 
     return {entries, hasMore};
 }

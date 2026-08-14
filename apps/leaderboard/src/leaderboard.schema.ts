@@ -31,7 +31,7 @@ export const LeaderboardEntrySchema = z
         isFriend: z
             .boolean()
             .optional()
-            .openapi({description: "Whether this row's user is a friend of the signed-in requester; omitted for scope=friends (every row already is) and when there's no session"}),
+            .openapi({description: "Whether this row's user is a friend of the signed-in requester; true for every row under scope=friends except the viewer's own, and omitted when there's no session"}),
     })
     .openapi("LeaderboardEntry");
 
