@@ -109,11 +109,6 @@ export interface ListCatalogOptions {
     offset: number;
 }
 
-/** Rating-ratio expression for `CatalogSort.Rating`'s ORDER BY — entries
- * with no ratings yet (`rating_count = 0`) sort as `-1`, i.e. last, exactly
- * matching the raw-SQL `CASE` this replaced. */
-const ratingRatio = sql`CASE WHEN ${catalog.ratingCount} > 0 THEN ${catalog.ratingSum} * 1.0 / ${catalog.ratingCount} ELSE -1 END`;
-
 /** Groups a possibly-pre-`root_id` row into its replay chain — see
  * db/schema.ts's `rootId` doc comment for why a null falls back to the
  * row's own id rather than a real chain lookup. Shared by every place
@@ -135,18 +130,31 @@ export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalog
         friendIdsList ? inArray(catalog.createdBy, friendIdsList) : undefined,
     ].filter((condition) => condition !== undefined);
 
-    const orderBy = opts.sort === CatalogSort.Rating ? [desc(ratingRatio), desc(catalog.createdAt)] : [desc(catalog.createdAt)];
-
+    // Sums ratings across every instance in a replay chain, not just the
+    // newest one — a regenerate/replay always starts a fresh `catalog` row
+    // at `ratingSum: 0, ratingCount: 0` (see `insertCatalogEntry`'s doc
+    // comment), so reading only the newest row would make a chain's earlier
+    // ratings vanish from the browse list the moment it's regenerated, even
+    // though those `ratings` rows are still sitting in D1.
     const family = db
         .select({
             familyId: familyId.as("family_id"),
             maxCreatedAt: sql<number>`MAX(${catalog.createdAt})`.as("max_created_at"),
             instanceCount: sql<number>`COUNT(*)`.as("instance_count"),
+            ratingSum: sql<number>`SUM(${catalog.ratingSum})`.as("rating_sum"),
+            ratingCount: sql<number>`SUM(${catalog.ratingCount})`.as("rating_count"),
         })
         .from(catalog)
         .where(and(...conditions))
         .groupBy(familyId)
         .as("family");
+
+    // Rating-ratio expression for `CatalogSort.Rating`'s ORDER BY, over the
+    // chain-wide sums above rather than a single row — entries with no
+    // ratings yet anywhere in their chain (`rating_count = 0`) sort as `-1`,
+    // i.e. last, same as before this summed across replays.
+    const ratingRatio = sql`CASE WHEN ${family.ratingCount} > 0 THEN ${family.ratingSum} * 1.0 / ${family.ratingCount} ELSE -1 END`;
+    const orderBy = opts.sort === CatalogSort.Rating ? [desc(ratingRatio), desc(catalog.createdAt)] : [desc(catalog.createdAt)];
 
     const rows = await db
         .select({
@@ -157,8 +165,8 @@ export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalog
             status: catalog.status,
             thumbnailKey: catalog.thumbnailKey,
             playStatus: catalog.playStatus,
-            ratingSum: catalog.ratingSum,
-            ratingCount: catalog.ratingCount,
+            ratingSum: family.ratingSum,
+            ratingCount: family.ratingCount,
             createdBy: catalog.createdBy,
             creatorName: catalog.creatorName,
             creatorColor: catalog.creatorColor,
@@ -215,23 +223,13 @@ export const submitRating = async (db: Db, catalogId: string, stars: number, rat
 
 /** What `listCatalog`'s row shape actually is: every `catalog` column
  * `CatalogEntry` needs, plus `replayCount` (computed by the `family` join,
- * not a real column — see `listCatalog`). */
+ * not a real column — see `listCatalog`). `ratingSum`/`ratingCount` are also
+ * `family`-sourced rather than plain `catalog` columns — the chain-wide
+ * sums computed there, not just this row's own tally. */
 type CatalogRow = Pick<
     typeof catalog.$inferSelect,
-    | "id"
-    | "kind"
-    | "theme"
-    | "themeGenerated"
-    | "thumbnailKey"
-    | "playStatus"
-    | "ratingSum"
-    | "ratingCount"
-    | "createdBy"
-    | "creatorName"
-    | "creatorColor"
-    | "replayOf"
-    | "createdAt"
-> & {replayCount: number};
+    "id" | "kind" | "theme" | "themeGenerated" | "thumbnailKey" | "playStatus" | "createdBy" | "creatorName" | "creatorColor" | "replayOf" | "createdAt"
+> & {replayCount: number; ratingSum: number; ratingCount: number};
 
 const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
     id: row.id,
