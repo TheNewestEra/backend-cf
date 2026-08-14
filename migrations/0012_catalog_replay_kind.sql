@@ -1,0 +1,15 @@
+-- How a catalog entry with a `replay_of` source relates to it: `replay`
+-- (POST .../replay copied the exact same image/rounds verbatim, so
+-- listCatalog folds it into the source's existing family card) or
+-- `regenerate` (POST .../regenerate re-ran generation off the same theme,
+-- which can land on a different image, so it starts its own family
+-- instead) -- see @game-worker/shared/rpc-types's `CatalogRpc.
+-- insertCatalogEntry` doc comment and catalog.schema.ts's `ReplayKind`.
+--
+-- Null for every pre-existing row (including ones with a non-null
+-- `replay_of`) -- there's no way to recover which kind those were after
+-- the fact; catalog.service.ts's `insertCatalogEntry` treats a null the
+-- same as `regenerate` (i.e. starts its own family) rather than assuming
+-- `replay`, so no pre-existing row silently gets folded into a chain it
+-- was never meant to join.
+ALTER TABLE catalog ADD COLUMN replay_kind TEXT;
