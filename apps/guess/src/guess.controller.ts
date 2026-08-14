@@ -253,6 +253,7 @@ guessRoutes.openapi(
             {id: user?.id ?? null, name: player, color: joined.value.color},
             sourceId,
             source.themeGenerated,
+            "regenerate",
         );
         await c.env.GAME_QUEUE.send({gameId, theme: source.theme, themeGenerated: source.themeGenerated} satisfies GuessQueueMessage);
 
@@ -364,6 +365,7 @@ guessRoutes.openapi(
             {id: user?.id ?? null, name: player, color: joined.value.color},
             sourceId,
             source.themeGenerated,
+            "replay",
         );
         await c.env.BROWSE.markCatalogReady(gameId, imageKeyFor(gameId, 0));
 

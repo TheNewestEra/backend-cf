@@ -32,6 +32,25 @@ export const CatalogScope = {
 export type CatalogScope = (typeof CatalogScope)[keyof typeof CatalogScope];
 export const CatalogScopeSchema = z.nativeEnum(CatalogScope).openapi("CatalogScope");
 
+/** How an entry with a `replayOf` source relates to it — set by whichever
+ * of guess/puzzle's two "start again" endpoints created the entry, and
+ * carried straight through `insertCatalogEntry`. `Replay` reuses the
+ * source's exact image/rounds (POST .../replay), so it's genuinely the
+ * same content and `listCatalog` folds it into the source's existing
+ * family card. `Regenerate` re-runs generation for a fresh image/rounds
+ * off the same theme (POST .../regenerate) — since that can (and often
+ * does) produce a different image, collapsing it into the source's card
+ * would hide a distinct thumbnail behind whichever one happened to be
+ * newest, so it starts its own family instead (see catalog.service.ts's
+ * `insertCatalogEntry`, which only inherits the source's `rootId` for
+ * `Replay`). Null for an entry with no `replayOf` source at all. */
+export const ReplayKind = {
+    Replay: "replay",
+    Regenerate: "regenerate",
+} as const;
+export type ReplayKind = (typeof ReplayKind)[keyof typeof ReplayKind];
+export const ReplayKindSchema = z.nativeEnum(ReplayKind).openapi("ReplayKind");
+
 export const CatalogStatusSchema = z
     .nativeEnum(CatalogStatus)
     .openapi("CatalogStatus");
@@ -74,13 +93,18 @@ export const CatalogEntrySchema = z
         createdAt: z.number().int().positive(),
         creator: CatalogCreatorSchema.nullable().openapi({description: "Null only for entries that predate creator tracking"}),
         replayOf: z.string().nullable().openapi({
-            description: "Catalog id this entry was replayed from, one hop back; null if it wasn't a replay of anything",
+            description: "Catalog id this entry was replayed or regenerated from, one hop back; null if it wasn't created from another entry",
+        }),
+        replayKind: ReplayKindSchema.nullable().openapi({
+            description: "Whether `replayOf` names a same-image replay or a freshly-regenerated source; null when `replayOf` is null",
         }),
         replayCount: z.number().int().nonnegative().openapi({
             description:
-                "How many other instances (in either direction along the replay chain) currently represent this " +
-                "same replay chain — this entry is always the newest of them, since listCatalog collapses a chain " +
-                "down to a single card. 0 means this entry has never been replayed and isn't itself a replay.",
+                "How many other instances (in either direction along the chain) currently represent this same " +
+                "replay chain — this entry is always the newest of them, since listCatalog collapses a chain of " +
+                "true replays down to a single card. A regenerate always starts a new chain of its own rather than " +
+                "extending this count, since it can produce a different image. 0 means this entry has never been " +
+                "replayed and isn't itself a replay.",
         }),
     })
     .openapi("CatalogEntry");

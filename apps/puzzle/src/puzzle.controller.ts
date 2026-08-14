@@ -226,6 +226,7 @@ puzzleRoutes.openapi(
             {id: user?.id ?? null, name: player, color: joined.value.color},
             sourceId,
             source.themeGenerated,
+            "regenerate",
         );
         await c.env.PUZZLE_QUEUE.send({puzzleId, theme: source.theme, themeGenerated: source.themeGenerated} satisfies PuzzleQueueMessage);
 
@@ -368,6 +369,7 @@ puzzleRoutes.openapi(
             {id: user?.id ?? null, name: player, color: joined.value.color},
             sourceId,
             source.themeGenerated,
+            "replay",
         );
         await c.env.BROWSE.markCatalogReady(puzzleId, puzzleImageKeyFor(puzzleId));
 

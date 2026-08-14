@@ -3,7 +3,7 @@ import type {FriendsRpc} from "@game-worker/shared/rpc-types";
 import type {D1Response} from "@cloudflare/workers-types";
 import {and, desc, eq, inArray, ne, sql} from "drizzle-orm";
 import {err, ok, type Result} from "neverthrow";
-import {type CatalogEntry, CatalogSort, CatalogStatus, PlayStatus} from "./catalog.schema";
+import {type CatalogEntry, CatalogSort, CatalogStatus, PlayStatus, ReplayKind} from "./catalog.schema";
 import type {Db} from "./db/client";
 import {catalog, ratings} from "./db/schema";
 
@@ -16,13 +16,21 @@ import {catalog, ratings} from "./db/schema";
  * snapshot is what makes their chosen name/color displayable at all.
  *
  * `replayOf`, when given, is the source catalog id a guess/puzzle `/replay`
- * endpoint is creating this entry from. Resolves `rootId` off that source
- * row (its own `rootId`, or its `id` if it's the chain's root itself) in a
- * separate read rather than a single INSERT...SELECT — one extra round
- * trip, but keeps this function's shape a plain `.values()` insert like
- * every other write in this file, and `replayOf` never names a row that
- * doesn't already exist (the caller always creates the source entry first),
- * so `source` is only ever missing for data that predates this column.
+ * or `/regenerate` endpoint is creating this entry from; `replayKind` says
+ * which of the two (required whenever `replayOf` is given — see
+ * catalog.schema.ts's `ReplayKind` doc comment). Only a `Replay` resolves
+ * `rootId` off the source row (its own `rootId`, or its `id` if it's the
+ * chain's root itself) in a separate read rather than a single
+ * INSERT...SELECT — one extra round trip, but keeps this function's shape a
+ * plain `.values()` insert like every other write in this file, and
+ * `replayOf` never names a row that doesn't already exist (the caller
+ * always creates the source entry first), so `source` is only ever missing
+ * for data that predates this column. A `Regenerate` (or an entry with no
+ * `replayOf` at all) always becomes its own root instead — chaining it
+ * under the source's `rootId` would fold a potentially different image
+ * into the same `listCatalog` card as its source, which is exactly the
+ * "de-duplicating games that aren't actually duplicates" bug this
+ * distinction exists to avoid.
  *
  * `themeGenerated` records whether `theme` was picked for this entry rather
  * than typed in — see `updateCatalogTheme` below for the write that backfills
@@ -35,10 +43,12 @@ export const insertCatalogEntry = async (
     creator: {id: string | null; name: string; color: string},
     replayOf?: string | null,
     themeGenerated?: boolean,
+    replayKind?: ReplayKind | null,
 ): Promise<D1Response> => {
-    const rootId = replayOf
-        ? ((await db.select({rootId: catalog.rootId}).from(catalog).where(eq(catalog.id, replayOf)).get())?.rootId ?? replayOf)
-        : id;
+    const rootId =
+        replayOf && replayKind === ReplayKind.Replay
+            ? ((await db.select({rootId: catalog.rootId}).from(catalog).where(eq(catalog.id, replayOf)).get())?.rootId ?? replayOf)
+            : id;
     return db
         .insert(catalog)
         .values({
@@ -55,6 +65,7 @@ export const insertCatalogEntry = async (
             creatorName: creator.name,
             creatorColor: creator.color,
             replayOf: replayOf ?? null,
+            replayKind: replayOf ? (replayKind ?? null) : null,
             rootId,
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -171,6 +182,7 @@ export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalog
             creatorName: catalog.creatorName,
             creatorColor: catalog.creatorColor,
             replayOf: catalog.replayOf,
+            replayKind: catalog.replayKind,
             createdAt: catalog.createdAt,
             updatedAt: catalog.updatedAt,
             replayCount: sql<number>`${family.instanceCount} - 1`,
@@ -237,7 +249,18 @@ export const submitRating = async (db: Db, catalogId: string, stars: number, rat
  * sums computed there, not just this row's own tally. */
 type CatalogRow = Pick<
     typeof catalog.$inferSelect,
-    "id" | "kind" | "theme" | "themeGenerated" | "thumbnailKey" | "playStatus" | "createdBy" | "creatorName" | "creatorColor" | "replayOf" | "createdAt"
+    | "id"
+    | "kind"
+    | "theme"
+    | "themeGenerated"
+    | "thumbnailKey"
+    | "playStatus"
+    | "createdBy"
+    | "creatorName"
+    | "creatorColor"
+    | "replayOf"
+    | "replayKind"
+    | "createdAt"
 > & {replayCount: number; ratingSum: number; ratingCount: number};
 
 const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
@@ -258,5 +281,6 @@ const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
     // live join.
     creator: row.creatorName ? {userId: row.createdBy, name: row.creatorName, color: row.creatorColor ?? "#888888"} : null,
     replayOf: row.replayOf,
+    replayKind: row.replayKind,
     replayCount: row.replayCount,
 });

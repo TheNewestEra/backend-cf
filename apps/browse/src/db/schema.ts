@@ -16,7 +16,7 @@
 import type {GameKind} from "@game-worker/shared/game";
 import {check, index, integer, sqliteTable, text} from "drizzle-orm/sqlite-core";
 import {sql} from "drizzle-orm";
-import type {CatalogStatus, PlayStatus} from "../catalog.schema";
+import type {CatalogStatus, PlayStatus, ReplayKind} from "../catalog.schema";
 
 /** One row per generated game/puzzle, across all users — the browse page's
  * index and the target of post-session ratings. The Durable Objects
@@ -53,22 +53,29 @@ export const catalog = sqliteTable(
         createdBy: text("created_by"), // account id of the creating user; null for anonymous hosts
         creatorName: text("creator_name"),
         creatorColor: text("creator_color"),
-        // `replayOf`/`rootId` model a replay chain — see
+        // `replayOf`/`replayKind`/`rootId` model a replay chain — see
         // migrations/0010_catalog_replay.sql's header comment. `replayOf` is
-        // the entry replayed *from* (one hop back), null for an entry that
-        // was created directly. `rootId` is resolved once at insert time to
+        // the entry this one was created *from* (one hop back), null for an
+        // entry that was created directly. `replayKind` says how: `"replay"`
+        // (POST .../replay, same image/rounds copied verbatim) or
+        // `"regenerate"` (POST .../regenerate, a fresh AI call off the same
+        // theme, which can produce a different image) — see
+        // catalog.schema.ts's `ReplayKind` doc comment for why that
+        // distinction matters. `rootId` is resolved once at insert time to
         // the chain's very first entry's id (itself, if this entry started
-        // the chain) so `listCatalog` can group a whole chain with a single
-        // `GROUP BY root_id` instead of a recursive walk back through
-        // `replayOf` on every read; nullable only because a column added via
-        // `ALTER TABLE` can't backfill itself off another column of the same
-        // row (SQLite computes a constant default, not an expression) — every
+        // the chain, or if it's a `"regenerate"` — see `insertCatalogEntry`)
+        // so `listCatalog` can group a whole chain with a single `GROUP BY
+        // root_id` instead of a recursive walk back through `replayOf` on
+        // every read; nullable only because a column added via `ALTER
+        // TABLE` can't backfill itself off another column of the same row
+        // (SQLite computes a constant default, not an expression) — every
         // row `insertCatalogEntry` writes from here on always sets it, same
         // "nullable only for rows that predate the column" shape as
         // `createdBy`/`creatorName` above. Every reader treats a null the
         // same as `id` itself (`COALESCE(root_id, id)`) rather than special-
         // casing it.
         replayOf: text("replay_of"),
+        replayKind: text("replay_kind").$type<ReplayKind>(),
         rootId: text("root_id"),
         createdAt: integer("created_at").notNull(),
         updatedAt: integer("updated_at").notNull(),

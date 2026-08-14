@@ -4,7 +4,7 @@ import {corsMiddleware} from "@game-worker/shared/cors";
 import {type GameKind} from "@game-worker/shared/game";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {browseRoutes} from "./catalog.controller";
-import {type PlayStatus} from "./catalog.schema";
+import {type PlayStatus, type ReplayKind} from "./catalog.schema";
 import {
     insertCatalogEntry,
     markCatalogError,
@@ -41,8 +41,9 @@ export class CatalogService extends WorkerEntrypoint<Env> {
         creator: {id: string | null; name: string; color: string},
         replayOf?: string | null,
         themeGenerated?: boolean,
+        replayKind?: ReplayKind | null,
     ): Promise<D1Response> {
-        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme, creator, replayOf, themeGenerated);
+        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme, creator, replayOf, themeGenerated, replayKind);
     }
 
     updateCatalogTheme(id: string, theme: string, themeGenerated: boolean): Promise<D1Response> {

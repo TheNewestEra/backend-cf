@@ -49,17 +49,23 @@ export interface CatalogRpc {
      * at creation time (an account's, or an anonymous host's chosen/
      * generated one) — see catalog.service.ts's `insertCatalogEntry` for
      * why these are stored as a snapshot rather than joined live. `replayOf`
-     * is the source catalog id when this entry was created by a /replay
-     * endpoint (guess/puzzle both pass it through); omitted/null for a
-     * freshly created game/puzzle. Lets browse group a replay chain into one
-     * card instead of listing each instance's (for Piece Puzzle,
-     * byte-identical) thumbnail separately — see catalog.service.ts's
-     * `listCatalog`. `themeGenerated` says whether `theme` was picked for
-     * this entry rather than typed in by its creator — for a fresh game/
-     * puzzle this is just `theme === null` at creation time (the real theme,
-     * if one gets auto-picked, isn't known until generation resolves it —
-     * see `updateCatalogTheme` below); for a replay it's carried over from
-     * the source entry as-is, since that's a property of the theme itself. */
+     * is the source catalog id when this entry was created by a /replay or
+     * /regenerate endpoint (guess/puzzle both pass it through for either);
+     * omitted/null for a freshly created game/puzzle. `replayKind` says
+     * which of the two created it — required whenever `replayOf` is given.
+     * Only a `"replay"` (the exact same image/rounds copied verbatim) makes
+     * browse group it into its source's existing card; a `"regenerate"`
+     * (fresh AI call off the same theme, which can land on a different
+     * image) always starts a card of its own instead — folding it into the
+     * source's card would hide a genuinely different thumbnail. See
+     * catalog.service.ts's `listCatalog`/`insertCatalogEntry`.
+     * `themeGenerated` says whether `theme` was picked for this entry rather
+     * than typed in by its creator — for a fresh game/puzzle this is just
+     * `theme === null` at creation time (the real theme, if one gets
+     * auto-picked, isn't known until generation resolves it — see
+     * `updateCatalogTheme` below); for a replay/regenerate it's carried
+     * over from the source entry as-is, since that's a property of the
+     * theme itself. */
     insertCatalogEntry(
         id: string,
         kind: GameKind,
@@ -67,6 +73,7 @@ export interface CatalogRpc {
         creator: {id: string | null; name: string; color: string},
         replayOf?: string | null,
         themeGenerated?: boolean,
+        replayKind?: "replay" | "regenerate" | null,
     ): Promise<void>;
     /** Backfills `theme`/`themeGenerated` once generation actually resolves
      * a theme for an entry that started with none — called alongside
