@@ -66,7 +66,10 @@ export const CatalogEntrySchema = z
         thumbnailUrl: z.string().nullable(),
         playUrl: z.string(),
         playStatus: PlayStatusSchema,
-        averageRating: z.number().nullable(),
+        averageRating: z
+            .number()
+            .nullable()
+            .openapi({description: "Mean of every 1-5 star rating across this entry's whole replay chain, rounded to the nearest half star; null until it has at least one rating"}),
         ratingCount: z.number().int().nonnegative(),
         createdAt: z.number().int().positive(),
         creator: CatalogCreatorSchema.nullable().openapi({description: "Null only for entries that predate creator tracking"}),

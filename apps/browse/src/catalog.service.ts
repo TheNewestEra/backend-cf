@@ -185,6 +185,15 @@ export const listCatalog = async (db: Db, friends: FriendsRpc, opts: ListCatalog
     return rows.map((row) => toPublic(row, origin));
 };
 
+/** Ratings are 1-5 whole stars, but an *average* rarely lands on a whole
+ * number — rounds it to the nearest half star (e.g. `3.7` -> `3.5`, `3.8`
+ * -> `4`) so every display of `averageRating` shows a consistent,
+ * half-star-granularity figure rather than a long decimal. Shared by
+ * `toPublic` (the chain-wide average `listCatalog` returns) and
+ * `submitRating` (the single-entry average it hands back to whoever just
+ * rated), so the two can't round differently. */
+const roundToNearestHalf = (value: number): number => Math.round(value * 2) / 2;
+
 export type RatingResult = {average: number; count: number};
 
 /** `Err("not found")` when `catalogId` doesn't name an existing catalog
@@ -216,7 +225,7 @@ export const submitRating = async (db: Db, catalogId: string, stars: number, rat
     ]);
 
     return ok({
-        average: (existing.ratingSum + stars) / (existing.ratingCount + 1),
+        average: roundToNearestHalf((existing.ratingSum + stars) / (existing.ratingCount + 1)),
         count: existing.ratingCount + 1,
     });
 };
@@ -239,7 +248,7 @@ const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
     thumbnailUrl: row.thumbnailKey ? new URL(`/api/catalog/${row.id}/thumbnail`, origin) : null,
     playUrl: playUrlFor(row.kind, row.id),
     playStatus: row.playStatus,
-    averageRating: row.ratingCount > 0 ? row.ratingSum / row.ratingCount : null,
+    averageRating: row.ratingCount > 0 ? roundToNearestHalf(row.ratingSum / row.ratingCount) : null,
     ratingCount: row.ratingCount,
     createdAt: row.createdAt,
     // `creatorName` is null only for entries that predate this column
