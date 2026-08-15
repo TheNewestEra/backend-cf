@@ -53,6 +53,16 @@ export const game = sqliteTable("game", {
     // ROUND_COUNT every pre-existing instance was actually created with,
     // before it became a per-game value.
     roundCount: integer("round_count").notNull().default(5),
+    // Resolved once, by init()/initFromSource(), from Flagship's
+    // "guess-time-seconds" flag (or the creating request's own
+    // `roundTimeLimitSeconds` override — see guessTimeLimitSeconds() in
+    // ../guess.constants.ts) and never re-read after — every round this
+    // game ever activates uses this same limit, same "decided once at
+    // creation" story as `roundCount` above. DEFAULT 60 matches
+    // DEFAULT_GUESS_TIME_LIMIT_SECONDS, the value every pre-existing
+    // instance was actually activating rounds with before this became a
+    // per-game column.
+    roundTimeLimitSeconds: integer("round_time_limit_seconds").notNull().default(60),
     createdAt: integer("created_at").notNull(),
 });
 

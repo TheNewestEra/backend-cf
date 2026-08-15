@@ -15,11 +15,13 @@
 import journal from "../../drizzle/meta/_journal.json";
 import m0000 from "../../drizzle/0000_absent_thanos.sql";
 import m0001 from "../../drizzle/0001_flimsy_emma_frost.sql";
+import m0002 from "../../drizzle/0002_robust_silhouette.sql";
 
 export default {
     journal,
     migrations: {
         m0000,
         m0001,
+        m0002,
     },
 };

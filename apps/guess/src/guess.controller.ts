@@ -26,7 +26,8 @@ guessRoutes.openapi(
             "Without `theme`, one gets picked for you (a Flagship preset, or the prompt model's own idea) — " +
             "GamePublic's `theme`/`themeGenerated` report what was actually used once generation resolves it. The " +
             "returned hostToken authorizes starting the lobby early for this game (replaying it later gets its " +
-            "own, separate host token). The host is auto-joined as this game's first participant — a logged-in " +
+            "own, separate host token). `roundCount` and `roundTimeLimitSeconds`, if given, are each clamped to " +
+            "their own configured [min, max] rather than rejected out of range. The host is auto-joined as this game's first participant — a logged-in " +
             "caller joins under their account name/color; an anonymous caller must supply `player` (and, " +
             "optionally, `color`), same as POST /games/{id}/ws's `join` message. `participantId`/`token`/`color` " +
             "come back already resolved, so the host's client can guess/reveal immediately without sending its " +
@@ -37,6 +38,27 @@ guessRoutes.openapi(
                     "application/json": {
                         schema: z.object({
                             theme: z.string().optional(),
+                            roundCount: z
+                                .number()
+                                .int()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "How many rounds this game has — clamped to this game's configured " +
+                                        "[min, max] rather than rejected out of range. Absent a value, falls back " +
+                                        'to Flagship\'s "round-count" flag.',
+                                }),
+                            roundTimeLimitSeconds: z
+                                .number()
+                                .int()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "How long each round's guess countdown runs, in seconds — clamped to " +
+                                        "this game's configured [min, max] rather than rejected out of range, " +
+                                        "and applied to every round of this game. Absent a value, falls back to " +
+                                        'Flagship\'s "guess-time-seconds" flag.',
+                                }),
                             player: z.string().optional().openapi({
                                 description:
                                     "Anonymous-host display name — ignored (and unnecessary) when logged in.",
@@ -91,7 +113,13 @@ guessRoutes.openapi(
         // later broadcasts (queue consumer, DO alarm) have no request of
         // their own to derive it from. See GameRow's `origin` field.
         const origin = new URL(c.req.url).origin;
-        const hostToken = await stub.init(gameId, theme, origin);
+        const hostToken = await stub.init(
+            gameId,
+            theme,
+            origin,
+            body.roundCount,
+            body.roundTimeLimitSeconds,
+        );
         // The game is freshly `queued` (a JOINABLE_STATUS), so this can't
         // actually reject — see guess.model.ts's `join()`.
         const joined = fromRpcResult(

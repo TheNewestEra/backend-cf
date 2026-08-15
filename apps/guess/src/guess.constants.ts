@@ -22,8 +22,21 @@ const DEFAULT_POST_ROUND_SECONDS = 5;
 const DEFAULT_GUESS_MATCH_THRESHOLD = 0.35;
 export const DEFAULT_GUESS_TIME_LIMIT_SECONDS = 60;
 
-export function roundCount(env: Env): Promise<number> {
-    return env.FLAGS.getNumberValue("round-count", DEFAULT_ROUND_COUNT);
+const MIN_ROUND_COUNT = 1;
+const MAX_ROUND_COUNT = 8;
+const MIN_GUESS_TIME_LIMIT_SECONDS = 30;
+const MAX_GUESS_TIME_LIMIT_SECONDS = 120;
+
+/** Resolves this game's round count: `requested` (POST /games' optional
+ * `roundCount` body field) clamped to [MIN_ROUND_COUNT, MAX_ROUND_COUNT] or,
+ * absent a request, Flagship's "round-count" flag — clamped the same way.
+ * Mirrors Piece Puzzle's `resolveGridSize()`/`puzzleTimeLimitMs()` "clamp
+ * rather than reject" shape. */
+export async function roundCount(env: Env, requested?: number): Promise<number> {
+    const count = Number.isInteger(requested)
+        ? (requested as number)
+        : await env.FLAGS.getNumberValue("round-count", DEFAULT_ROUND_COUNT);
+    return Math.min(MAX_ROUND_COUNT, Math.max(MIN_ROUND_COUNT, count));
 }
 
 export async function guessMaxScore(env: Env): Promise<number> {
@@ -38,8 +51,18 @@ export async function postRoundSeconds(env: Env): Promise<number> {
     return env.FLAGS.getNumberValue("post-round-seconds", DEFAULT_POST_ROUND_SECONDS);
 }
 
-export async function guessTimeLimitSeconds(env: Env): Promise<number> {
-    return env.FLAGS.getNumberValue("guess-time-seconds", DEFAULT_GUESS_TIME_LIMIT_SECONDS);
+/** Resolves this game's per-round time limit, in seconds: `requested`
+ * (POST /games' optional `roundTimeLimitSeconds` body field) clamped to
+ * [MIN_GUESS_TIME_LIMIT_SECONDS, MAX_GUESS_TIME_LIMIT_SECONDS] or, absent a
+ * request, Flagship's "guess-time-seconds" flag — clamped the same way.
+ * Resolved once, by `GameDO.init()`/`initFromSource()`, and persisted on the
+ * game row (`round_time_limit_seconds`) rather than re-read per round — see
+ * that column's doc comment on ./db/schema.ts's `game` table for why. */
+export async function guessTimeLimitSeconds(env: Env, requested?: number): Promise<number> {
+    const seconds = Number.isInteger(requested)
+        ? (requested as number)
+        : await env.FLAGS.getNumberValue("guess-time-seconds", DEFAULT_GUESS_TIME_LIMIT_SECONDS);
+    return Math.min(MAX_GUESS_TIME_LIMIT_SECONDS, Math.max(MIN_GUESS_TIME_LIMIT_SECONDS, seconds));
 }
 
 export async function guessMatchThreshold(env: Env): Promise<number> {

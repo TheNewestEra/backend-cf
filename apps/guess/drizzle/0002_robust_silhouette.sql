@@ -1,0 +1,1 @@
+ALTER TABLE `game` ADD `round_time_limit_seconds` integer DEFAULT 60 NOT NULL;

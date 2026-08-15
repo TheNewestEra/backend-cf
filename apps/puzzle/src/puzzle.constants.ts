@@ -3,7 +3,7 @@ export function puzzleImageKeyFor(puzzleId: string): string {
     return `puzzles/${puzzleId}/source.png`;
 }
 
-const MIN_TIME_LIMIT_SECONDS = 60;
+const MIN_TIME_LIMIT_SECONDS = 30;
 const MAX_TIME_LIMIT_SECONDS = 600;
 
 const DEFAULT_GRID_SIZE = 4;

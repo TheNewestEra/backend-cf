@@ -146,13 +146,23 @@ class GameDO extends DurableObject<Env> {
     // `browse`'s catalog.service.ts uses for `thumbnailUrl`), persisted on
     // the game row and reused for every round's `imageUrl` thereafter — see
     // the `origin` field's doc comment on ./db/schema.ts's `game` table.
-    async init(gameId: string, theme: string | null, origin: string): Promise<string> {
+    async init(
+        gameId: string,
+        theme: string | null,
+        origin: string,
+        requestedRoundCount?: number,
+        requestedRoundTimeLimitSeconds?: number,
+    ): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         const now = Date.now();
         // Resolved once, here, and persisted on the game row — see the
-        // `round_count` field's doc comment on ./db/schema.ts's `game` table.
-        const roundsCount = await roundCount(this.env);
+        // `round_count`/`round_time_limit_seconds` fields' doc comments on
+        // ./db/schema.ts's `game` table.
+        const [roundsCount, roundTimeLimitSeconds] = await Promise.all([
+            roundCount(this.env, requestedRoundCount),
+            guessTimeLimitSeconds(this.env, requestedRoundTimeLimitSeconds),
+        ]);
         this.db.delete(guesses).run();
         this.db.delete(rounds).run();
         this.db.delete(participants).run();
@@ -170,6 +180,7 @@ class GameDO extends DurableObject<Env> {
                 postRoundIndex: null,
                 postRoundEndsAt: null,
                 roundCount: roundsCount,
+                roundTimeLimitSeconds,
                 createdAt: now,
             })
             // Mixes `excluded.col` references with literal constants
@@ -188,6 +199,7 @@ class GameDO extends DurableObject<Env> {
                     postRoundIndex: null,
                     postRoundEndsAt: null,
                     roundCount: sql`excluded.round_count`,
+                    roundTimeLimitSeconds: sql`excluded.round_time_limit_seconds`,
                 },
             })
             .run();
@@ -224,7 +236,18 @@ class GameDO extends DurableObject<Env> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         const now = Date.now();
-        const endsAt = lobbyEndsAt(now, await lobbyCountdownSeconds(this.env.FLAGS));
+        // Re-evaluated rather than reused from the source game: the flag may
+        // have changed since the source game was created, and a replay is a
+        // fresh play session that should get today's round time limit — same
+        // reasoning as Piece Puzzle's POST /puzzles/{id}/replay. `roundCount`
+        // isn't re-evaluated here at all, unlike `init()` — it's dictated by
+        // `prompts.length` (the exact rounds being replayed), not by
+        // whatever the flag says today.
+        const [lobbyCountdown, roundTimeLimitSeconds] = await Promise.all([
+            lobbyCountdownSeconds(this.env.FLAGS),
+            guessTimeLimitSeconds(this.env),
+        ]);
+        const endsAt = lobbyEndsAt(now, lobbyCountdown);
         this.db.delete(guesses).run();
         this.db.delete(rounds).run();
         this.db.delete(participants).run();
@@ -242,6 +265,7 @@ class GameDO extends DurableObject<Env> {
                 postRoundIndex: null,
                 postRoundEndsAt: null,
                 roundCount: prompts.length,
+                roundTimeLimitSeconds,
                 createdAt: now,
             })
             .run();
@@ -953,18 +977,26 @@ class GameDO extends DurableObject<Env> {
      * `time_limit_ms` (the scoring/deadline/remaining-time anchor — see
      * `scoreForGuess()` and `readPublicState()`'s `remainingMs`), flips its
      * status to `Active`, arms the alarm for its own guess-timeout deadline,
-     * and broadcasts the transition. The limit is read from Flagship once
-     * here and stuck to for this round's whole lifetime, rather than
-     * re-fetched on every later use — so a flag flip mid-round can't leave
-     * the armed alarm, the eventual score, and the displayed countdown
-     * disagreeing with each other. Every round is guaranteed `ready` by the
-     * time this is ever called — generation fully gates `waiting`/`playing`
-     * (see guess.queue.ts) — so there's no status check to make first. Shared
-     * by `beginPlaying()` (round 0) and `resolveCurrentRound()` (every round
+     * and broadcasts the transition. The limit is `round_time_limit_seconds`
+     * off the game row — resolved once, by `init()`/`initFromSource()`, and
+     * stuck to for every round of this game's whole lifetime, rather than
+     * re-read per round — so a flag flip mid-game (or between two games with
+     * different requested limits) can't leave one round's armed alarm, its
+     * eventual score, and its displayed countdown disagreeing with another
+     * round of the same game. Every round is guaranteed `ready` by the time
+     * this is ever called — generation fully gates `waiting`/`playing` (see
+     * guess.queue.ts) — so there's no status check to make first. Shared by
+     * `beginPlaying()` (round 0) and `resolveCurrentRound()` (every round
      * after). */
     private async activateRound(index: number): Promise<void> {
         const startedAt = Date.now();
-        const timeLimitMs = (await guessTimeLimitSeconds(this.env)) * 1000;
+        const row = this.requireGameRow().match(
+            (row) => row,
+            (error) => {
+                throw new Error(error);
+            },
+        );
+        const timeLimitMs = row.roundTimeLimitSeconds * 1000;
         this.db
             .update(rounds)
             .set({status: "active", startedAt, timeLimitMs})
