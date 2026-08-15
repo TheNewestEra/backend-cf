@@ -91,15 +91,21 @@ puzzleRoutes.openapi(
     }),
     async (c) => {
         const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        // Independent reads — neither depends on the other's result — so
+        // fetch them concurrently.
+        const [user, maxPlayer] = await Promise.all([currentUser(c), maxPlayerLength(c.env.FLAGS)]);
         const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
         if (!player) return c.json({error: "player is required"}, 400);
 
-        const maxTheme = await maxThemeLength(c.env.FLAGS);
+        // Three more independent reads (theme's own max length, and the
+        // grid/time-limit clamps, each keyed off `body`'s own values) —
+        // fetched concurrently for the same reason.
+        const [maxTheme, gridSize, timeLimitMs] = await Promise.all([
+            maxThemeLength(c.env.FLAGS),
+            resolveGridSize(c.env, body.gridSize),
+            puzzleTimeLimitMs(c.env, body.timeLimitSeconds),
+        ]);
         const theme = body.theme?.trim() ? body.theme.trim().slice(0, maxTheme) : null;
-        const gridSize = await resolveGridSize(c.env, body.gridSize);
-        const timeLimitMs = await puzzleTimeLimitMs(c.env, body.timeLimitSeconds);
 
         const puzzleId = crypto.randomUUID();
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);
@@ -235,8 +241,8 @@ puzzleRoutes.openapi(
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
         const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        // Independent reads — see POST /puzzles' identical pairing.
+        const [user, maxPlayer] = await Promise.all([currentUser(c), maxPlayerLength(c.env.FLAGS)]);
         const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
         if (!player) return c.json({error: "player is required"}, 400);
 
@@ -382,8 +388,8 @@ puzzleRoutes.openapi(
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
         const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        // Independent reads — see POST /puzzles' identical pairing.
+        const [user, maxPlayer] = await Promise.all([currentUser(c), maxPlayerLength(c.env.FLAGS)]);
         const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
         if (!player) return c.json({error: "player is required"}, 400);
 

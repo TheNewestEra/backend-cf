@@ -526,8 +526,7 @@ class GameDO extends DurableObject<Env> {
             ? scoreForGuess(
                   round.startedAt,
                   round.timeLimitMs,
-                  await guessMaxScore(this.env),
-                  await guessMinScore(this.env),
+                  ...(await Promise.all([guessMaxScore(this.env), guessMinScore(this.env)])),
               )
             : null;
 
@@ -1109,31 +1108,30 @@ class GameDO extends DurableObject<Env> {
             .groupBy(guesses.participantId)
             .all();
 
-        for (const {participantId, total} of totals) {
-            if (total <= 0) continue;
-            const participant = this.db
-                .select({userId: participants.userId})
-                .from(participants)
-                .where(eq(participants.id, participantId))
-                .get();
-            if (!participant?.userId) continue;
-            try {
-                await this.env.LEADERBOARD.recordScore({
-                    userId: participant.userId,
-                    kind: "guess",
-                    sessionId: gameId,
-                    score: total,
-                });
-            } catch (err) {
-                console.error("failed to record guess game score", gameId, participant.userId, err);
-            }
-        }
+        await Promise.all(
+            totals.flatMap(({participantId, total}) => {
+                if (total <= 0) return [];
+                const participant = this.db
+                    .select({userId: participants.userId})
+                    .from(participants)
+                    .where(eq(participants.id, participantId))
+                    .get();
+                if (!participant?.userId) return [];
+                const userId = participant.userId;
+                return [
+                    this.env.LEADERBOARD.recordScore({
+                        userId,
+                        kind: "guess",
+                        sessionId: gameId,
+                        score: total,
+                    }).catch((err) => {
+                        console.error("failed to record guess game score", gameId, userId, err);
+                    }),
+                ];
+            }),
+        );
 
         this.broadcast({type: GameWsEventType.State, ...this.readPublicState()});
-        // Mirrors PuzzleDO's solve/timeout: distinct from markCatalogReady
-        // (fired back in guess.queue.ts) — the game's join/spectate window is
-        // now closed for good. `.catch()`'d so a `browse` hiccup can't break
-        // a live game's finish.
         this.ctx.waitUntil(
             this.env.BROWSE.updatePlayStatus(gameId, "finished").catch((err) => {
                 console.error("failed to update catalog play status", gameId, err);

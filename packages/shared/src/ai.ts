@@ -58,11 +58,16 @@ export async function generateRoundPrompts(
     theme: string | null,
     roundCount: number,
 ): Promise<Result<RoundPromptsResult, string>> {
-    const resolvedTheme = theme ?? (await pickPresetTheme(flags));
+    // Independent reads (the preset-theme pick, only actually needed when
+    // `theme` is absent, and the model name) — fetched concurrently rather
+    // than one at a time.
+    const [resolvedTheme, model] = await Promise.all([
+        theme ? Promise.resolve(theme) : pickPresetTheme(flags),
+        promptModel(flags),
+    ]);
     const themeInstruction = resolvedTheme
         ? `The theme is: "${resolvedTheme}".`
         : "Pick any fun, family-friendly theme yourself.";
-    const model = await promptModel(flags);
 
     const promptsJsonSchema = {
         type: "object",
@@ -154,11 +159,12 @@ export async function generateImagePrompt(
     ai: Ai,
     flags: Flagship,
 ): Promise<Result<ImagePromptResult, string>> {
-    const presetTheme = await pickPresetTheme(flags);
+    // Independent reads — fetched concurrently rather than one at a time,
+    // same as generateRoundPrompts()'s identical pairing.
+    const [presetTheme, model] = await Promise.all([pickPresetTheme(flags), promptModel(flags)]);
     const themeInstruction = presetTheme
         ? ` The theme is: "${presetTheme}".`
         : " Invent a fun theme yourself.";
-    const model = await promptModel(flags);
 
     const promptJsonSchema = {
         type: "object",

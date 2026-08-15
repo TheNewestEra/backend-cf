@@ -98,8 +98,7 @@ guessRoutes.openapi(
     }),
     async (c) => {
         const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const [user, maxPlayer] = await Promise.all([currentUser(c), maxPlayerLength(c.env.FLAGS)]);
         const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
         if (!player) return c.json({error: "player is required"}, 400);
 
@@ -108,10 +107,6 @@ guessRoutes.openapi(
 
         const gameId = crypto.randomUUID();
         const stub = c.env.GAME_DO.getByName(gameId);
-        // Same technique browse's catalog.service.ts uses for
-        // `thumbnailUrl` — captured once here (rather than per-read) since
-        // later broadcasts (queue consumer, DO alarm) have no request of
-        // their own to derive it from. See GameRow's `origin` field.
         const origin = new URL(c.req.url).origin;
         const hostToken = await stub.init(
             gameId,
@@ -120,16 +115,10 @@ guessRoutes.openapi(
             body.roundCount,
             body.roundTimeLimitSeconds,
         );
-        // The game is freshly `queued` (a JOINABLE_STATUS), so this can't
-        // actually reject — see guess.model.ts's `join()`.
         const joined = fromRpcResult(
             await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
         );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
-        // `theme === null` is the only signal that will ever exist for "will
-        // this game's theme end up picked rather than typed in" — capture it
-        // now, since by the time generation resolves a theme (guess.queue.ts)
-        // `theme` itself is indistinguishable from a user-given one.
         const themeGenerated = theme === null;
         await c.env.BROWSE.insertCatalogEntry(
             gameId,
@@ -166,12 +155,6 @@ guessRoutes.openapi(
     },
 );
 
-// Not OpenAPI-documented: this is a WebSocket upgrade, not a request/response
-// JSON endpoint — OpenAPI 3 has no representation for it. Carries more than
-// broadcasts out — joining, guessing, and revealing are all sent as messages
-// over this same connection now (see guess.schema.ts's
-// `GameWsClientMessageSchema` and guess.model.ts's `webSocketMessage()`);
-// there's no separate POST for any of them any more.
 guessRoutes.get("/games/:id/ws", async (c) => {
     if (c.req.header("Upgrade") !== "websocket") {
         return c.text("Expected WebSocket", 426);
@@ -281,8 +264,7 @@ guessRoutes.openapi(
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
         const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        const [user, maxPlayer] = await Promise.all([currentUser(c), maxPlayerLength(c.env.FLAGS)]);
         const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
         if (!player) return c.json({error: "player is required"}, 400);
 
@@ -389,8 +371,9 @@ guessRoutes.openapi(
     async (c) => {
         const {id: sourceId} = c.req.valid("param");
         const body = c.req.valid("json") ?? {};
-        const user = await currentUser(c);
-        const maxPlayer = await maxPlayerLength(c.env.FLAGS);
+        // Independent reads — neither depends on the other's result — so
+        // fetch them concurrently.
+        const [user, maxPlayer] = await Promise.all([currentUser(c), maxPlayerLength(c.env.FLAGS)]);
         const player = user ? user.username : (body.player?.trim().slice(0, maxPlayer) ?? "");
         if (!player) return c.json({error: "player is required"}, 400);
 
