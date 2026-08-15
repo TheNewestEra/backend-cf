@@ -29,8 +29,8 @@ puzzleRoutes.openapi(
             "PuzzlePublic's `theme`/`themeGenerated` report what was actually used once generation resolves it. " +
             "The returned hostToken authorizes starting the lobby early for this puzzle (regenerating/replaying " +
             "it later both spin up their own new instance with its own, separate host token — neither needs or " +
-            "reuses this one). `gridSize`, if given, is clamped to Flagship's configured [min, max] rather " +
-            "than rejected out of range. The host is auto-joined as this puzzle's first participant — a logged-in " +
+            "reuses this one). `gridSize` and `timeLimitSeconds`, if given, are each clamped to their own " +
+            "configured [min, max] rather than rejected out of range. The host is auto-joined as this puzzle's first participant — a logged-in " +
             "caller joins under their account name/color; an anonymous caller must supply `player` (and, " +
             "optionally, `color`), same as POST /puzzles/{id}/ws's `join` message. `participantId`/`token`/`color` " +
             "come back already resolved, so the host's client can move/select tiles immediately without sending " +
@@ -42,6 +42,16 @@ puzzleRoutes.openapi(
                         schema: z.object({
                             theme: z.string().optional(),
                             gridSize: z.number().int().optional(),
+                            timeLimitSeconds: z
+                                .number()
+                                .int()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "How long the countdown runs once play starts, in seconds — clamped to " +
+                                        "this puzzle's configured [min, max] rather than rejected out of range. " +
+                                        'Absent a value, falls back to Flagship\'s "puzzle-time-seconds" flag.',
+                                }),
                             player: z.string().optional().openapi({
                                 description:
                                     "Anonymous-host display name — ignored (and unnecessary) when logged in.",
@@ -89,7 +99,7 @@ puzzleRoutes.openapi(
         const maxTheme = await maxThemeLength(c.env.FLAGS);
         const theme = body.theme?.trim() ? body.theme.trim().slice(0, maxTheme) : null;
         const gridSize = await resolveGridSize(c.env, body.gridSize);
-        const timeLimitMs = await puzzleTimeLimitMs(c.env);
+        const timeLimitMs = await puzzleTimeLimitMs(c.env, body.timeLimitSeconds);
 
         const puzzleId = crypto.randomUUID();
         const stub = c.env.PUZZLE_DO.getByName(puzzleId);

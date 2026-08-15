@@ -37,11 +37,15 @@ export async function puzzleMinSolvedScore(env: Env): Promise<number> {
     return env.FLAGS.getNumberValue("puzzle-min-solved-score", DEFAULT_PUZZLE_MIN_SOLVED_SCORE);
 }
 
-export async function puzzleTimeLimitMs(env: Env): Promise<number> {
-    const seconds = await env.FLAGS.getNumberValue(
-        "puzzle-time-seconds",
-        DEFAULT_PUZZLE_TIME_LIMIT_SECONDS,
-    );
+/** Resolves this puzzle's time limit: `requestedSeconds` (POST /puzzles' optional
+ * `timeLimitSeconds` body field) clamped to [MIN_TIME_LIMIT_SECONDS,
+ * MAX_TIME_LIMIT_SECONDS] or, absent a request, Flagship's "puzzle-time-seconds"
+ * flag — clamped the same way. Mirrors `resolveGridSize()`'s "clamp rather than
+ * reject" shape one field over. */
+export async function puzzleTimeLimitMs(env: Env, requestedSeconds?: number): Promise<number> {
+    const seconds = Number.isInteger(requestedSeconds)
+        ? (requestedSeconds as number)
+        : await env.FLAGS.getNumberValue("puzzle-time-seconds", DEFAULT_PUZZLE_TIME_LIMIT_SECONDS);
     return Math.min(MAX_TIME_LIMIT_SECONDS, Math.max(MIN_TIME_LIMIT_SECONDS, seconds)) * 1000;
 }
 
