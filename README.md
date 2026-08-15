@@ -1,4 +1,4 @@
-# The Newest Era Backend
+# AI Party Games
 
 Two real-time party games, built on the same pattern: an HTTP request kicks
 off AI generation on a Queue (so it returns immediately), and a Durable
@@ -6,10 +6,8 @@ Object owns the game's live state, pushing every update to connected
 browsers over a WebSocket. A D1-backed catalog indexes every game/puzzle
 ever created, across all users, for browsing and rating.
 
-- **Guess the Prompt** — a configurable 1-8 AI images generate around a
-  theme; players guess the prompt behind each one during timed rounds. It
-  starts in a waiting room the host controls and ends when all rounds are
-  solved or a round times out.
+- **Guess the Prompt** — 5 AI images generate around a theme; players guess
+  the prompt behind each one. Starts in a waiting room the host controls.
 - **Piece Puzzle** — one AI image generates, scrambles into an N×N grid,
   and 2+ players collaboratively race a countdown to put it back together
   on the same shared board. Starts in a waiting room the host controls.
@@ -23,8 +21,6 @@ shared/src/color.ts`, the same generator `accounts` uses for a real
 account's color) and a `player_joined` broadcast, so every connected client
 can render a live roster of who's in the lobby and in what color.
 
----
-
 ## Architecture: one Worker per service, connected by RPC
 
 This is an npm-workspaces monorepo — seven independently deployable
@@ -33,15 +29,15 @@ Cloudflare Workers under `apps/*`, sharing common code from `packages/shared`
 database (`game-worker-catalog`) and, where relevant, its own Durable Object
 class:
 
-| Service (`apps/…`) | Owns                              | RPC it exposes                                              | RPC it calls                           |
-| ------------------ | --------------------------------- | ----------------------------------------------------------- | -------------------------------------- |
-| `accounts`         | `users`, `sessions`               | `AccountsService`: session + user lookups                   | —                                      |
-| `browse`           | `catalog`, `ratings`              | `CatalogService`: catalog status writes                     | —                                      |
-| `leaderboard`      | `leaderboard_entries`             | `LeaderboardService`: `recordScore`                         | accounts                               |
-| `notifications`    | `notifications`, `NotificationDO` | `NotificationsService`: `send`/`sendMany`/`push`/`pushMany` | accounts                               |
-| `friends`          | friends/groups/invites tables     | —                                                           | accounts, puzzle, guess, notifications |
-| `guess`            | `GameDO`                          | `GuessService`: `getStatus`                                 | accounts, browse, leaderboard          |
-| `puzzle`           | `PuzzleDO`                        | `PuzzleService`: `getLobbyStatus`                           | accounts, browse, leaderboard          |
+| Service (`apps/…`) | Owns | RPC it exposes | RPC it calls |
+|---|---|---|---|
+| `accounts` | `users`, `sessions` | `AccountsService`: session + user lookups | — |
+| `browse` | `catalog`, `ratings` | `CatalogService`: catalog status writes | — |
+| `leaderboard` | `leaderboard_entries` | `LeaderboardService`: `recordScore` | accounts |
+| `notifications` | `notifications`, `NotificationDO` | `NotificationsService`: `send`/`sendMany`/`push`/`pushMany` | accounts |
+| `friends` | friends/groups/invites tables | — | accounts, puzzle, guess, notifications |
+| `guess` | `GameDO` | `GuessService`: `getStatus` | accounts, browse, leaderboard |
+| `puzzle` | `PuzzleDO` | `PuzzleService`: `getLobbyStatus` | accounts, browse, leaderboard |
 
 `notifications` is the one shared, general-purpose channel every other
 service pushes a user-facing message through — see "Notifications" below.
@@ -91,8 +87,7 @@ that file has no binding of its own.
 ### Guess the Prompt (`apps/guess`)
 
 - **Prompts**: `@cf/meta/llama-3.3-70b-instruct-fp8-fast` with Workers AI's
-  JSON mode. The requested round count is configurable from 1-8 and defaults
-  to the Flagship `round-count` value (5 if flag evaluation fails).
+  JSON mode, constrained to return exactly 5 strings.
 - **Images**: one call per prompt, in parallel, stored at
   `games/<gameId>/<index>.png`.
 - **Guessing** (`isGuessCorrect` in `guess-matching.ts`): correct on an exact
@@ -102,8 +97,8 @@ that file has no binding of its own.
   guess. A round only reveals its prompt to the guesser on a correct
   guess, or to anyone via "give up" (`POST /games/:id/reveal`).
 - **Partial failures**: if some images fail, the game ends in `error`
-  status instead of remaining stuck in generation. Replay and regenerate
-  always create fresh instances rather than mutating the failed game.
+  status (not stuck retrying) — there's no way to reset it in place any
+  more (see Replay below); the only way forward is a fresh instance.
 - **Waiting room**: once every round's image is ready, the game enters a
   `waiting` status — same lobby shape as Piece Puzzle (see the intro
   above). The **host** — whoever created it, identified by a one-time
@@ -111,45 +106,55 @@ that file has no binding of its own.
   can start immediately (`POST /games/:id/start`); otherwise a **DO alarm**
   auto-starts it after `LOBBY_COUNTDOWN_SECONDS` (30s), same alarm
   mechanism as `PuzzleDO`. Direct friend/group invites (`POST
-/api/invites`, served by `friends`) are only accepted pre-start
+  /api/invites`, served by `friends`) are only accepted pre-start
   (`queued`/`generating`/`waiting`) — `friends`
   checks this through the `GuessService.getStatus` RPC call rather than a
   direct binding to this service's Durable Object namespace.
-- **Joining and play use the WebSocket**: a client sends `join`, `guess`,
-  `reveal`, and `typing` messages over `GET /games/:id/ws`. Joining is only
-  possible during `queued`/`generating`/`waiting`; late arrivals can still
-  spectate. Logged-in players are identified by the session captured at the
-  WebSocket upgrade and use their account id/color. Anonymous guests receive
-  a private `join_result` containing a participant id, token, and color and
-  resend those credentials with later actions. Rejected actions return a
-  private `GameWsErrorMessage`.
-- **Interactivity**: the DO broadcasts connection counts, participant state,
-  joins, round changes, guesses, reveals, typing cues, live scores, terminal
-  results, and errors. Incorrect guess broadcasts include the guessed text;
-  correct guesses announce the player and awarded score without leaking the
-  answer to everyone else.
-- **Replay and regenerate**: once finished, `POST /games/:id/replay` creates
-  an independent game by copying the source rounds/images, while
-  `POST /games/:id/regenerate` creates an independent game with fresh AI
-  prompts/images. Both return a new id and host token and leave the source
-  untouched.
-- **Scoring and completion**: every correct answer receives a time-weighted
-  score and updates the in-game standings immediately. When the game becomes
-  `solved` or `timeout`, final per-participant totals are broadcast and each
-  logged-in player's aggregate game score is recorded once through the
-  Leaderboard RPC. Guest scores remain visible in-game but are not persisted
-  to the global leaderboard.
+- **Joining**: `POST /games/:id/join` registers a player — required before
+  any `guess`/`reveal` call, and only possible while rounds are still
+  generating or the lobby is open
+  (`queued`/`generating`/`waiting`). Once the
+  game is `playing` it's playable, so joining then would be joining a game
+  already in progress rather than just spectating it — late arrivals can
+  still watch over the WebSocket, but `join()` (and everything gated on
+  having joined) throws. Logged-in players are identified by their session
+  from then on and keep their account color; anonymous guests get back a
+  one-time `token` they must resend with every guess/reveal (since a
+  free-text name alone isn't a real identity) and a freshly generated
+  color.
+- **Interactivity**: the DO broadcasts a `connectedPlayers` count on every
+  connect/disconnect and a `player_joined` (name + color) event on every
+  join, and `getState()`/every `state` broadcast includes the full
+  `participants` roster — so the lobby and play page can show who's
+  actually there, live. `guess`/`reveal` broadcasts include the acting
+  player's name and color too. A lightweight `{"type":"typing",...}`
+  WebSocket message (not an RPC — see `GameDO.webSocketMessage`) rebroadcasts
+  a `player_typing` cue while someone's composing a guess.
+- **Replay**: `POST /games/:id/replay` creates an *independent* game (its
+  own id, lobby, host token, rounds, guesses, and join roster) seeded from
+  this one's theme and re-runs generation — it never touches the source
+  game, so anyone browsing/spectating a game can replay it and invite their
+  own friends to the new instance without disrupting whoever's still
+  playing the original.
+- **Rating**: once every round has generated, the play page shows a 1-5
+  star widget (`POST /api/catalog/:id/rate`, served by `browse`); one
+  rating per browser (tracked in `localStorage`, not enforced server-side).
+- **Scoring**: a correct guess is time-weighted (fast = more points) and
+  recorded via `env.LEADERBOARD.recordScore(...)` from `GameDO.submitGuess`
+  — only for logged-in players; anonymous guesses still count in-game but
+  aren't leaderboard-eligible.
 
 Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
-`POST /games/:id/start`, `POST /games/:id/replay`,
-`POST /games/:id/regenerate`, `GET /games/:id/images/:index`.
+`POST /games/:id/join`, `POST /games/:id/start`, `POST /games/:id/guess`,
+`POST /games/:id/reveal`, `POST /games/:id/replay`,
+`GET /games/:id/images/:index`.
 
 ### Piece Puzzle (`apps/puzzle`)
 
 - **Image**: one call — the theme is used directly as the prompt if given,
   otherwise the text model invents one (skips an AI call entirely when a
   theme is supplied). Stored at `puzzles/<puzzleId>/source.png`.
-- **Board**: a client renders every tile as a `<div>` sharing the _same_
+- **Board**: a client renders every tile as a `<div>` sharing the *same*
   background image, scaled up by `gridSize` with `background-position`
   offset per tile — no server-side image slicing. Grid size is 3×3 to 6×6
   (player-chosen at creation, default 4×4).
@@ -172,50 +177,49 @@ Routes: `POST /games`, `GET /games/:id`, `GET /games/:id/ws`,
   `PuzzleWsClientMessageSchema`), since a player is already holding that
   connection open for the whole time they'd otherwise be polling/mutating
   over HTTP. Identity is resolved once, from the session cookie present at
-  the WebSocket _upgrade_ request (individual WS messages don't carry
+  the WebSocket *upgrade* request (individual WS messages don't carry
   cookies), and kept on the connection via `serializeAttachment` for its
   lifetime.
-    - **Joining**: send `{type: "join", player}` — required before any `move`,
-      and only possible pre-start (`queued`/`generating`/`waiting`). Once the
-      puzzle is `playing` this errors back (`PuzzleWsErrorMessage`), so late
-      arrivals can still spectate but can't join in. Logged-in players are
-      identified by the session resolved at connect time and keep their
-      account color; anonymous guests get back a one-time `token` (in a
-      `PuzzleWsJoinResultMessage`, addressed only to them) they must resend
-      with every `move`/`select` message (since a free-text name alone isn't
-      a real identity, and a fresh WebSocket connection has no memory of a
-      previous one's identity) plus a freshly generated color.
-    - **Moves**: click a tile, then another, to send `{type: "move", cellA,
-cellB, participantId, token}` — free swap, not a classic sliding-15-
-      puzzle, so any arrangement is trivially solvable and two players can
-      never block each other on an empty-slot constraint. Every move is
-      server-authoritative: `PuzzleDO.swapTiles()` checks the caller joined
-      before start, then persists the swap and broadcasts it to _every_
-      connected client (including the mover, who observes their own move
-      through that same broadcast rather than a direct reply), tagged with
-      the mover's name and color. A rejected move comes back as a
-      `PuzzleWsErrorMessage` to the sender only.
-    - **Block selection**: `{type: "select", cell, participantId, token}`
-      broadcasts a `tile_selected` event (`cell`, `player`, `color`) the
-      instant a joined player picks a block, _before_ they've picked its swap
-      partner — a pure UX cue, not persisted anywhere and not itself a move
-      (see `PuzzleDO.selectTile()`), so every other connected client can
-      highlight what's about to move and in whose color.
+  - **Joining**: send `{type: "join", player}` — required before any `move`,
+    and only possible pre-start (`queued`/`generating`/`waiting`). Once the
+    puzzle is `playing` this errors back (`PuzzleWsErrorMessage`), so late
+    arrivals can still spectate but can't join in. Logged-in players are
+    identified by the session resolved at connect time and keep their
+    account color; anonymous guests get back a one-time `token` (in a
+    `PuzzleWsJoinResultMessage`, addressed only to them) they must resend
+    with every `move`/`select` message (since a free-text name alone isn't
+    a real identity, and a fresh WebSocket connection has no memory of a
+    previous one's identity) plus a freshly generated color.
+  - **Moves**: click a tile, then another, to send `{type: "move", cellA,
+    cellB, participantId, token}` — free swap, not a classic sliding-15-
+    puzzle, so any arrangement is trivially solvable and two players can
+    never block each other on an empty-slot constraint. Every move is
+    server-authoritative: `PuzzleDO.swapTiles()` checks the caller joined
+    before start, then persists the swap and broadcasts it to *every*
+    connected client (including the mover, who observes their own move
+    through that same broadcast rather than a direct reply), tagged with
+    the mover's name and color. A rejected move comes back as a
+    `PuzzleWsErrorMessage` to the sender only.
+  - **Block selection**: `{type: "select", cell, participantId, token}`
+    broadcasts a `tile_selected` event (`cell`, `player`, `color`) the
+    instant a joined player picks a block, *before* they've picked its swap
+    partner — a pure UX cue, not persisted anywhere and not itself a move
+    (see `PuzzleDO.selectTile()`), so every other connected client can
+    highlight what's about to move and in whose color.
 - **Timer**: same DO alarm mechanism as the lobby, just re-armed for
   `startedAt + timeLimitMs` once play begins. On solve, the alarm is
   cancelled; on expiry, the puzzle ends `timeout` with score 0.
-- **Scoring**: points are awarded per move when one or two tiles are placed
-  correctly for the first time. A tile can score only once, preventing
-  repeated swaps from farming points. Each `move` event contains the score
-  for that move (or `null`) and the player's running total; `state`,
-  `solved`, and `timeout` expose sorted per-player results. Final logged-in
-  totals are persisted through the Leaderboard RPC, including partial scores
-  when the puzzle times out.
-- **Replay and regenerate**: once solved/timed out,
-  `POST /puzzles/:id/replay` creates an independent puzzle that copies the
-  source image, while `POST /puzzles/:id/regenerate` creates an independent
-  puzzle with a freshly generated image. The caller becomes the new host;
-  neither operation mutates the source puzzle.
+- **Scoring**: `max(50, round(remainingMs / timeLimitMs × 1000))`, recorded
+  via `env.LEADERBOARD.recordScore(...)` for the logged-in solver — full
+  marks for an instant solve, a 50-point floor for finishing at the buzzer.
+- **Replay**: once solved/timed out, `POST /puzzles/:id/replay` creates an
+  *independent* puzzle (its own id, lobby, host token, and join roster)
+  that reuses the same image (copied in R2, no fresh AI call) — it never
+  touches the source puzzle, so anyone browsing/spectating a finished
+  puzzle can replay it and invite their own friends to the new lobby
+  without disrupting anyone still viewing the original. Unlike
+  `regenerate`, replaying isn't host-gated — the replayer becomes the new
+  instance's host.
 - **Presence**: the DO broadcasts a `connectedPlayers` count on every
   connect/disconnect and a `player_joined` (name + color) event on every
   join; `getState()`/every `state` broadcast includes the full
@@ -224,7 +228,7 @@ cellB, participantId, token}` — free swap, not a classic sliding-15-
   Guess the Prompt.
 
 Routes: `POST /puzzles`, `GET /puzzles/:id`, `GET /puzzles/:id/ws` (also
-carries the `join`/`move`/`select`/`deselect` client messages — see above),
+carries the `join`/`move`/`select` client messages — see above),
 `POST /puzzles/:id/start`, `POST /puzzles/:id/replay`,
 `POST /puzzles/:id/regenerate`, `GET /puzzles/:id/image`.
 
@@ -254,26 +258,23 @@ mirrors a coarse `playStatus`, not moves/scores/timers.
   own DO (`GameDO`/`PuzzleDO`), not their queue consumer, since it's a
   live-gameplay transition (host "start now" or the lobby alarm) rather
   than a generation one — see `GameDO.beginPlaying()` / `PuzzleDO.
-beginPlaying()`. Both games call `"finished"` when they become `solved`
-  or `timeout`. Every call is `.catch()`'d and
+  beginPlaying()`. `puzzle` additionally calls `"finished"` on a solve
+  (`swapTiles`) or a timeout (`alarm()`); Guess the Prompt has no terminal
+  state, so it never calls `"finished"`. Every call is `.catch()`'d and
   wrapped in `ctx.waitUntil()` (fired from a DO method that doesn't
   otherwise await them) so a `browse` hiccup can never break a live move,
   a lobby auto-start, or (for generation-phase writes) trigger a spurious
   retry of AI generation that already succeeded.
-- `GET /api/catalog` without `playStatus` is the plain browse gallery:
-  everything with `status = 'ready'`, filterable by kind, ownership scope,
-  and live play status, sortable by recency or average rating, and paginated.
-  Results include the creator, whether the theme was generated, rating
-  aggregate, and replay metadata. Pass `playStatus=joinable` for
+- `GET /api/catalog` without `playStatus` is the plain browse gallery,
+  unchanged: everything with `status = 'ready'`, filterable by kind and
+  sortable by recency or average rating. Pass `playStatus=joinable` for
   open lobbies/still-generating games you can join as a player, or
   `playStatus=active` for started games/puzzles you can only spectate —
   either widens the `status` gate to `!= 'error'` so not-yet-thumbnailed
   entries show up too.
-- Replay chains are collapsed to their newest relevant catalog card. Replays
-  retain their source relationship and chain rating; regenerations begin a
-  fresh visual chain while recording their origin.
-- `POST /api/catalog/:id/rate` records a 1-5 star rating. The catalog returns
-  the chain-wide average rounded to the nearest half star.
+- `POST /api/catalog/:id/rate` records a 1-5 star rating (no auth — dedup
+  is a soft, client-side `localStorage` flag, consistent with this
+  project's trust level elsewhere).
 
 ### Leaderboard (`apps/leaderboard`)
 
@@ -282,13 +283,9 @@ exclusively through `LeaderboardService.recordScore` — into per-user
 totals. Kept as an event log (rather than a running total) specifically so
 time-windowed queries can filter on `created_at` directly.
 
-`GET /api/leaderboard` returns a paginated ranking by summed score plus the
-calling user's own standing (score + rank, even outside the current page).
-It is filterable by `kind` (`guess`/`puzzle`/all), `period`
-(`day`/`week`/`month`/all-time), and `scope` (`global`/`friends`). The
-friends scope requires authentication; global page size is Flagship-backed.
-When kind is omitted, each row intentionally has `kind: null` because its
-score combines all supported game types.
+`GET /api/leaderboard` returns the top 10 by summed score plus the calling
+user's own standing (score + rank, even outside the top 10), filterable by
+`kind` (`guess`/`puzzle`) and `period` (`day`/`week`/`month`/all-time).
 
 ### Accounts (`apps/accounts`)
 
@@ -308,12 +305,17 @@ accounts depend on it.
   `deleteSession`) rather than querying `sessions` directly — see
   `packages/shared/src/session.ts` for the shared cookie-handling logic
   each service's middleware is built on.
-- **Play identity**: both games establish identity through their WebSocket
-  join flow. Logged-in players are upserted by session `userId` (which is
-  also their participant id), cannot spoof a nickname, and retain their
-  account color. Anonymous guests submit a nickname and receive a private
-  bearer token plus generated color. Later actions are checked against the
-  join roster rather than trusting a resent display name.
+- **Play identity**: both play pages' "Playing as" field is your real
+  username (read-only) when logged in. Identity is now established once,
+  at `POST .../join` — logged-in players are upserted by session `userId`
+  (can't be spoofed) and keep their account color, anonymous guests submit
+  a freeform nickname there and get back a bearer `token` plus a freshly
+  generated color (`@game-worker/shared/color`, the same generator used at
+  registration). Every later `guess`/`reveal`/`move` call is checked
+  against that join roster (`participantId` + `token` for guests, session
+  for logged-in players) rather than trusting a name resent on each
+  request, and every join broadcasts a `player_joined` event so connected
+  clients can render a live, colored roster.
 
 ### Notifications (`apps/notifications`)
 
@@ -331,14 +333,14 @@ a schema or API change in this service.
   `entrypoint: "NotificationsService"`) — there is no HTTP endpoint to
   notify an arbitrary user, only to manage your own inbox. Two independent
   choices a caller makes per call:
-    - **`send`/`sendMany`** persist a row in this service's own
-      `notifications` table (recoverable via `GET /api/notifications` if the
-      recipient was offline) _and_ push it live. Use this for anything that
-      doesn't already have its own durable "what's pending" store.
-    - **`push`/`pushMany`** skip persistence and only push live — for a
-      caller that already owns its own source of truth (e.g. `friends`'
-      `game_invites` + `GET /api/invites/pending`), so the same fact isn't
-      kept in two places able to drift apart.
+  - **`send`/`sendMany`** persist a row in this service's own
+    `notifications` table (recoverable via `GET /api/notifications` if the
+    recipient was offline) *and* push it live. Use this for anything that
+    doesn't already have its own durable "what's pending" store.
+  - **`push`/`pushMany`** skip persistence and only push live — for a
+    caller that already owns its own source of truth (e.g. `friends`'
+    `game_invites` + `GET /api/invites/pending`), so the same fact isn't
+    kept in two places able to drift apart.
 - **Live delivery**: `NotificationDO` (one instance per user id, routed via
   `getByName(userId)`) holds that user's open WebSocket connections and
   broadcasts to all of them the instant `send`/`push` runs. A client opens
@@ -358,11 +360,9 @@ a schema or API change in this service.
   (`POST /api/groups`), add/remove members, delete. Owner-only, enforced
   server-side (not just hidden in the UI).
 - **Invites**: `POST /api/invites` targets a single friend (`friendId`) or
-  fans out to every eligible member of a group (`groupId`) — one
-  `game_invites` row per recipient either way. Existing participants are
-  excluded. Accepting (`POST /api/invites/:id/accept`) validates that the
-  game is still joinable, automatically adds the authenticated recipient to
-  its participant roster, and returns the `playUrl` the client redirects to.
+  fans out to every member of a group (`groupId`) — one `game_invites` row
+  per recipient either way. Accepting (`POST /api/invites/:id/accept`)
+  returns a `playUrl` the client redirects to.
 - **Live delivery**: the recipient doesn't have to be on the friends page to
   see an invite — `POST /api/invites` calls `NOTIFICATIONS.push()` (see
   "Notifications" below) right after the D1 write, so a connected client
@@ -374,12 +374,10 @@ a schema or API change in this service.
   returns 401/403 on cross-user access (stealing someone else's group,
   accepting someone else's invite).
 
----
-
-## Installation and infrastructure
+## One-time setup
 
 ```sh
-npm install                                           # installs all seven apps + shared packages
+npm install                                          # installs all seven apps + the shared package
 
 wrangler r2 bucket create game-guess-images           # shared by guess + puzzle
 wrangler queues create game-generation
@@ -390,11 +388,15 @@ wrangler d1 create game-worker-catalog                # then paste database_id i
 wrangler d1 migrations apply game-worker-catalog --remote   # run from apps/accounts, or any D1-bound service
 ```
 
-Also configure the Cloudflare Flagship app referenced by each
-`wrangler.jsonc`. It owns runtime settings such as lobby and round timers,
-round/grid limits, score bounds, matching threshold, player/theme length,
-leaderboard page size, and preset themes. Every setting has a code fallback
-so transient flag evaluation failures do not stop gameplay.
+Also needed but not covered by the commands above: a Cloudflare Flagship
+app (named "timer" in every `apps/*/wrangler.jsonc` comment) holding every
+tunable flag `guess`/`puzzle` read — see [`terraform/`](terraform/) below.
+
+[`terraform/`](terraform/) codifies this entire section (R2/queues/D1/
+Flagship, all three environments) as IaC, as an alternative to running
+these commands by hand — see its own README for the full bootstrap flow,
+including how to adopt resources this project's already-live account
+created before that directory existed.
 
 No secrets to set and nothing to register — accounts are a username plus
 a hashed 6-digit code, both entirely in D1, and sessions are opaque tokens
@@ -406,13 +408,13 @@ Every `apps/*/wrangler.jsonc` defines three environments, each pointing at
 its **own** physical resources — deploying to one never touches another's
 data:
 
-| Environment                                       | Worker names                    | D1 database                   | R2 bucket                   | Queues                                   |
-| ------------------------------------------------- | ------------------------------- | ----------------------------- | --------------------------- | ---------------------------------------- |
-| `dev` (unnamed/top-level config, no `--env` flag) | `game-<service>-worker`         | `game-worker-catalog`         | `game-guess-images`         | `game-generation*`, `puzzle-generation*` |
-| `staging`                                         | `game-<service>-worker-staging` | `game-worker-catalog-staging` | `game-guess-images-staging` | `*-staging`                              |
-| `production`                                      | `game-<service>-worker-prod`    | `game-worker-catalog-prod`    | `game-guess-images-prod`    | `*-prod`                                 |
+| Environment | Worker names | D1 database | R2 bucket | Queues |
+|---|---|---|---|---|
+| `dev` (unnamed/top-level config, no `--env` flag) | `game-<service>-worker` | `game-worker-catalog` | `game-guess-images` | `game-generation*`, `puzzle-generation*` |
+| `staging` | `game-<service>-worker-staging` | `game-worker-catalog-staging` | `game-guess-images-staging` | `*-staging` |
+| `production` | `game-<service>-worker-prod` | `game-worker-catalog-prod` | `game-guess-images-prod` | `*-prod` |
 
-Service bindings (RPC) always target the sibling Worker in the _same_
+Service bindings (RPC) always target the sibling Worker in the *same*
 environment (e.g. `friends`'s staging deploy binds `ACCOUNTS` to
 `game-accounts-worker-staging`, not the dev one). Bootstrapping a fresh
 staging or production environment means creating that environment's D1
@@ -421,8 +423,6 @@ database/R2 bucket/queues (same commands as above, with a `-staging`/
 / `env.production` block, then running migrations for that database once
 (`wrangler d1 migrations apply game-worker-catalog-staging --remote --env
 staging`, from `apps/accounts`).
-
----
 
 ## Develop & deploy
 
@@ -459,24 +459,33 @@ npm run typecheck   # runs `tsc --noEmit` in every workspace
 
 ### CI/CD (`.github/workflows/deploy.yml` + `deploy-service.yml`)
 
-The service registry in `.github/services.json` is the single source of
-truth for all seven Workers and which five use D1. The deploy workflow
-typechecks the monorepo, applies shared migrations when required, and fans
-the selected services out through the reusable `deploy-service.yml` matrix.
+The actual per-service deploy steps (checkout, `npm ci`, `wrangler deploy`)
+live once in the reusable `.github/workflows/deploy-service.yml`
+(`workflow_call`); `deploy.yml` just calls it once per service with three
+`with:` values (`service`, `working_directory`, `environment`) instead of
+repeating the same six-step block once per service.
 
 Two ways it runs:
 
-- **Push to `main`**: deploys all registered services to production.
-- **Manual `workflow_dispatch`**: choose `dev`, `staging`, or `production`
-  and provide a comma-separated service list or `all`.
+- **Push to `master`**: always targets `dev`, and only deploys the services
+  whose `apps/<service>/**` (or `packages/shared/**`) actually changed —
+  path-filtered via `dorny/paths-filter`.
+- **Manual `workflow_dispatch`**: pick the target **environment** (`dev` /
+  `staging` / `production`) from a dropdown, and tick a checkbox per
+  service you want deployed (`accounts`, `browse`, `leaderboard`,
+  `friends`, `guess`, `puzzle`). This bypasses change-detection entirely —
+  an unticked box doesn't deploy no matter what changed, so it's the way to
+  redeploy something unchanged, deploy to staging/production (which the
+  push trigger never touches), or deploy a subset on demand.
 
-Either way, D1 migrations apply idempotently through `apps/accounts` before
-any selected D1-backed service deploys. Selected Workers deploy in parallel
-once an environment has been bootstrapped; a new environment needs the
-dependency-ordered first deployment documented in `deploy.yml`.
+Either way, the whole monorepo typechecks first, and D1 migrations apply
+(idempotent — safe every run) via `apps/accounts` against that run's target
+environment's database, ahead of any D1-bound service's deploy — but only
+when at least one of accounts/browse/leaderboard/friends is actually going
+out.
 
-Requires two repository secrets: `CLOUDFLARE_API_TOKEN` and
-`CLOUDFLARE_ACCOUNT_ID`.
+Requires two repository secrets: `CLOUDFLARE_API_TOKEN` (Workers
+Scripts:Edit, D1:Edit, Workers Routes:Edit) and `CLOUDFLARE_ACCOUNT_ID`.
 One token/account covers all three environments here since they're all in
 the same Cloudflare account, differentiated only by resource IDs and Worker
 name suffixes — see [Environments](#environments-dev--staging--production)
