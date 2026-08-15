@@ -6,7 +6,7 @@ import type {Notification} from "./notifications.service";
  * `send()`-created row (has a durable D1 id, recoverable via
  * `GET /api/notifications`, markable read) from a `push()`-only one
  * (delivery-only — the caller already owns its own source of truth). */
-export type PushableNotification = Notification & { persisted: boolean };
+export type PushableNotification = Notification & {persisted: boolean};
 
 /**
  * One instance per user (routed via `env.NOTIFICATION_DO.getByName(userId)`).

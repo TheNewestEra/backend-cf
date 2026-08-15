@@ -92,11 +92,12 @@ export async function logOutVia(
  * own ambient `Env` (see `worker-configuration.d.ts`), passed explicitly as
  * a type argument since it's declared globally per-app and can't be
  * inferred from here. */
-export function accountsAuthMiddleware<Env extends { ACCOUNTS: AccountsSessionRpc }>() {
+export function accountsAuthMiddleware<Env extends {ACCOUNTS: AccountsSessionRpc}>() {
     return {
-        currentUser: (c: Context<{ Bindings: Env }>) => currentUserVia(c, c.env.ACCOUNTS),
-        currentUserFromRequest: (request: Request, env: Env) => currentUserFromRequestVia(request, env.ACCOUNTS),
-        logIn: (c: Context<{ Bindings: Env }>, userId: string) => logInVia(c, c.env.ACCOUNTS, userId),
-        logOut: (c: Context<{ Bindings: Env }>) => logOutVia(c, c.env.ACCOUNTS),
+        currentUser: (c: Context<{Bindings: Env}>) => currentUserVia(c, c.env.ACCOUNTS),
+        currentUserFromRequest: (request: Request, env: Env) =>
+            currentUserFromRequestVia(request, env.ACCOUNTS),
+        logIn: (c: Context<{Bindings: Env}>, userId: string) => logInVia(c, c.env.ACCOUNTS, userId),
+        logOut: (c: Context<{Bindings: Env}>) => logOutVia(c, c.env.ACCOUNTS),
     };
 }

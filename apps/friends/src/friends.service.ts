@@ -5,7 +5,11 @@ import {err, ok, ResultAsync} from "neverthrow";
 import type {Db} from "./db/client";
 import {query, requireFound} from "./db/result";
 import {friendGroupMembers, friendGroups, friendRequests, friendships} from "./db/schema";
-import type {FriendRequestSummarySchema, FriendSummarySchema, GroupSummarySchema} from "./friends.schema";
+import type {
+    FriendRequestSummarySchema,
+    FriendSummarySchema,
+    GroupSummarySchema,
+} from "./friends.schema";
 
 export type FriendSummary = z.infer<typeof FriendSummarySchema>;
 export type FriendRequestSummary = z.infer<typeof FriendRequestSummarySchema>;
@@ -21,8 +25,8 @@ export interface FriendsPageData {
 // --- friend requests -------------------------------------------------------
 
 export type SendFriendRequestResult =
-    | { kind: "requested"; requestId: string; recipientId: string }
-    | { kind: "auto_accepted"; otherUserId: string };
+    | {kind: "requested"; requestId: string; recipientId: string}
+    | {kind: "auto_accepted"; otherUserId: string};
 
 export const sendFriendRequest = (
     db: Db,
@@ -38,11 +42,16 @@ export const sendFriendRequest = (
                 db
                     .select({userId: friendships.userId})
                     .from(friendships)
-                    .where(and(eq(friendships.userId, requesterId), eq(friendships.friendId, recipient.id)))
-                    .get()
+                    .where(
+                        and(
+                            eq(friendships.userId, requesterId),
+                            eq(friendships.friendId, recipient.id),
+                        ),
+                    )
+                    .get(),
             )
-                .andThen((friend) => friend ? err("You're already friends.") : ok())
-                .map(() => recipient)
+                .andThen((friend) => (friend ? err("You're already friends.") : ok()))
+                .map(() => recipient),
         )
         .andThen((recipient) =>
             query(
@@ -53,16 +62,19 @@ export const sendFriendRequest = (
                         and(
                             eq(friendRequests.requesterId, recipient.id),
                             eq(friendRequests.recipientId, requesterId),
-                            eq(friendRequests.status, "pending")
-                        )
+                            eq(friendRequests.status, "pending"),
+                        ),
                     )
-                    .get()
-            ).map((reverseRequest) => ({recipient, reverseRequest}))
+                    .get(),
+            ).map((reverseRequest) => ({recipient, reverseRequest})),
         )
         .andThen(({recipient, reverseRequest}): ResultAsync<SendFriendRequestResult, string> => {
             if (reverseRequest) {
                 return acceptFriendRequest(db, reverseRequest.id, requesterId).map(
-                    ({requesterId: otherUserId}): SendFriendRequestResult => ({kind: "auto_accepted", otherUserId}),
+                    ({requesterId: otherUserId}): SendFriendRequestResult => ({
+                        kind: "auto_accepted",
+                        otherUserId,
+                    }),
                 );
             }
 
@@ -81,17 +93,22 @@ export const sendFriendRequest = (
                         target: [friendRequests.requesterId, friendRequests.recipientId],
                         set: {status: "pending", createdAt: Date.now(), respondedAt: null},
                     })
-                    .returning({id: friendRequests.id})
+                    .returning({id: friendRequests.id}),
             )
                 .andThen((rows) => requireFound(rows[0], "Failed to create the friend request."))
                 .map((row): SendFriendRequestResult => ({
                     kind: "requested",
                     requestId: row.id,
-                    recipientId: recipient.id
+                    recipientId: recipient.id,
                 }));
         });
 
-const executeAcceptBatch = (db: Db, requestId: string, requesterId: string, recipientId: string) => {
+const executeAcceptBatch = (
+    db: Db,
+    requestId: string,
+    requesterId: string,
+    recipientId: string,
+) => {
     const now = Date.now();
     return query(
         db.batch([
@@ -107,7 +124,7 @@ const executeAcceptBatch = (db: Db, requestId: string, requesterId: string, reci
                 .insert(friendships)
                 .values({userId: recipientId, friendId: requesterId, createdAt: now})
                 .onConflictDoNothing(),
-        ])
+        ]),
     );
 };
 
@@ -119,7 +136,7 @@ export const acceptFriendRequest = (
     db: Db,
     requestId: string,
     actingUserId: string,
-): ResultAsync<{ requesterId: string }, string> =>
+): ResultAsync<{requesterId: string}, string> =>
     query(
         db
             .select({
@@ -129,18 +146,22 @@ export const acceptFriendRequest = (
             })
             .from(friendRequests)
             .where(eq(friendRequests.id, requestId))
-            .get()
+            .get(),
     )
         .andThen((req) => requireFound(req, "Request not found."))
-        .andThen((req) => req.recipientId === actingUserId ? ok(req) : err("forbidden"))
-        .andThen((req) => req.status === "pending" ? ok(req) : err("Request already handled."))
+        .andThen((req) => (req.recipientId === actingUserId ? ok(req) : err("forbidden")))
+        .andThen((req) => (req.status === "pending" ? ok(req) : err("Request already handled.")))
         .andThen((req) =>
             executeAcceptBatch(db, requestId, req.requesterId, req.recipientId).map(() => ({
                 requesterId: req.requesterId,
             })),
         );
 
-export const declineFriendRequest = (db: Db, requestId: string, actingUserId: string): ResultAsync<void, string> =>
+export const declineFriendRequest = (
+    db: Db,
+    requestId: string,
+    actingUserId: string,
+): ResultAsync<void, string> =>
     query(
         db
             .select({recipientId: friendRequests.recipientId, status: friendRequests.status})
@@ -159,11 +180,19 @@ export const declineFriendRequest = (db: Db, requestId: string, actingUserId: st
                     .where(eq(friendRequests.id, requestId)),
             ),
         )
-        .map(_ => undefined);
+        .map((_) => undefined);
 
-export const cancelFriendRequest = (db: Db, requestId: string, actingUserId: string): ResultAsync<void, string> =>
+export const cancelFriendRequest = (
+    db: Db,
+    requestId: string,
+    actingUserId: string,
+): ResultAsync<void, string> =>
     query(
-        db.select({requesterId: friendRequests.requesterId}).from(friendRequests).where(eq(friendRequests.id, requestId)).then((rows) => rows[0]),
+        db
+            .select({requesterId: friendRequests.requesterId})
+            .from(friendRequests)
+            .where(eq(friendRequests.id, requestId))
+            .then((rows) => rows[0]),
     )
         .andThen((req) => requireFound(req, "Request not found."))
         .andThen((req) => (req.requesterId === actingUserId ? ok(req) : err("forbidden")))
@@ -173,57 +202,81 @@ export const cancelFriendRequest = (db: Db, requestId: string, actingUserId: str
 export const removeFriend = (db: Db, userId: string, friendId: string): ResultAsync<void, string> =>
     query(
         db.batch([
-            db.delete(friendships).where(and(eq(friendships.userId, userId), eq(friendships.friendId, friendId))),
-            db.delete(friendships).where(and(eq(friendships.userId, friendId), eq(friendships.friendId, userId))),
-            db.delete(friendGroupMembers).where(
-                and(
-                    eq(friendGroupMembers.friendId, friendId),
-                    inArray(
-                        friendGroupMembers.groupId,
-                        db.select({id: friendGroups.id}).from(friendGroups).where(eq(friendGroups.ownerId, userId)),
+            db
+                .delete(friendships)
+                .where(and(eq(friendships.userId, userId), eq(friendships.friendId, friendId))),
+            db
+                .delete(friendships)
+                .where(and(eq(friendships.userId, friendId), eq(friendships.friendId, userId))),
+            db
+                .delete(friendGroupMembers)
+                .where(
+                    and(
+                        eq(friendGroupMembers.friendId, friendId),
+                        inArray(
+                            friendGroupMembers.groupId,
+                            db
+                                .select({id: friendGroups.id})
+                                .from(friendGroups)
+                                .where(eq(friendGroups.ownerId, userId)),
+                        ),
                     ),
                 ),
-            ),
-            db.delete(friendGroupMembers).where(
-                and(
-                    eq(friendGroupMembers.friendId, userId),
-                    inArray(
-                        friendGroupMembers.groupId,
-                        db.select({id: friendGroups.id}).from(friendGroups).where(eq(friendGroups.ownerId, friendId)),
+            db
+                .delete(friendGroupMembers)
+                .where(
+                    and(
+                        eq(friendGroupMembers.friendId, userId),
+                        inArray(
+                            friendGroupMembers.groupId,
+                            db
+                                .select({id: friendGroups.id})
+                                .from(friendGroups)
+                                .where(eq(friendGroups.ownerId, friendId)),
+                        ),
                     ),
                 ),
-            ),
         ]),
-    ).map(_ => undefined);
+    ).map((_) => undefined);
 
 // --- groups ------------------------------------------------------------
 
 const MAX_GROUP_NAME_LENGTH = 60;
 
-export const createGroup = (db: Db, ownerId: string, rawName: string): ResultAsync<GroupSummary, string> => {
+export const createGroup = (
+    db: Db,
+    ownerId: string,
+    rawName: string,
+): ResultAsync<GroupSummary, string> => {
     const name = rawName.trim().slice(0, MAX_GROUP_NAME_LENGTH);
     const id = crypto.randomUUID();
-    return query(db.insert(friendGroups).values({id, ownerId, name, createdAt: Date.now()})).map(() => ({
-        id,
-        name,
-        members: []
-    }));
+    return query(db.insert(friendGroups).values({id, ownerId, name, createdAt: Date.now()})).map(
+        () => ({
+            id,
+            name,
+            members: [],
+        }),
+    );
 };
 
-const requireOwnedGroup = (db: Db, ownerId: string, groupId: string): ResultAsync<{ ownerId: string }, string> =>
+const requireOwnedGroup = (
+    db: Db,
+    ownerId: string,
+    groupId: string,
+): ResultAsync<{ownerId: string}, string> =>
     query(
         db
             .select({ownerId: friendGroups.ownerId})
             .from(friendGroups)
             .where(eq(friendGroups.id, groupId))
-            .get()
+            .get(),
     )
         .andThen((group) => requireFound(group, "forbidden"))
         .andThen((group) => (group.ownerId === ownerId ? ok(group) : err("forbidden")));
 
 export const deleteGroup = (db: Db, ownerId: string, groupId: string): ResultAsync<void, string> =>
     requireOwnedGroup(db, ownerId, groupId)
-        .andThen(_ =>
+        .andThen((_) =>
             query(
                 db.batch([
                     db.delete(friendGroupMembers).where(eq(friendGroupMembers.groupId, groupId)),
@@ -231,48 +284,66 @@ export const deleteGroup = (db: Db, ownerId: string, groupId: string): ResultAsy
                 ]),
             ),
         )
-        .map(_ => undefined);
+        .map((_) => undefined);
 
-export const addGroupMember = (db: Db, ownerId: string, groupId: string, friendId: string): ResultAsync<void, string> =>
+export const addGroupMember = (
+    db: Db,
+    ownerId: string,
+    groupId: string,
+    friendId: string,
+): ResultAsync<void, string> =>
     requireOwnedGroup(db, ownerId, groupId)
-        .andThen(_ => query(
-            db
-                .select({friendId: friendships.friendId})
-                .from(friendships)
-                .where(and(eq(friendships.userId, ownerId), eq(friendships.friendId, friendId)))
-                .get()
-        ))
+        .andThen((_) =>
+            query(
+                db
+                    .select({friendId: friendships.friendId})
+                    .from(friendships)
+                    .where(and(eq(friendships.userId, ownerId), eq(friendships.friendId, friendId)))
+                    .get(),
+            ),
+        )
         .andThen((friend) => requireFound(friend, "That's not one of your friends."))
-        .map(friend => friend.friendId)
+        .map((friend) => friend.friendId)
         .andThen((verifiedFriendId) =>
             query(
                 db
                     .insert(friendGroupMembers)
                     .values({groupId, friendId: verifiedFriendId})
-                    .onConflictDoNothing()
-            )
+                    .onConflictDoNothing(),
+            ),
         )
-        .map(_ => undefined);
+        .map((_) => undefined);
 
-
-export const removeGroupMember = (db: Db, ownerId: string, groupId: string, friendId: string): ResultAsync<void, string> =>
+export const removeGroupMember = (
+    db: Db,
+    ownerId: string,
+    groupId: string,
+    friendId: string,
+): ResultAsync<void, string> =>
     requireOwnedGroup(db, ownerId, groupId)
-        .andThen(_ =>
+        .andThen((_) =>
             query(
                 db
                     .delete(friendGroupMembers)
-                    .where(and(eq(friendGroupMembers.groupId, groupId), eq(friendGroupMembers.friendId, friendId))),
+                    .where(
+                        and(
+                            eq(friendGroupMembers.groupId, groupId),
+                            eq(friendGroupMembers.friendId, friendId),
+                        ),
+                    ),
             ),
         )
-        .map(_ => undefined);
+        .map((_) => undefined);
 
 export const groupMemberIds = (db: Db, ownerId: string, groupId: string): Promise<string[]> =>
     requireOwnedGroup(db, ownerId, groupId)
-        .andThen(_ => query(
-            db
-                .select({friendId: friendGroupMembers.friendId})
-                .from(friendGroupMembers)
-                .where(eq(friendGroupMembers.groupId, groupId))),
+        .andThen((_) =>
+            query(
+                db
+                    .select({friendId: friendGroupMembers.friendId})
+                    .from(friendGroupMembers)
+                    .where(eq(friendGroupMembers.groupId, groupId)),
+            ),
         )
         .map((rows) => rows.map((r) => r.friendId))
         .unwrapOr([]);
@@ -283,19 +354,33 @@ export const groupMemberIds = (db: Db, ownerId: string, groupId: string): Promis
  * one-query-per-group shape for `friendGroupMembers` itself, but resolves
  * every member's display name/color in a single batched RPC call instead
  * of N). */
-const listGroups = (db: Db, accounts: AccountsRpc, ownerId: string): ResultAsync<GroupSummary[], string> =>
+const listGroups = (
+    db: Db,
+    accounts: AccountsRpc,
+    ownerId: string,
+): ResultAsync<GroupSummary[], string> =>
     query(
-        db.select({id: friendGroups.id, name: friendGroups.name})
-            .from(friendGroups).where(eq(friendGroups.ownerId, ownerId))
+        db
+            .select({id: friendGroups.id, name: friendGroups.name})
+            .from(friendGroups)
+            .where(eq(friendGroups.ownerId, ownerId))
             .orderBy(asc(friendGroups.name)),
     ).andThen((groups) => {
         if (groups.length === 0) return ok([]);
 
         return query(
             db
-                .select({groupId: friendGroupMembers.groupId, friendId: friendGroupMembers.friendId})
+                .select({
+                    groupId: friendGroupMembers.groupId,
+                    friendId: friendGroupMembers.friendId,
+                })
                 .from(friendGroupMembers)
-                .where(inArray(friendGroupMembers.groupId, groups.map((g) => g.id))),
+                .where(
+                    inArray(
+                        friendGroupMembers.groupId,
+                        groups.map((g) => g.id),
+                    ),
+                ),
         ).andThen((memberRows) =>
             query(accounts.getUsersByIds(memberRows.map((r) => r.friendId))).map((users) => {
                 const byId = new Map(users.map((u) => [u.id, u]));
@@ -339,27 +424,58 @@ export const friendIds = (db: Db, userId: string): Promise<string[]> =>
  * trip than the theoretical minimum (`listGroups` batches its own members
  * separately), but still a small constant number of calls per page load,
  * not one per row. */
-export const getFriendsPageData = (db: Db, accounts: AccountsRpc, userId: string): ResultAsync<FriendsPageData, string> =>
+export const getFriendsPageData = (
+    db: Db,
+    accounts: AccountsRpc,
+    userId: string,
+): ResultAsync<FriendsPageData, string> =>
     ResultAsync.combine([
-        query(db.select({friendId: friendships.friendId}).from(friendships).where(eq(friendships.userId, userId))),
         query(
             db
-                .select({id: friendRequests.id, requesterId: friendRequests.requesterId, created_at: friendRequests.createdAt})
+                .select({friendId: friendships.friendId})
+                .from(friendships)
+                .where(eq(friendships.userId, userId)),
+        ),
+        query(
+            db
+                .select({
+                    id: friendRequests.id,
+                    requesterId: friendRequests.requesterId,
+                    created_at: friendRequests.createdAt,
+                })
                 .from(friendRequests)
-                .where(and(eq(friendRequests.recipientId, userId), eq(friendRequests.status, "pending")))
+                .where(
+                    and(
+                        eq(friendRequests.recipientId, userId),
+                        eq(friendRequests.status, "pending"),
+                    ),
+                )
                 .orderBy(desc(friendRequests.createdAt)),
         ),
         query(
             db
-                .select({id: friendRequests.id, recipientId: friendRequests.recipientId, created_at: friendRequests.createdAt})
+                .select({
+                    id: friendRequests.id,
+                    recipientId: friendRequests.recipientId,
+                    created_at: friendRequests.createdAt,
+                })
                 .from(friendRequests)
-                .where(and(eq(friendRequests.requesterId, userId), eq(friendRequests.status, "pending")))
+                .where(
+                    and(
+                        eq(friendRequests.requesterId, userId),
+                        eq(friendRequests.status, "pending"),
+                    ),
+                )
                 .orderBy(desc(friendRequests.createdAt)),
         ),
         listGroups(db, accounts, userId),
     ]).andThen(([friendRows, incomingRows, outgoingRows, groups]) => {
         const ids = [
-            ...new Set([...friendRows.map((r) => r.friendId), ...incomingRows.map((r) => r.requesterId), ...outgoingRows.map((r) => r.recipientId)]),
+            ...new Set([
+                ...friendRows.map((r) => r.friendId),
+                ...incomingRows.map((r) => r.requesterId),
+                ...outgoingRows.map((r) => r.recipientId),
+            ]),
         ];
 
         return query(accounts.getUsersByIds(ids)).map((users) => {
@@ -374,12 +490,30 @@ export const getFriendsPageData = (db: Db, accounts: AccountsRpc, userId: string
 
             const incomingRequests = incomingRows.flatMap((r) => {
                 const user = byId.get(r.requesterId);
-                return user ? [{id: r.id, username: user.username, color: user.color, created_at: r.created_at}] : [];
+                return user
+                    ? [
+                          {
+                              id: r.id,
+                              username: user.username,
+                              color: user.color,
+                              created_at: r.created_at,
+                          },
+                      ]
+                    : [];
             });
 
             const outgoingRequests = outgoingRows.flatMap((r) => {
                 const user = byId.get(r.recipientId);
-                return user ? [{id: r.id, username: user.username, color: user.color, created_at: r.created_at}] : [];
+                return user
+                    ? [
+                          {
+                              id: r.id,
+                              username: user.username,
+                              color: user.color,
+                              created_at: r.created_at,
+                          },
+                      ]
+                    : [];
             });
 
             return {friends, incomingRequests, outgoingRequests, groups};

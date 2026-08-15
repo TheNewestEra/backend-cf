@@ -52,17 +52,20 @@ export const ROUND_VISIBLE_STATUSES: readonly RoundStatus[] = [
  * no longer guessable either way, so there's no give-up action left to
  * short-circuit. Drives the post-round reveal (see guess.constants.ts's
  * `postRoundSeconds()`). */
-export const ROUND_RESOLVED_STATUSES: readonly RoundStatus[] = [RoundStatus.Complete, RoundStatus.Timeout];
+export const ROUND_RESOLVED_STATUSES: readonly RoundStatus[] = [
+    RoundStatus.Complete,
+    RoundStatus.Timeout,
+];
 
 export const RoundPublicSchema = z
     .object({
         index: z.number(),
         status: RoundStatusSchema,
         error: z.string().optional(),
-        remainingMs: z
-            .number()
-            .nullable()
-            .openapi({description: "ms left to guess this round; null unless this is the currently `active` round"}),
+        remainingMs: z.number().nullable().openapi({
+            description:
+                "ms left to guess this round; null unless this is the currently `active` round",
+        }),
         imageUrl: z
             .string()
             .nullable()
@@ -94,7 +97,9 @@ export type RoundPublic = z.infer<typeof RoundPublicSchema>;
  * that participant's `ParticipantPublicSchema` roster entry (and two
  * participants can share a display `name` anyway); join against `id` there
  * to render a row. */
-export const GameResultSchema = z.object({participantId: z.string(), score: z.number()}).openapi("GameResult");
+export const GameResultSchema = z
+    .object({participantId: z.string(), score: z.number()})
+    .openapi("GameResult");
 
 /** A joined player's public roster entry — enough to render an avatar list
  * in the lobby/play page and to key it by `id` rather than the free-text
@@ -119,10 +124,10 @@ export const GamePublicSchema = z
         status: GameStatusSchema,
         error: z.string().optional(),
         rounds: z.array(RoundPublicSchema),
-        currentRound: z
-            .number()
-            .nullable()
-            .openapi({description: "Index of the round currently open for guessing; null before play starts or after the game has finished"}),
+        currentRound: z.number().nullable().openapi({
+            description:
+                "Index of the round currently open for guessing; null before play starts or after the game has finished",
+        }),
         postRoundIndex: z
             .number()
             .nullable()
@@ -141,15 +146,19 @@ export const GamePublicSchema = z
                     "already visible (rounds[postRoundIndex].prompt) for the client to display alongside whether " +
                     "the current player got it right; null unless postRoundIndex is set.",
             }),
-        lobbyRemainingMs: z
+        lobbyRemainingMs: z.number().nullable().openapi({
+            description: "ms left in the waiting room; null outside the `waiting` status",
+        }),
+        connectedPlayers: z
             .number()
-            .nullable()
-            .openapi({description: "ms left in the waiting room; null outside the `waiting` status"}),
-        connectedPlayers: z.number().openapi({description: "Live WebSocket connection count (players + spectators)"}),
-        participants: z.array(ParticipantPublicSchema).openapi({description: "Everyone who has joined, in join order"}),
-        results: z
-            .array(GameResultSchema)
-            .openapi({description: "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`"}),
+            .openapi({description: "Live WebSocket connection count (players + spectators)"}),
+        participants: z
+            .array(ParticipantPublicSchema)
+            .openapi({description: "Everyone who has joined, in join order"}),
+        results: z.array(GameResultSchema).openapi({
+            description:
+                "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`",
+        }),
     })
     .openapi("Game");
 
@@ -157,10 +166,14 @@ export const GuessResultSchema = z
     .object({
         correct: z.boolean(),
         prompt: z.string().nullable(),
-        score: z.number().nullable().openapi({description: "Time-weighted points earned for this guess; null when the guess was wrong"}),
-        totalScore: z
-            .number()
-            .openapi({description: "This participant's running total across every correct guess this game so far (including this one, if correct) — same figure as their entry in GamePublicSchema's `results`"}),
+        score: z.number().nullable().openapi({
+            description:
+                "Time-weighted points earned for this guess; null when the guess was wrong",
+        }),
+        totalScore: z.number().openapi({
+            description:
+                "This participant's running total across every correct guess this game so far (including this one, if correct) — same figure as their entry in GamePublicSchema's `results`",
+        }),
     })
     .openapi("GuessResult");
 
@@ -243,11 +256,14 @@ export const GameWsGuessMessageSchema = z
         color: z.string(),
         correct: z.boolean(),
         score: z.number().nullable(),
-        guess: z
-            .string()
-            .optional()
-            .openapi({description: "What was actually typed — only present when `correct` is false; omitted on a correct guess so this broadcast can't spoil the prompt for anyone still guessing this round"}),
-        createdAt: z.number().openapi({description: "Epoch ms this guess was recorded — same instant as the `guesses` row's own `createdAt`"}),
+        guess: z.string().optional().openapi({
+            description:
+                "What was actually typed — only present when `correct` is false; omitted on a correct guess so this broadcast can't spoil the prompt for anyone still guessing this round",
+        }),
+        createdAt: z.number().openapi({
+            description:
+                "Epoch ms this guess was recorded — same instant as the `guesses` row's own `createdAt`",
+        }),
     })
     .openapi("GameWsGuessMessage");
 
@@ -349,7 +365,8 @@ export const GameWsClientEventType = {
     Reveal: "reveal",
     Typing: "typing",
 } as const;
-export type GameWsClientEventType = (typeof GameWsClientEventType)[keyof typeof GameWsClientEventType];
+export type GameWsClientEventType =
+    (typeof GameWsClientEventType)[keyof typeof GameWsClientEventType];
 
 /** Was POST /games/:id/join's body. `player` is used as the display name
  * regardless of login state — identity (`userId`/`color`) is resolved once

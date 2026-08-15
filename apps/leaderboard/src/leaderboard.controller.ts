@@ -15,7 +15,7 @@ import {
 } from "./leaderboard.schema";
 import {friendScores, type LeaderboardQuery, myScore, topScores} from "./leaderboard.service";
 
-export const leaderboardRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const leaderboardRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 /** `scope=friends` is the only thing this route can actually reject — it
  * needs a signed-in viewer to know whose friend group to restrict to, so
@@ -24,8 +24,12 @@ export const leaderboardRoutes = new OpenAPIHono<{ Bindings: Env }>();
  * `Result` is fine to hand back as-is — same reasoning as browse's
  * `submitRating` (see catalog.service.ts). Passes `user` through unchanged
  * on success so the caller doesn't need to re-derive it. */
-function requireViewerFor(scope: LeaderboardScope, user: AccountRecord | null): Result<AccountRecord | null, string> {
-    if (scope === LeaderboardScope.Friends && !user) return err("log in to see the friends leaderboard");
+function requireViewerFor(
+    scope: LeaderboardScope,
+    user: AccountRecord | null,
+): Result<AccountRecord | null, string> {
+    if (scope === LeaderboardScope.Friends && !user)
+        return err("log in to see the friends leaderboard");
     return ok(user);
 }
 
@@ -48,9 +52,18 @@ leaderboardRoutes.openapi(
         request: {
             query: z.object({
                 kind: GameKindSchema.optional().openapi({description: "Filter to one game type"}),
-                period: LeaderboardPeriodSchema.optional().openapi({description: "Defaults to all-time"}),
-                scope: LeaderboardScopeSchema.optional().openapi({description: "Defaults to global"}),
-                page: z.coerce.number().int().min(1).optional().openapi({description: "1-indexed; defaults to 1"}),
+                period: LeaderboardPeriodSchema.optional().openapi({
+                    description: "Defaults to all-time",
+                }),
+                scope: LeaderboardScopeSchema.optional().openapi({
+                    description: "Defaults to global",
+                }),
+                page: z.coerce
+                    .number()
+                    .int()
+                    .min(1)
+                    .optional()
+                    .openapi({description: "1-indexed; defaults to 1"}),
             }),
         },
         responses: {
@@ -62,7 +75,9 @@ leaderboardRoutes.openapi(
                             entries: z.array(LeaderboardEntrySchema),
                             me: MyLeaderboardScoreSchema.nullable(),
                             page: z.number(),
-                            hasMore: z.boolean().openapi({description: "Whether a further page exists"}),
+                            hasMore: z
+                                .boolean()
+                                .openapi({description: "Whether a further page exists"}),
                         }),
                     },
                 },
@@ -75,7 +90,10 @@ leaderboardRoutes.openapi(
     }),
     async (c) => {
         const {kind, period, scope, page} = c.req.valid("query");
-        const query: LeaderboardQuery = {kind: kind ?? null, period: period ?? LeaderboardPeriod.All};
+        const query: LeaderboardQuery = {
+            kind: kind ?? null,
+            period: period ?? LeaderboardPeriod.All,
+        };
         const user = await currentUser(c);
 
         const viewer = requireViewerFor(scope ?? LeaderboardScope.Global, user);
@@ -89,7 +107,15 @@ leaderboardRoutes.openapi(
         const [{entries, hasMore}, me] = await Promise.all([
             scope === LeaderboardScope.Friends && user
                 ? friendScores(db, c.env.FRIENDS, c.env.ACCOUNTS, user.id, query, pageNum)
-                : topScores(db, c.env.FLAGS, c.env.ACCOUNTS, c.env.FRIENDS, query, pageNum, user?.id ?? null),
+                : topScores(
+                      db,
+                      c.env.FLAGS,
+                      c.env.ACCOUNTS,
+                      c.env.FRIENDS,
+                      query,
+                      pageNum,
+                      user?.id ?? null,
+                  ),
             user ? myScore(db, c.env.ACCOUNTS, user.id, query) : Promise.resolve(null),
         ]);
 

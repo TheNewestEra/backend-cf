@@ -30,14 +30,14 @@ function directSessionRpc(db: Db): AccountsSessionRpc {
     };
 }
 
-const allowLocalhostCookie = (c: Context<{ Bindings: Env }>) =>
+const allowLocalhostCookie = (c: Context<{Bindings: Env}>) =>
     c.env.FLAGS.getBooleanValue("allow-localhost-cookie", false);
 
-export const currentUser = async (c: Context<{ Bindings: Env }>) =>
+export const currentUser = async (c: Context<{Bindings: Env}>) =>
     currentUserVia(c, directSessionRpc(createDb(c.env.DB)), await allowLocalhostCookie(c));
 
-export const logIn = async (c: Context<{ Bindings: Env }>, userId: string) =>
+export const logIn = async (c: Context<{Bindings: Env}>, userId: string) =>
     logInVia(c, directSessionRpc(createDb(c.env.DB)), userId, await allowLocalhostCookie(c));
 
-export const logOut = async (c: Context<{ Bindings: Env }>) =>
+export const logOut = async (c: Context<{Bindings: Env}>) =>
     logOutVia(c, directSessionRpc(createDb(c.env.DB)), await allowLocalhostCookie(c));

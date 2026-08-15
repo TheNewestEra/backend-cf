@@ -99,7 +99,9 @@ interface TotalRow extends RawTotalRow {
  * than actually end up in the response. */
 async function withUserInfo(accounts: AccountsRpc, rows: RawTotalRow[]): Promise<TotalRow[]> {
     if (rows.length === 0) return [];
-    const byId = new Map<string, AccountRecord>((await accounts.getUsersByIds(rows.map((r) => r.userId))).map((u) => [u.id, u]));
+    const byId = new Map<string, AccountRecord>(
+        (await accounts.getUsersByIds(rows.map((r) => r.userId))).map((u) => [u.id, u]),
+    );
     return rows.flatMap((row) => {
         const user = byId.get(row.userId);
         return user ? [{...row, username: user.username, color: user.color}] : [];
@@ -208,14 +210,17 @@ export async function topScores(
     // (see `withUserInfo`), since they depend on `rawResults`.
     const [rawResults, viewerFriendIds] = await Promise.all([
         totalsQuery(db, where, pageSize + 1, offset),
-        viewerId ? friends.getFriendIds(viewerId).then((ids) => new Set(ids)) : Promise.resolve(null),
+        viewerId
+            ? friends.getFriendIds(viewerId).then((ids) => new Set(ids))
+            : Promise.resolve(null),
     ]);
 
     const hasMore = rawResults.length > pageSize;
     const results = await withUserInfo(accounts, rawResults.slice(0, pageSize));
     const entries = results.map((row, i) => {
         const entry = toEntry(row, offset + i + 1, query.kind);
-        if (viewerFriendIds) entry.isFriend = row.userId === viewerId ? null : viewerFriendIds.has(row.userId);
+        if (viewerFriendIds)
+            entry.isFriend = row.userId === viewerId ? null : viewerFriendIds.has(row.userId);
         return entry;
     });
 
@@ -269,7 +274,12 @@ export interface MyScore {
  * `topScores`' range. `rank` is null when the user has no score in the
  * window (nothing to rank them against). Returns null only if `userId`
  * doesn't resolve to an account at all. */
-export async function myScore(db: Db, accounts: AccountsRpc, userId: string, query: LeaderboardQuery): Promise<MyScore | null> {
+export async function myScore(
+    db: Db,
+    accounts: AccountsRpc,
+    userId: string,
+    query: LeaderboardQuery,
+): Promise<MyScore | null> {
     const user = await accounts.getUserById(userId);
     if (!user) return null;
 
@@ -281,7 +291,8 @@ export async function myScore(db: Db, accounts: AccountsRpc, userId: string, que
         .where(and(...conditions, eq(leaderboardEntries.userId, userId)))
         .get();
     const score = mine?.total ?? 0;
-    if (score === 0) return {userId, username: user.username, color: user.color, score: 0, rank: null};
+    if (score === 0)
+        return {userId, username: user.username, color: user.color, score: 0, rank: null};
 
     const totals = db
         .select({

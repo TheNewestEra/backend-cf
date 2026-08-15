@@ -6,10 +6,16 @@
 // dependency graph, and its ambient `Env`, into this program). Note: this
 // import makes the file a module, so the `Env` augmentation below must go
 // inside `declare global` to still merge into the ambient global scope.
-import type {AccountsRpc, GuessRpc, NotificationsRpc, PuzzleRpc} from "@game-worker/shared/rpc-types";
+import type {
+    AccountsRpc,
+    GuessRpc,
+    NotificationsRpc,
+    PuzzleRpc,
+} from "@game-worker/shared/rpc-types";
 
 interface __BaseEnv_Env {
     DB: D1Database;
+    FLAGS: Flagship;
     ACCOUNTS: AccountsRpc;
     PUZZLE: PuzzleRpc;
     GUESS: GuessRpc;
@@ -22,10 +28,8 @@ declare global {
             mainModule: typeof import("./src/index");
         }
 
-        interface Env extends __BaseEnv_Env {
-        }
+        interface Env extends __BaseEnv_Env {}
     }
 
-    interface Env extends __BaseEnv_Env {
-    }
+    interface Env extends __BaseEnv_Env {}
 }

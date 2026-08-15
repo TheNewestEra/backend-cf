@@ -26,10 +26,8 @@ declare global {
             durableNamespaces: "PuzzleDO";
         }
 
-        interface Env extends __BaseEnv_Env {
-        }
+        interface Env extends __BaseEnv_Env {}
     }
 
-    interface Env extends __BaseEnv_Env {
-    }
+    interface Env extends __BaseEnv_Env {}
 }

@@ -19,7 +19,7 @@ import {err, ok, type Result} from "neverthrow";
  * types, and only because the RPC hop leaves no choice. Mirrors the pattern
  * first worked out in `apps/puzzle/src/puzzle.rpc.ts`, generalized here so
  * every service can share it instead of re-deriving its own copy. */
-export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: string };
+export type RpcResult<T> = {ok: true; value: T} | {ok: false; error: string};
 
 export function toRpcResult<T>(result: Result<T, string>): RpcResult<T> {
     return result.match(

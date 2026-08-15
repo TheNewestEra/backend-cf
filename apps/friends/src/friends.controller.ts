@@ -25,9 +25,14 @@ import {
     GroupSummarySchema,
     InviteSummarySchema,
 } from "./friends.schema";
-import {createInvite, type InviteSummary, listPendingInvites, respondToInvite} from "./invites.service";
+import {
+    createInvite,
+    type InviteSummary,
+    listPendingInvites,
+    respondToInvite,
+} from "./invites.service";
 
-export const friendsRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const friendsRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 const notLoggedIn = {error: "not logged in" as const};
 
@@ -38,7 +43,10 @@ const notLoggedIn = {error: "not logged in" as const};
  * can't drift apart. */
 const actionResponses = {
     200: {description: "Done", content: {"application/json": {schema: OkSchema}}},
-    400: {description: "Not found / already handled", content: {"application/json": {schema: ErrorSchema}}},
+    400: {
+        description: "Not found / already handled",
+        content: {"application/json": {schema: ErrorSchema}},
+    },
     401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
     403: {description: "Not yours to touch", content: {"application/json": {schema: ErrorSchema}}},
 } as const;
@@ -73,8 +81,14 @@ friendsRoutes.openapi(
                     },
                 },
             },
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
-            500: {description: "Database error", content: {"application/json": {schema: ErrorSchema}}},
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            500: {
+                description: "Database error",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -86,7 +100,10 @@ friendsRoutes.openapi(
         // concurrently the way `Promise.all()` would, but (unlike
         // `Promise.all()`) folds either side's D1 failure into one `Result`
         // instead of leaving it to reject unhandled.
-        const combined = await ResultAsync.combine([getFriendsPageData(db, c.env.ACCOUNTS, user.id), listPendingInvites(db, c.env.ACCOUNTS, user.id)]);
+        const combined = await ResultAsync.combine([
+            getFriendsPageData(db, c.env.ACCOUNTS, user.id),
+            listPendingInvites(db, c.env.ACCOUNTS, user.id),
+        ]);
         if (combined.isErr()) return c.json({error: combined.error}, 500);
 
         const [pageData, invites] = combined.value;
@@ -100,17 +117,24 @@ friendsRoutes.openapi(
         path: "/api/friends/request",
         tags: ["Friends"],
         summary: "Send a friend request by username",
-        description: "If that user already sent us a pending request, this accepts it immediately instead of creating a second one.",
+        description:
+            "If that user already sent us a pending request, this accepts it immediately instead of creating a second one.",
         request: {
             body: {content: {"application/json": {schema: z.object({username: z.string()})}}},
         },
         responses: {
             200: {
                 description: "Request sent (or mutual request accepted)",
-                content: {"application/json": {schema: OkSchema}}
+                content: {"application/json": {schema: OkSchema}},
             },
-            400: {description: "No such user / already friends", content: {"application/json": {schema: ErrorSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
+            400: {
+                description: "No such user / already friends",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -120,7 +144,12 @@ friendsRoutes.openapi(
         const {username} = c.req.valid("json");
         if (!username.trim()) return c.json({error: "username is required"}, 400);
 
-        const result = await sendFriendRequest(createDb(c.env.DB), c.env.ACCOUNTS, user.id, username.trim());
+        const result = await sendFriendRequest(
+            createDb(c.env.DB),
+            c.env.ACCOUNTS,
+            user.id,
+            username.trim(),
+        );
         if (result.isErr()) return c.json({error: result.error}, 400);
 
         if (result.value.kind === "requested") {
@@ -142,7 +171,11 @@ friendsRoutes.openapi(
                 body: `${user.username} accepted your friend request.`,
                 data: {friendId: user.id, username: user.username, color: user.color},
             }).catch((err) => {
-                console.error("failed to push friend-request-accepted notification", otherUserId, err);
+                console.error(
+                    "failed to push friend-request-accepted notification",
+                    otherUserId,
+                    err,
+                );
             });
         }
 
@@ -177,7 +210,11 @@ friendsRoutes.openapi(
                 body: `${user.username} accepted your friend request.`,
                 data: {friendId: user.id, username: user.username, color: user.color},
             }).catch((err) => {
-                console.error("failed to push friend-request-accepted notification", requesterId, err);
+                console.error(
+                    "failed to push friend-request-accepted notification",
+                    requesterId,
+                    err,
+                );
             });
         }
 
@@ -199,7 +236,9 @@ friendsRoutes.openapi(
         const user = await currentUser(c);
         if (!user) return c.json(notLoggedIn, 401);
         const {id} = c.req.valid("param");
-        const {status, body} = actionResponse(await declineFriendRequest(createDb(c.env.DB), id, user.id));
+        const {status, body} = actionResponse(
+            await declineFriendRequest(createDb(c.env.DB), id, user.id),
+        );
         return c.json(body, status);
     },
 );
@@ -217,7 +256,9 @@ friendsRoutes.openapi(
         const user = await currentUser(c);
         if (!user) return c.json(notLoggedIn, 401);
         const {id} = c.req.valid("param");
-        const {status, body} = actionResponse(await cancelFriendRequest(createDb(c.env.DB), id, user.id));
+        const {status, body} = actionResponse(
+            await cancelFriendRequest(createDb(c.env.DB), id, user.id),
+        );
         return c.json(body, status);
     },
 );
@@ -231,8 +272,14 @@ friendsRoutes.openapi(
         request: {params: z.object({friendId: z.string()})},
         responses: {
             200: {description: "Removed", content: {"application/json": {schema: OkSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
-            500: {description: "Database error", content: {"application/json": {schema: ErrorSchema}}},
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            500: {
+                description: "Database error",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -257,11 +304,20 @@ friendsRoutes.openapi(
         responses: {
             200: {
                 description: "Created group",
-                content: {"application/json": {schema: z.object({group: GroupSummarySchema})}}
+                content: {"application/json": {schema: z.object({group: GroupSummarySchema})}},
             },
-            400: {description: "Name is required", content: {"application/json": {schema: ErrorSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
-            500: {description: "Database error", content: {"application/json": {schema: ErrorSchema}}},
+            400: {
+                description: "Name is required",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            500: {
+                description: "Database error",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -309,10 +365,16 @@ friendsRoutes.openapi(
             200: {description: "Added", content: {"application/json": {schema: OkSchema}}},
             400: {
                 description: "friendId is required, or forbidden/not-a-friend rejection",
-                content: {"application/json": {schema: ErrorSchema}}
+                content: {"application/json": {schema: ErrorSchema}},
             },
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
-            403: {description: "Not your group", content: {"application/json": {schema: ErrorSchema}}},
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            403: {
+                description: "Not your group",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -323,7 +385,9 @@ friendsRoutes.openapi(
         const {friendId} = c.req.valid("json");
         if (!friendId) return c.json({error: "friendId is required"}, 400);
 
-        const {status, body} = actionResponse(await addGroupMember(createDb(c.env.DB), user.id, id, friendId));
+        const {status, body} = actionResponse(
+            await addGroupMember(createDb(c.env.DB), user.id, id, friendId),
+        );
         return c.json(body, status);
     },
 );
@@ -341,7 +405,9 @@ friendsRoutes.openapi(
         const user = await currentUser(c);
         if (!user) return c.json(notLoggedIn, 401);
         const {id, friendId} = c.req.valid("param");
-        const {status, body} = actionResponse(await removeGroupMember(createDb(c.env.DB), user.id, id, friendId));
+        const {status, body} = actionResponse(
+            await removeGroupMember(createDb(c.env.DB), user.id, id, friendId),
+        );
         return c.json(body, status);
     },
 );
@@ -354,11 +420,14 @@ friendsRoutes.openapi(
         path: "/api/invites/pending",
         tags: ["Invites"],
         summary: "List invites sent to this user while they were offline",
-        description: "New invites while connected arrive over apps/notifications' WebSocket instead (see POST /api/invites below); this is not polled. Returns an empty list for anonymous visitors rather than 401 so the fetch can run unconditionally.",
+        description:
+            "New invites while connected arrive over apps/notifications' WebSocket instead (see POST /api/invites below); this is not polled. Returns an empty list for anonymous visitors rather than 401 so the fetch can run unconditionally.",
         responses: {
             200: {
                 description: "Pending invites",
-                content: {"application/json": {schema: z.object({invites: z.array(InviteSummarySchema)})}}
+                content: {
+                    "application/json": {schema: z.object({invites: z.array(InviteSummarySchema)})},
+                },
             },
         },
     }),
@@ -370,7 +439,11 @@ friendsRoutes.openapi(
         // already gets `[]` above rather than a 401) — a D1 hiccup degrades
         // the same way, via `.unwrapOr([])`, rather than introducing the
         // one error case this endpoint's contract doesn't have.
-        const invites = await listPendingInvites(createDb(c.env.DB), c.env.ACCOUNTS, user.id).unwrapOr([]);
+        const invites = await listPendingInvites(
+            createDb(c.env.DB),
+            c.env.ACCOUNTS,
+            user.id,
+        ).unwrapOr([]);
         return c.json({invites}, 200);
     },
 );
@@ -381,7 +454,8 @@ friendsRoutes.openapi(
         path: "/api/invites",
         tags: ["Invites"],
         summary: "Invite a friend, or every member of a group, to a session",
-        description: "Invites are only accepted before the session has started — both games reject joining once they have (see each game's own POST .../join) — so an invite sent after that point would 409 instead of landing the recipient on a game they can only spectate.",
+        description:
+            "Invites are only accepted before the session has started — both games reject joining once they have (see each game's own POST .../join) — so an invite sent after that point would 409 instead of landing the recipient on a game they can only spectate.",
         request: {
             body: {
                 content: {
@@ -399,15 +473,28 @@ friendsRoutes.openapi(
         responses: {
             200: {
                 description: "Invited",
-                content: {"application/json": {schema: z.object({ok: z.literal(true), invited: z.number()})}}
+                content: {
+                    "application/json": {
+                        schema: z.object({ok: z.literal(true), invited: z.number()}),
+                    },
+                },
             },
-            400: {description: "Missing fields", content: {"application/json": {schema: ErrorSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
+            400: {
+                description: "Missing fields",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
             409: {
                 description: "The session has already started",
-                content: {"application/json": {schema: ErrorSchema}}
+                content: {"application/json": {schema: ErrorSchema}},
             },
-            500: {description: "Database error", content: {"application/json": {schema: ErrorSchema}}},
+            500: {
+                description: "Database error",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -458,7 +545,9 @@ friendsRoutes.openapi(
         // unhandled rejection (any invite that did successfully write
         // stays written either way, same as before).
         const invitesResult = await ResultAsync.combine(
-            recipientIds.map((rid) => createInvite(db, user.id, user.username, user.color, kind, sessionId, rid)),
+            recipientIds.map((rid) =>
+                createInvite(db, user.id, user.username, user.color, kind, sessionId, rid),
+            ),
         );
         if (invitesResult.isErr()) return c.json({error: invitesResult.error}, 500);
 
@@ -475,7 +564,7 @@ friendsRoutes.openapi(
                 c.env.NOTIFICATIONS.push(recipientIds[i]!, {
                     id: invite.id,
                     type: "invite",
-                    data: invite
+                    data: invite,
                 }).catch((err) => {
                     console.error("failed to push invite notification", recipientIds[i], err);
                 }),
@@ -502,11 +591,24 @@ friendsRoutes.openapi(
         responses: {
             200: {
                 description: "Accepted",
-                content: {"application/json": {schema: z.object({ok: z.literal(true), playUrl: z.string()})}}
+                content: {
+                    "application/json": {
+                        schema: z.object({ok: z.literal(true), playUrl: z.string()}),
+                    },
+                },
             },
-            400: {description: "Not found / already handled", content: {"application/json": {schema: ErrorSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
-            403: {description: "Not your invite", content: {"application/json": {schema: ErrorSchema}}},
+            400: {
+                description: "Not found / already handled",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            403: {
+                description: "Not your invite",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -515,7 +617,8 @@ friendsRoutes.openapi(
 
         const {id} = c.req.valid("param");
         const result = await respondToInvite(createDb(c.env.DB), id, user.id, true);
-        if (result.isErr()) return c.json({error: result.error}, result.error === "forbidden" ? 403 : 400);
+        if (result.isErr())
+            return c.json({error: result.error}, result.error === "forbidden" ? 403 : 400);
 
         const {kind, sessionId} = result.value;
         const service = kind === "puzzle" ? c.env.PUZZLE : c.env.GUESS;

@@ -1,6 +1,7 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
+import {openApiRoutesGate} from "@game-worker/shared/openapi-gate";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {guessRoutes} from "./guess.controller";
 import GameDO, {type GameStatus} from "./guess.model";
@@ -9,7 +10,7 @@ import {type GuessQueueMessage, processGuessGame} from "./guess.queue";
 
 export {GameDO};
 
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<{Bindings: Env}>();
 
 app.use("*", corsMiddleware);
 app.route("/", guessRoutes);
@@ -17,6 +18,8 @@ app.route("/", guessRoutes);
 app.openAPIRegistry.register("GameWsMessage", GameWsMessageSchema);
 app.openAPIRegistry.register("GameWsClientMessage", GameWsClientMessageSchema);
 
+app.use("/openapi.json", openApiRoutesGate);
+app.use("/docs", openApiRoutesGate);
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {
@@ -39,7 +42,7 @@ app.get("/docs", swaggerUI({url: "/openapi.json"}));
  * binding to this Worker's Durable Object namespace directly. Mirrors
  * `apps/puzzle`'s `PuzzleService.getLobbyStatus`. */
 export class GuessService extends WorkerEntrypoint<Env> {
-    async getStatus(gameId: string): Promise<{ status: GameStatus }> {
+    async getStatus(gameId: string): Promise<{status: GameStatus}> {
         const state = await this.env.GAME_DO.getByName(gameId).getState();
         return {status: state.status};
     }

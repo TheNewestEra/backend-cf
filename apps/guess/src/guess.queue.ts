@@ -44,7 +44,9 @@ export async function processGuessGame(message: GuessQueueMessage, env: Env): Pr
     // is `theme` itself when given, otherwise whatever the model settled on
     // (a Flagship preset, or its own idea) — see `setPrompts()`'s own doc
     // comment for why it's persisted right alongside the prompts it produced.
-    const {theme: resolvedTheme, prompts} = (await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount)).match(
+    const {theme: resolvedTheme, prompts} = (
+        await generateRoundPrompts(env.AI, env.FLAGS, theme, roundCount)
+    ).match(
         (value) => value,
         (error) => {
             throw new Error(error);

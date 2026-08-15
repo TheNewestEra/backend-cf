@@ -6,11 +6,16 @@ import {hostActionError} from "@game-worker/shared/http-exceptions";
 import {immutableImageResponse} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUser} from "./auth.middleware";
-import {HostBodySchema, puzzleImageKeyFor, puzzleTimeLimitMs, resolveGridSize} from "./puzzle.constants";
+import {
+    HostBodySchema,
+    puzzleImageKeyFor,
+    puzzleTimeLimitMs,
+    resolveGridSize,
+} from "./puzzle.constants";
 import type {PuzzleQueueMessage} from "./puzzle.queue";
 import {JoinResultSchema, PuzzlePublicSchema} from "./puzzle.schema";
 
-export const puzzleRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const puzzleRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 puzzleRoutes.openapi(
     createRoute({
@@ -38,14 +43,18 @@ puzzleRoutes.openapi(
                             theme: z.string().optional(),
                             gridSize: z.number().int().optional(),
                             player: z.string().optional().openapi({
-                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
-                            }),
-                            color: z.string().optional().openapi({
                                 description:
-                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
-                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
-                                    "in — an account's color is always authoritative.",
+                                    "Anonymous-host display name — ignored (and unnecessary) when logged in.",
                             }),
+                            color: z
+                                .string()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                        "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                        "in — an account's color is always authoritative.",
+                                }),
                         }),
                     },
                 },
@@ -57,7 +66,10 @@ puzzleRoutes.openapi(
                 description: "Generation queued; the host is already joined",
                 content: {
                     "application/json": {
-                        schema: JoinResultSchema.extend({puzzleId: z.string(), hostToken: z.string()}),
+                        schema: JoinResultSchema.extend({
+                            puzzleId: z.string(),
+                            hostToken: z.string(),
+                        }),
                     },
                 },
             },
@@ -84,7 +96,9 @@ puzzleRoutes.openapi(
         const hostToken = await stub.init(puzzleId, theme, gridSize, timeLimitMs);
         // The puzzle is freshly `queued` (a JOINABLE_STATUS), so this can't
         // actually reject — see puzzle.model.ts's `join()`.
-        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        const joined = fromRpcResult(
+            await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
+        );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
         // `theme === null` is the only signal that will ever exist for "will
         // this puzzle's theme end up picked rather than typed in" — capture
@@ -100,7 +114,11 @@ puzzleRoutes.openapi(
             null,
             themeGenerated,
         );
-        await c.env.PUZZLE_QUEUE.send({puzzleId, theme, themeGenerated} satisfies PuzzleQueueMessage);
+        await c.env.PUZZLE_QUEUE.send({
+            puzzleId,
+            theme,
+            themeGenerated,
+        } satisfies PuzzleQueueMessage);
 
         return c.json({puzzleId, hostToken, ...joined.value}, 202);
     },
@@ -114,7 +132,10 @@ puzzleRoutes.openapi(
         summary: "Get a puzzle's current state",
         request: {params: z.object({id: z.string()})},
         responses: {
-            200: {description: "Puzzle state", content: {"application/json": {schema: PuzzlePublicSchema}}},
+            200: {
+                description: "Puzzle state",
+                content: {"application/json": {schema: PuzzlePublicSchema}},
+            },
         },
     }),
     async (c) => {
@@ -161,14 +182,18 @@ puzzleRoutes.openapi(
                     "application/json": {
                         schema: z.object({
                             player: z.string().optional().openapi({
-                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
-                            }),
-                            color: z.string().optional().openapi({
                                 description:
-                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
-                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
-                                    "in — an account's color is always authoritative.",
+                                    "Anonymous-host display name — ignored (and unnecessary) when logged in.",
                             }),
+                            color: z
+                                .string()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                        "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                        "in — an account's color is always authoritative.",
+                                }),
                         }),
                     },
                 },
@@ -180,7 +205,10 @@ puzzleRoutes.openapi(
                 description: "New puzzle's generation queued; the host is already joined",
                 content: {
                     "application/json": {
-                        schema: JoinResultSchema.extend({puzzleId: z.string(), hostToken: z.string()}),
+                        schema: JoinResultSchema.extend({
+                            puzzleId: z.string(),
+                            hostToken: z.string(),
+                        }),
                     },
                 },
             },
@@ -203,7 +231,10 @@ puzzleRoutes.openapi(
         if (!player) return c.json({error: "player is required"}, 400);
 
         const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
-        if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
+        if (
+            source.status !== GameSessionStatus.Solved &&
+            source.status !== GameSessionStatus.Timeout
+        ) {
             return c.json({error: "puzzle must be finished before regenerating"}, 409);
         }
 
@@ -217,7 +248,9 @@ puzzleRoutes.openapi(
         const hostToken = await stub.init(puzzleId, source.theme, source.gridSize, timeLimitMs);
         // The puzzle is freshly `queued` (a JOINABLE_STATUS), so this can't
         // actually reject — see puzzle.model.ts's `join()`.
-        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        const joined = fromRpcResult(
+            await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
+        );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(
             puzzleId,
@@ -228,7 +261,11 @@ puzzleRoutes.openapi(
             source.themeGenerated,
             "regenerate",
         );
-        await c.env.PUZZLE_QUEUE.send({puzzleId, theme: source.theme, themeGenerated: source.themeGenerated} satisfies PuzzleQueueMessage);
+        await c.env.PUZZLE_QUEUE.send({
+            puzzleId,
+            theme: source.theme,
+            themeGenerated: source.themeGenerated,
+        } satisfies PuzzleQueueMessage);
 
         return c.json({puzzleId, hostToken, ...joined.value}, 202);
     },
@@ -246,8 +283,14 @@ puzzleRoutes.openapi(
         },
         responses: {
             200: {description: "Started", content: {"application/json": {schema: OkSchema}}},
-            403: {description: "Missing/incorrect host token", content: {"application/json": {schema: ErrorSchema}}},
-            409: {description: "Puzzle isn't waiting to start", content: {"application/json": {schema: ErrorSchema}}},
+            403: {
+                description: "Missing/incorrect host token",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            409: {
+                description: "Puzzle isn't waiting to start",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -286,14 +329,18 @@ puzzleRoutes.openapi(
                     "application/json": {
                         schema: z.object({
                             player: z.string().optional().openapi({
-                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
-                            }),
-                            color: z.string().optional().openapi({
                                 description:
-                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
-                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
-                                    "in — an account's color is always authoritative.",
+                                    "Anonymous-host display name — ignored (and unnecessary) when logged in.",
                             }),
+                            color: z
+                                .string()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                        "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                        "in — an account's color is always authoritative.",
+                                }),
                         }),
                     },
                 },
@@ -305,7 +352,10 @@ puzzleRoutes.openapi(
                 description: "New puzzle created, waiting in its lobby; the host is already joined",
                 content: {
                     "application/json": {
-                        schema: JoinResultSchema.extend({puzzleId: z.string(), hostToken: z.string()}),
+                        schema: JoinResultSchema.extend({
+                            puzzleId: z.string(),
+                            hostToken: z.string(),
+                        }),
                     },
                 },
             },
@@ -315,7 +365,7 @@ puzzleRoutes.openapi(
             },
             409: {
                 description: "Source puzzle isn't finished yet, or has no image",
-                content: {"application/json": {schema: ErrorSchema}}
+                content: {"application/json": {schema: ErrorSchema}},
             },
         },
     }),
@@ -328,7 +378,10 @@ puzzleRoutes.openapi(
         if (!player) return c.json({error: "player is required"}, 400);
 
         const source = await c.env.PUZZLE_DO.getByName(sourceId).getState();
-        if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
+        if (
+            source.status !== GameSessionStatus.Solved &&
+            source.status !== GameSessionStatus.Timeout
+        ) {
             return c.json({error: "puzzle must be finished before replaying"}, 409);
         }
         if (!source.prompt) {
@@ -360,7 +413,9 @@ puzzleRoutes.openapi(
         );
         // The puzzle is freshly `waiting` (a JOINABLE_STATUS), so this can't
         // actually reject — see puzzle.model.ts's `join()`.
-        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        const joined = fromRpcResult(
+            await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
+        );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(
             puzzleId,

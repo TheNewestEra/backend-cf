@@ -6,7 +6,7 @@ import {createDb} from "./db/client";
 import {listPending, markAllRead, markRead} from "./notifications.service";
 import {NotificationSchema} from "./notifications.schema";
 
-export const notificationsRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const notificationsRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 const notLoggedIn = {error: "not logged in" as const};
 
@@ -33,7 +33,11 @@ notificationsRoutes.openapi(
         responses: {
             200: {
                 description: "Unread notifications, newest first",
-                content: {"application/json": {schema: z.object({notifications: z.array(NotificationSchema)})}},
+                content: {
+                    "application/json": {
+                        schema: z.object({notifications: z.array(NotificationSchema)}),
+                    },
+                },
             },
         },
     }),
@@ -59,7 +63,10 @@ notificationsRoutes.openapi(
         responses: {
             200: {description: "Done", content: {"application/json": {schema: OkSchema}}},
             400: {description: "Not found", content: {"application/json": {schema: ErrorSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
             403: {description: "Not yours", content: {"application/json": {schema: ErrorSchema}}},
         },
     }),
@@ -80,8 +87,14 @@ notificationsRoutes.openapi(
         summary: "Mark every one of this user's unread notifications read",
         responses: {
             200: {description: "Done", content: {"application/json": {schema: OkSchema}}},
-            401: {description: "Not logged in", content: {"application/json": {schema: ErrorSchema}}},
-            500: {description: "Database error", content: {"application/json": {schema: ErrorSchema}}},
+            401: {
+                description: "Not logged in",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            500: {
+                description: "Database error",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {

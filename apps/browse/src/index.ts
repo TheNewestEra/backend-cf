@@ -2,6 +2,7 @@ import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
 import {type GameKind} from "@game-worker/shared/game";
+import {openApiRoutesGate} from "@game-worker/shared/openapi-gate";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {browseRoutes} from "./catalog.controller";
 import {type PlayStatus, type ReplayKind} from "./catalog.schema";
@@ -16,11 +17,13 @@ import {
 import {createDb} from "./db/client";
 import {D1Response} from "@cloudflare/workers-types";
 
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<{Bindings: Env}>();
 
 app.use("*", corsMiddleware);
 app.route("/", browseRoutes);
 
+app.use("/openapi.json", openApiRoutesGate);
+app.use("/docs", openApiRoutesGate);
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {
@@ -43,7 +46,16 @@ export class CatalogService extends WorkerEntrypoint<Env> {
         themeGenerated?: boolean,
         replayKind?: ReplayKind | null,
     ): Promise<D1Response> {
-        return insertCatalogEntry(createDb(this.env.DB), id, kind, theme, creator, replayOf, themeGenerated, replayKind);
+        return insertCatalogEntry(
+            createDb(this.env.DB),
+            id,
+            kind,
+            theme,
+            creator,
+            replayOf,
+            themeGenerated,
+            replayKind,
+        );
     }
 
     updateCatalogTheme(id: string, theme: string, themeGenerated: boolean): Promise<D1Response> {

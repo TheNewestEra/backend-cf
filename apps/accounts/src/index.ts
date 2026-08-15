@@ -1,6 +1,7 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
+import {openApiRoutesGate} from "@game-worker/shared/openapi-gate";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {accountRoutes} from "./account.controller";
 import {
@@ -10,15 +11,17 @@ import {
     getUserById,
     getUserBySession,
     getUsersByIds,
-    type UserRecord
+    type UserRecord,
 } from "./account.service";
 import {createDb} from "./db/client";
 
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<{Bindings: Env}>();
 
 app.use("*", corsMiddleware);
 app.route("/", accountRoutes);
 
+app.use("/openapi.json", openApiRoutesGate);
+app.use("/docs", openApiRoutesGate);
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {

@@ -5,7 +5,7 @@ import {UserSchema} from "./account.schema";
 import {createAccount, verifyCode} from "./account.service";
 import {createDb} from "./db/client";
 
-export const accountRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const accountRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 accountRoutes.openapi(
     createRoute({
@@ -45,7 +45,9 @@ accountRoutes.openapi(
         responses: {
             200: {
                 description: "Account created",
-                content: {"application/json": {schema: z.object({user: UserSchema, code: z.string()})}},
+                content: {
+                    "application/json": {schema: z.object({user: UserSchema, code: z.string()})},
+                },
             },
             400: {
                 description: "Invalid or taken username",
@@ -73,7 +75,10 @@ accountRoutes.openapi(
             body: {
                 content: {
                     "application/json": {
-                        schema: z.object({username: z.string(), code: z.string().openapi({example: "004821"})}),
+                        schema: z.object({
+                            username: z.string(),
+                            code: z.string().openapi({example: "004821"}),
+                        }),
                     },
                 },
             },

@@ -21,15 +21,29 @@ const toNotification = (row: typeof notifications.$inferSelect): Notification =>
 /** Returns the created row's public shape so the caller (NotificationsService)
  * can push it over the recipient's NotificationDO WebSocket without a
  * round-trip read back from D1. */
-export const createNotification = (db: Db, userId: string, input: NotificationInput): ResultAsync<Notification, string> => {
+export const createNotification = (
+    db: Db,
+    userId: string,
+    input: NotificationInput,
+): ResultAsync<Notification, string> => {
     const id = crypto.randomUUID();
     const createdAt = Date.now();
     const title = input.title ?? null;
     const body = input.body ?? null;
     const data = input.data === undefined ? null : JSON.stringify(input.data);
     return query(
-        db.insert(notifications).values({id, userId, type: input.type, title, body, data, createdAt, readAt: null}),
-    ).map(() => ({id, type: input.type, title, body, data: input.data ?? null, createdAt, readAt: null}));
+        db
+            .insert(notifications)
+            .values({id, userId, type: input.type, title, body, data, createdAt, readAt: null}),
+    ).map(() => ({
+        id,
+        type: input.type,
+        title,
+        body,
+        data: input.data ?? null,
+        createdAt,
+        readAt: null,
+    }));
 };
 
 /** Unread notifications for `userId`, newest first — covers anything sent
@@ -54,7 +68,11 @@ export const markRead = (db: Db, id: string, userId: string): ResultAsync<void, 
     )
         .andThen((row) => requireFound(row, "Notification not found."))
         .andThen((row) => (row.userId === userId ? ok(row) : err("forbidden")))
-        .andThen(() => query(db.update(notifications).set({readAt: Date.now()}).where(eq(notifications.id, id))))
+        .andThen(() =>
+            query(
+                db.update(notifications).set({readAt: Date.now()}).where(eq(notifications.id, id)),
+            ),
+        )
         .map(() => undefined);
 
 export const markAllRead = (db: Db, userId: string): ResultAsync<void, string> =>

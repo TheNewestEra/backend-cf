@@ -1,6 +1,7 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
+import {openApiRoutesGate} from "@game-worker/shared/openapi-gate";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {puzzleRoutes} from "./puzzle.controller";
 import {PuzzleDO, type PuzzleStatus} from "./puzzle.model";
@@ -9,7 +10,7 @@ import {processPuzzle, type PuzzleQueueMessage} from "./puzzle.queue";
 
 export {PuzzleDO};
 
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<{Bindings: Env}>();
 
 app.use("*", corsMiddleware);
 app.route("/", puzzleRoutes);
@@ -17,6 +18,8 @@ app.route("/", puzzleRoutes);
 app.openAPIRegistry.register("PuzzleWsMessage", PuzzleWsMessageSchema);
 app.openAPIRegistry.register("PuzzleWsClientMessage", PuzzleWsClientMessageSchema);
 
+app.use("/openapi.json", openApiRoutesGate);
+app.use("/docs", openApiRoutesGate);
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {
@@ -34,22 +37,12 @@ app.doc("/openapi.json", {
 });
 app.get("/docs", swaggerUI({url: "/openapi.json"}));
 
-/** RPC surface for the `friends` service (bound via a `services` entry with
- * `entrypoint: "PuzzleService"`) — used to gate direct invites to a puzzle's
- * lobby without giving `friends` a binding to this Worker's Durable Object
- * namespace directly. */
 export class PuzzleService extends WorkerEntrypoint<Env> {
-    async getLobbyStatus(puzzleId: string): Promise<{ status: PuzzleStatus }> {
+    async getLobbyStatus(puzzleId: string): Promise<{status: PuzzleStatus}> {
         const state = await this.env.PUZZLE_DO.getByName(puzzleId).getState();
         return {status: state.status};
     }
 
-    /** Auto-joins a logged-in user to a puzzle's lobby — called by
-     * `friends` right after an invite is accepted, so the recipient lands
-     * already joined instead of having to send their own `join` WS message.
-     * Only reachable for an already-authenticated caller (accepting an
-     * invite requires being logged in), so there's no `requestedColor`/
-     * token to thread through here — see `PuzzleDO.join()`. */
     async joinAsUser(
         puzzleId: string,
         userId: string,
@@ -75,10 +68,18 @@ export default {
                     const reason = err instanceof Error ? err.message : String(err);
                     await Promise.all([
                         stub.setError(reason).catch((e) => {
-                            console.error("failed to record puzzle error", message.body.puzzleId, e);
+                            console.error(
+                                "failed to record puzzle error",
+                                message.body.puzzleId,
+                                e,
+                            );
                         }),
                         env.BROWSE.markCatalogError(message.body.puzzleId).catch((e) => {
-                            console.error("failed to record catalog error", message.body.puzzleId, e);
+                            console.error(
+                                "failed to record catalog error",
+                                message.body.puzzleId,
+                                e,
+                            );
                         }),
                     ]);
                     message.retry();

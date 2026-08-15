@@ -1,17 +1,22 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
-import {toRpcResult, type RpcResult} from "@game-worker/shared/rpc-result";
+import {openApiRoutesGate} from "@game-worker/shared/openapi-gate";
+import {type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {createDb} from "./db/client";
 import {NotificationDO} from "./notification.model";
 import {notificationsRoutes} from "./notifications.controller";
-import {NotificationWsMessageSchema, NotificationWsPongMessageSchema, type NotificationInput} from "./notifications.schema";
+import {
+    type NotificationInput,
+    NotificationWsMessageSchema,
+    NotificationWsPongMessageSchema,
+} from "./notifications.schema";
 import {createNotification, type Notification} from "./notifications.service";
 
 export {NotificationDO};
 
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<{Bindings: Env}>();
 
 app.use("*", corsMiddleware);
 app.route("/", notificationsRoutes);
@@ -19,6 +24,8 @@ app.route("/", notificationsRoutes);
 app.openAPIRegistry.register("NotificationWsMessage", NotificationWsMessageSchema);
 app.openAPIRegistry.register("NotificationWsPong", NotificationWsPongMessageSchema);
 
+app.use("/openapi.json", openApiRoutesGate);
+app.use("/docs", openApiRoutesGate);
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {
@@ -41,7 +48,9 @@ app.get("/docs", swaggerUI({url: "/openapi.json"}));
  * one; a caller that already has its own identifier for this notification
  * (e.g. apps/friends' own `game_invites.id`) can pass it explicitly so the
  * pushed payload's `id` lines up with that caller's own record. */
-function pushableFrom(input: NotificationInput & { id?: string }): Notification & { persisted: boolean } {
+function pushableFrom(
+    input: NotificationInput & {id?: string},
+): Notification & {persisted: boolean} {
     return {
         id: input.id ?? crypto.randomUUID(),
         type: input.type,
@@ -93,7 +102,7 @@ export class NotificationsService extends WorkerEntrypoint<Env> {
     }
 
     /** Push-only — see the class doc comment above. */
-    async push(userId: string, input: NotificationInput & { id?: string }): Promise<void> {
+    async push(userId: string, input: NotificationInput & {id?: string}): Promise<void> {
         await this.env.NOTIFICATION_DO.getByName(userId)
             .push(pushableFrom(input))
             .catch((err) => {
@@ -101,7 +110,7 @@ export class NotificationsService extends WorkerEntrypoint<Env> {
             });
     }
 
-    async pushMany(userIds: string[], input: NotificationInput & { id?: string }): Promise<void> {
+    async pushMany(userIds: string[], input: NotificationInput & {id?: string}): Promise<void> {
         await Promise.all(userIds.map((userId) => this.push(userId, input)));
     }
 }

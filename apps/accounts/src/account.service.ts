@@ -53,7 +53,10 @@ export async function findUserByUsername(db: Db, username: string): Promise<User
  * `inArray` an empty list. */
 export async function getUsersByIds(db: Db, ids: string[]): Promise<UserRecord[]> {
     if (ids.length === 0) return [];
-    return db.select({id: users.id, username: users.username, color: users.color}).from(users).where(inArray(users.id, ids));
+    return db
+        .select({id: users.id, username: users.username, color: users.color})
+        .from(users)
+        .where(inArray(users.id, ids));
 }
 
 // --- account creation / login -----------------------------------------
@@ -97,7 +100,7 @@ async function hashCode(code: string, salt: string): Promise<string> {
 export async function createAccount(
     db: Db,
     rawUsername: string,
-): Promise<Result<{ user: UserRecord; code: string }, string>> {
+): Promise<Result<{user: UserRecord; code: string}, string>> {
     const validated = validateUsername(rawUsername);
     if (validated.isErr()) return err(validated.error);
     const username = validated.value;
@@ -125,7 +128,11 @@ export async function createAccount(
 }
 
 /** Verifies a username + 6-digit code pair, returning the user on success. */
-export async function verifyCode(db: Db, rawUsername: string, rawCode: string): Promise<UserRecord | null> {
+export async function verifyCode(
+    db: Db,
+    rawUsername: string,
+    rawCode: string,
+): Promise<UserRecord | null> {
     const username = rawUsername.trim();
     const code = rawCode.trim();
     if (!username || !/^\d{6}$/.test(code)) return null;
@@ -154,7 +161,9 @@ export async function verifyCode(db: Db, rawUsername: string, rawCode: string): 
 export async function createSession(db: Db, userId: string): Promise<string> {
     const token = crypto.randomUUID();
     const now = Date.now();
-    await db.insert(sessions).values({token, userId, createdAt: now, expiresAt: now + SESSION_TTL_MS});
+    await db
+        .insert(sessions)
+        .values({token, userId, createdAt: now, expiresAt: now + SESSION_TTL_MS});
     return token;
 }
 

@@ -39,6 +39,17 @@
       "entrypoint": "AccountsService"
     }
   ],
+  // Cloudflare Flagship — same app every other service shares (see e.g.
+  // apps/puzzle/wrangler.jsonc's fuller comment on this binding). This
+  // service has no tunable knobs of its own yet; the only flag it reads
+  // today is "openapi-routes-enabled" (see @game-worker/shared/openapi-gate),
+  // gating /openapi.json and /docs.
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+    }
+  ],
   // One DO instance per user (getByName(userId)) — a pure WebSocket
   // delivery channel, no storage of its own (see notification.model.ts).
   // Formerly apps/friends' `UserDO`, invite-only; this is its generalized
@@ -85,6 +96,12 @@
           "binding": "ACCOUNTS",
           "service": "game-accounts-worker-staging",
           "entrypoint": "AccountsService"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ],
       "durable_objects": {
@@ -145,6 +162,12 @@
           "binding": "ACCOUNTS",
           "service": "game-accounts-worker-prod",
           "entrypoint": "AccountsService"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ],
       "durable_objects": {

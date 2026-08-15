@@ -1,19 +1,17 @@
 import {z} from "@hono/zod-openapi";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {
-        WsPlayerJoinedMessageSchema,
-        WsPongMessageSchema,
-        WsPresenceMessageSchema,
-        WsStatusMessageSchema,
+    WsPlayerJoinedMessageSchema,
+    WsPongMessageSchema,
+    WsPresenceMessageSchema,
+    WsStatusMessageSchema,
 } from "@game-worker/shared/ws-messages";
 
 /** Sourced from `@game-worker/shared/game-session-status` — Guess the
  * Prompt's own `GameStatusSchema` (see guess.schema.ts) is built off the
  * exact same enum object, so the two games' status values can't drift
  * apart. */
-export const PuzzleStatusSchema = z
-    .nativeEnum(GameSessionStatus)
-    .openapi("PuzzleStatus");
+export const PuzzleStatusSchema = z.nativeEnum(GameSessionStatus).openapi("PuzzleStatus");
 
 /** A joined player's public roster entry — enough to render an avatar list
  * in the lobby/play page and let a client match its own `participantId`
@@ -45,7 +43,9 @@ export const SelectionPublicSchema = z
  * the Prompt's own `GameResultSchema` — join against that participant's
  * `ParticipantPublicSchema` roster entry to render a row. Mirrors
  * guess.schema.ts's `GameResultSchema` exactly. */
-export const PuzzleResultSchema = z.object({participantId: z.string(), score: z.number()}).openapi("PuzzleResult");
+export const PuzzleResultSchema = z
+    .object({participantId: z.string(), score: z.number()})
+    .openapi("PuzzleResult");
 
 export const PuzzlePublicSchema = z
     .object({
@@ -67,18 +67,22 @@ export const PuzzlePublicSchema = z
         remainingMs: z.number().nullable(),
         lobbyRemainingMs: z.number().nullable(),
         endedAt: z.number().nullable(),
-        solvedBy: z
-            .string()
-            .nullable()
-            .openapi({description: "Name of whoever placed the final tile — narrative only; see `results` for who actually scored what"}),
+        solvedBy: z.string().nullable().openapi({
+            description:
+                "Name of whoever placed the final tile — narrative only; see `results` for who actually scored what",
+        }),
         connectedPlayers: z.number(),
-        participants: z.array(ParticipantPublicSchema).openapi({description: "Everyone who has joined, in join order"}),
-        selections: z
-            .array(SelectionPublicSchema)
-            .openapi({description: "Every tile currently selected by a participant, for state restore on (re)connect"}),
-        results: z
-            .array(PuzzleResultSchema)
-            .openapi({description: "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`"}),
+        participants: z
+            .array(ParticipantPublicSchema)
+            .openapi({description: "Everyone who has joined, in join order"}),
+        selections: z.array(SelectionPublicSchema).openapi({
+            description:
+                "Every tile currently selected by a participant, for state restore on (re)connect",
+        }),
+        results: z.array(PuzzleResultSchema).openapi({
+            description:
+                "Per-player total score, highest first — the final standings once `status` is `solved`/`timeout`",
+        }),
     })
     .openapi("Puzzle");
 
@@ -87,10 +91,14 @@ export const MoveResultSchema = z
         status: PuzzleStatusSchema,
         board: z.array(z.number()),
         solved: z.boolean(),
-        score: z.number().nullable().openapi({description: "Time-weighted points earned for this move; null when it didn't place any tile correctly"}),
-        totalScore: z
-            .number()
-            .openapi({description: "This participant's running total across every scoring move this puzzle so far (including this one, if any) — same figure as their entry in PuzzlePublicSchema's `results`"}),
+        score: z.number().nullable().openapi({
+            description:
+                "Time-weighted points earned for this move; null when it didn't place any tile correctly",
+        }),
+        totalScore: z.number().openapi({
+            description:
+                "This participant's running total across every scoring move this puzzle so far (including this one, if any) — same figure as their entry in PuzzlePublicSchema's `results`",
+        }),
     })
     .openapi("MoveResult");
 
@@ -151,9 +159,10 @@ export const PuzzleWsSolvedMessageSchema = z
         solvedBy: z.string(),
         solvedByColor: z.string(),
         remainingMs: z.number(),
-        results: z
-            .array(PuzzleResultSchema)
-            .openapi({description: "Final per-player standings — same figure as PuzzlePublicSchema's `results` at this instant"}),
+        results: z.array(PuzzleResultSchema).openapi({
+            description:
+                "Final per-player standings — same figure as PuzzlePublicSchema's `results` at this instant",
+        }),
     })
     .openapi("PuzzleWsSolvedMessage");
 
@@ -164,10 +173,10 @@ export const PuzzleWsMoveMessageSchema = z
         cellB: z.number(),
         by: z.string(),
         color: z.string(),
-        score: z
-            .number()
-            .nullable()
-            .openapi({description: "Time-weighted points this move earned its mover; null when it didn't place any tile correctly"}),
+        score: z.number().nullable().openapi({
+            description:
+                "Time-weighted points this move earned its mover; null when it didn't place any tile correctly",
+        }),
     })
     .openapi("PuzzleWsMoveMessage");
 
@@ -197,9 +206,10 @@ export const PuzzleWsTileDeselectedMessageSchema = z
 export const PuzzleWsTimeoutMessageSchema = z
     .object({
         type: z.literal(PuzzleWsEventType.Timeout),
-        results: z
-            .array(PuzzleResultSchema)
-            .openapi({description: "Final per-player standings — whatever partial progress each participant scored before time ran out"}),
+        results: z.array(PuzzleResultSchema).openapi({
+            description:
+                "Final per-player standings — whatever partial progress each participant scored before time ran out",
+        }),
     })
     .openapi("PuzzleWsTimeoutMessage");
 
@@ -260,7 +270,8 @@ export const PuzzleWsClientEventType = {
     Select: "select",
     Deselect: "deselect",
 } as const;
-export type PuzzleWsClientEventType = (typeof PuzzleWsClientEventType)[keyof typeof PuzzleWsClientEventType];
+export type PuzzleWsClientEventType =
+    (typeof PuzzleWsClientEventType)[keyof typeof PuzzleWsClientEventType];
 
 /** Was POST /puzzles/:id/join's body. `player` is only used for anonymous
  * guests — a logged-in caller is identified by the session resolved once at

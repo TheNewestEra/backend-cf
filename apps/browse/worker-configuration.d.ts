@@ -11,6 +11,7 @@ import type {AccountsRpc, FriendsRpc} from "@game-worker/shared/rpc-types";
 interface __BaseEnv_Env {
     IMAGES: R2Bucket;
     DB: D1Database;
+    FLAGS: Flagship;
     ACCOUNTS: AccountsRpc;
     FRIENDS: FriendsRpc;
 }

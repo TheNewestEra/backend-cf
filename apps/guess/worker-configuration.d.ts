@@ -26,10 +26,8 @@ declare global {
             durableNamespaces: "GameDO";
         }
 
-        interface Env extends __BaseEnv_Env {
-        }
+        interface Env extends __BaseEnv_Env {}
     }
 
-    interface Env extends __BaseEnv_Env {
-    }
+    interface Env extends __BaseEnv_Env {}
 }

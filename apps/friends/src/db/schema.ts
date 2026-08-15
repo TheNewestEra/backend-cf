@@ -57,7 +57,10 @@ export const friendships = sqliteTable(
         friendId: text("friend_id").notNull(),
         createdAt: integer("created_at").notNull(),
     },
-    (table) => [primaryKey({columns: [table.userId, table.friendId]}), index("idx_friendships_user").on(table.userId)],
+    (table) => [
+        primaryKey({columns: [table.userId, table.friendId]}),
+        index("idx_friendships_user").on(table.userId),
+    ],
 );
 
 export const friendGroups = sqliteTable(

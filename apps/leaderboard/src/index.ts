@@ -1,16 +1,19 @@
 import {swaggerUI} from "@hono/swagger-ui";
 import {OpenAPIHono} from "@hono/zod-openapi";
 import {corsMiddleware} from "@game-worker/shared/cors";
+import {openApiRoutesGate} from "@game-worker/shared/openapi-gate";
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {createDb} from "./db/client";
 import {leaderboardRoutes} from "./leaderboard.controller";
 import {recordScore, type RecordScoreInput} from "./leaderboard.service";
 
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<{Bindings: Env}>();
 
 app.use("*", corsMiddleware);
 app.route("/", leaderboardRoutes);
 
+app.use("/openapi.json", openApiRoutesGate);
+app.use("/docs", openApiRoutesGate);
 app.doc("/openapi.json", {
     openapi: "3.0.0",
     info: {

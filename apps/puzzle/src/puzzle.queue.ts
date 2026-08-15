@@ -21,10 +21,7 @@ export async function processPuzzle(message: PuzzleQueueMessage, env: Env): Prom
 
     // Set the state of the DO and update the catalog (via the BROWSE
     // service binding, which owns that table).
-    await Promise.all([
-        stub.setGenerating(),
-        env.BROWSE.markCatalogGenerating(puzzleId)
-    ]);
+    await Promise.all([stub.setGenerating(), env.BROWSE.markCatalogGenerating(puzzleId)]);
 
     // If a theme is given, use it verbatim as both the resolved theme and
     // the image prompt (same as before); otherwise ask the model for both —

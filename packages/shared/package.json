@@ -1,30 +1,31 @@
 {
-  "name": "@game-worker/shared",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "exports": {
-    "./common.schema": "./src/common.schema.ts",
-    "./cookie": "./src/cookie.ts",
-    "./cors": "./src/cors.ts",
-    "./http-exceptions": "./src/http-exceptions.ts",
-    "./db": "./src/db.ts",
-    "./ai": "./src/ai.ts",
-    "./session": "./src/session.ts",
-    "./rpc-types": "./src/rpc-types.ts",
-    "./rpc-result": "./src/rpc-result.ts",
-    "./color": "./src/color.ts",
-    "./lobby": "./src/lobby.ts",
-    "./game": "./src/game.ts",
-    "./game-session": "./src/game-session.ts",
-    "./game-session-status": "./src/game-session-status.ts",
-    "./ws-messages": "./src/ws-messages.ts",
-    "./images": "./src/images.ts"
-  },
-  "dependencies": {
-    "@hono/zod-openapi": "^1.5.2",
-    "hono": "^4.13.1",
-    "neverthrow": "^8.2.0",
-    "zod": "^4.4.3"
-  }
+    "name": "@game-worker/shared",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "exports": {
+        "./common.schema": "./src/common.schema.ts",
+        "./cookie": "./src/cookie.ts",
+        "./cors": "./src/cors.ts",
+        "./openapi-gate": "./src/openapi-gate.ts",
+        "./http-exceptions": "./src/http-exceptions.ts",
+        "./db": "./src/db.ts",
+        "./ai": "./src/ai.ts",
+        "./session": "./src/session.ts",
+        "./rpc-types": "./src/rpc-types.ts",
+        "./rpc-result": "./src/rpc-result.ts",
+        "./color": "./src/color.ts",
+        "./lobby": "./src/lobby.ts",
+        "./game": "./src/game.ts",
+        "./game-session": "./src/game-session.ts",
+        "./game-session-status": "./src/game-session-status.ts",
+        "./ws-messages": "./src/ws-messages.ts",
+        "./images": "./src/images.ts"
+    },
+    "dependencies": {
+        "@hono/zod-openapi": "^1.5.2",
+        "hono": "^4.13.1",
+        "neverthrow": "^8.2.0",
+        "zod": "^4.4.3"
+    }
 }

@@ -14,7 +14,12 @@ import {createDb, type Db} from "./db/client";
 import migrations from "./db/migrations";
 import {game, guesses, participants, rounds} from "./db/schema";
 import {isGuessCorrect} from "./guess-matching";
-import type {GamePublicSchema, GameResultSchema, GameWsMessageSchema, GuessResultSchema} from "./guess.schema";
+import type {
+    GamePublicSchema,
+    GameResultSchema,
+    GameWsMessageSchema,
+    GuessResultSchema,
+} from "./guess.schema";
 import {
     GameWsClientEventType,
     GameWsClientMessageSchema,
@@ -243,7 +248,13 @@ class GameDO extends DurableObject<Env> {
         prompts.forEach((prompt, idx) => {
             this.db
                 .insert(rounds)
-                .values({idx, prompt, status: "ready", imageKey: imageKeyFor(gameId, idx), readyAt: now})
+                .values({
+                    idx,
+                    prompt,
+                    status: "ready",
+                    imageKey: imageKeyFor(gameId, idx),
+                    readyAt: now,
+                })
                 .run();
         });
         await this.ctx.storage.setAlarm(endsAt);
@@ -261,7 +272,10 @@ class GameDO extends DurableObject<Env> {
         // `error` is terminal (see guess.queue.ts) — drop any armed round-
         // timeout/lobby alarm so a stale one can't fire against a dead game.
         if (status === GameSessionStatus.Error) await this.ctx.storage.deleteAlarm();
-        this.db.update(game).set({status, error: error ?? null}).run();
+        this.db
+            .update(game)
+            .set({status, error: error ?? null})
+            .run();
         this.broadcast({type: WsEventType.Status, status, error});
     }
 
@@ -276,7 +290,10 @@ class GameDO extends DurableObject<Env> {
      * always resolved together by the same `generateRoundPrompts()` call —
      * see guess.queue.ts's `processGuessGame()`. */
     async setPrompts(prompts: string[], theme: string, themeGenerated: boolean): Promise<void> {
-        this.db.update(game).set({theme, themeGenerated: themeGenerated ? 1 : 0}).run();
+        this.db
+            .update(game)
+            .set({theme, themeGenerated: themeGenerated ? 1 : 0})
+            .run();
         prompts.forEach((prompt, idx) => {
             this.db.update(rounds).set({prompt}).where(eq(rounds.idx, idx)).run();
         });
@@ -327,7 +344,11 @@ class GameDO extends DurableObject<Env> {
     async startNow(hostToken: string): Promise<RpcResult<void>> {
         const validated = this.requireGameRow()
             .andThen((row) => this.assertHost(row, hostToken))
-            .andThen((row) => (row.status === GameSessionStatus.Waiting ? ok(row) : err("game is not waiting to start")));
+            .andThen((row) =>
+                row.status === GameSessionStatus.Waiting
+                    ? ok(row)
+                    : err("game is not waiting to start"),
+            );
         if (validated.isErr()) return {ok: false, error: validated.error};
 
         const row = validated.value;
@@ -360,7 +381,7 @@ class GameDO extends DurableObject<Env> {
         playerName: string,
         userColor: string | null,
         requestedColor: string | null,
-    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>> {
+    ): Promise<RpcResult<{participantId: string; token: string | null; color: string}>> {
         const validated = this.requireGameRow().andThen((row) =>
             JOINABLE_STATUSES.includes(row.status)
                 ? ok(row)
@@ -371,19 +392,31 @@ class GameDO extends DurableObject<Env> {
         const color = userId
             ? (userColor ?? generateColor())
             : requestedColor && isValidHexColor(requestedColor)
-                ? requestedColor
-                : generateColor();
+              ? requestedColor
+              : generateColor();
 
         if (userId) {
             this.db
                 .insert(participants)
-                .values({id: userId, name: playerName, userId, token: null, color, joinedAt: Date.now()})
+                .values({
+                    id: userId,
+                    name: playerName,
+                    userId,
+                    token: null,
+                    color,
+                    joinedAt: Date.now(),
+                })
                 .onConflictDoUpdate({
                     target: participants.id,
                     set: {name: sql`excluded.name`, color: sql`excluded.color`},
                 })
                 .run();
-            this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId: userId});
+            this.broadcast({
+                type: WsEventType.PlayerJoined,
+                name: playerName,
+                color,
+                participantId: userId,
+            });
             return toRpcResult(ok({participantId: userId, token: null, color}));
         }
 
@@ -391,7 +424,14 @@ class GameDO extends DurableObject<Env> {
         const token = crypto.randomUUID();
         this.db
             .insert(participants)
-            .values({id: participantId, name: playerName, userId: null, token, color, joinedAt: Date.now()})
+            .values({
+                id: participantId,
+                name: playerName,
+                userId: null,
+                token,
+                color,
+                joinedAt: Date.now(),
+            })
             .run();
         this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color, participantId});
         return toRpcResult(ok({participantId, token, color}));
@@ -422,43 +462,49 @@ class GameDO extends DurableObject<Env> {
         guess: string,
         userId: string | null,
     ): Promise<RpcResult<GuessResult>> {
-        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
-            this.requireGameRow().andThen((gameRow) => {
-                const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
-                if (!round || round.status !== RoundStatus.Active || !round.prompt) {
-                    return err("round not active");
-                }
-                // Captured as its own binding (rather than relying on
-                // `round.prompt` after this point) so the narrowing to
-                // non-null above survives being carried inside the `ok()`
-                // object literal — TS doesn't propagate a property
-                // narrowing through an object literal's field.
-                const prompt = round.prompt;
+        const validated = this.requireParticipant(participantId, token, userId).andThen(
+            (participant) =>
+                this.requireGameRow().andThen((gameRow) => {
+                    const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
+                    if (!round || round.status !== RoundStatus.Active || !round.prompt) {
+                        return err("round not active");
+                    }
+                    // Captured as its own binding (rather than relying on
+                    // `round.prompt` after this point) so the narrowing to
+                    // non-null above survives being carried inside the `ok()`
+                    // object literal — TS doesn't propagate a property
+                    // narrowing through an object literal's field.
+                    const prompt = round.prompt;
 
-                const alreadyCorrect = this.db
-                    .select({n: sql<number>`COUNT(*)`})
-                    .from(guesses)
-                    .where(
-                        and(
-                            eq(guesses.roundIdx, index),
-                            eq(guesses.participantId, participantId),
-                            eq(guesses.correct, 1),
-                        ),
-                    )
-                    .get()?.n;
-                if (alreadyCorrect && alreadyCorrect > 0) {
-                    return err("you already answered this round correctly");
-                }
+                    const alreadyCorrect = this.db
+                        .select({n: sql<number>`COUNT(*)`})
+                        .from(guesses)
+                        .where(
+                            and(
+                                eq(guesses.roundIdx, index),
+                                eq(guesses.participantId, participantId),
+                                eq(guesses.correct, 1),
+                            ),
+                        )
+                        .get()?.n;
+                    if (alreadyCorrect && alreadyCorrect > 0) {
+                        return err("you already answered this round correctly");
+                    }
 
-                return ok({participant, gameRow, round, prompt});
-            }),
+                    return ok({participant, gameRow, round, prompt});
+                }),
         );
         if (validated.isErr()) return {ok: false, error: validated.error};
         const {participant, gameRow, round, prompt} = validated.value;
 
         const correct = isGuessCorrect(guess, prompt, await guessMatchThreshold(this.env));
         const score = correct
-            ? scoreForGuess(round.startedAt, round.timeLimitMs, await guessMaxScore(this.env), await guessMinScore(this.env))
+            ? scoreForGuess(
+                  round.startedAt,
+                  round.timeLimitMs,
+                  await guessMaxScore(this.env),
+                  await guessMinScore(this.env),
+              )
             : null;
 
         const createdAt = Date.now();
@@ -498,7 +544,11 @@ class GameDO extends DurableObject<Env> {
         });
 
         if (correct) {
-            const participantCount = this.db.select({n: sql<number>`COUNT(*)`}).from(participants).get()?.n ?? 0;
+            const participantCount =
+                this.db
+                    .select({n: sql<number>`COUNT(*)`})
+                    .from(participants)
+                    .get()?.n ?? 0;
             const correctCount =
                 this.db
                     .select({n: sql<number>`COUNT(DISTINCT ${guesses.participantId})`})
@@ -530,16 +580,19 @@ class GameDO extends DurableObject<Env> {
         token: string | null,
         userId: string | null,
     ): Promise<RpcResult<string>> {
-        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) => {
-            const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
-            if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status)) return err("round not visible yet");
-            // Captured as its own binding (rather than relying on
-            // `round.prompt` after this point) so the narrowing to non-null
-            // above survives being carried inside the `ok()` object literal
-            // — same reasoning as `submitGuess()`'s own `prompt` binding.
-            const prompt = round.prompt;
-            return ok({participant, prompt});
-        });
+        const validated = this.requireParticipant(participantId, token, userId).andThen(
+            (participant) => {
+                const round = this.db.select().from(rounds).where(eq(rounds.idx, index)).get();
+                if (!round?.prompt || !ROUND_VISIBLE_STATUSES.includes(round.status))
+                    return err("round not visible yet");
+                // Captured as its own binding (rather than relying on
+                // `round.prompt` after this point) so the narrowing to non-null
+                // above survives being carried inside the `ok()` object literal
+                // — same reasoning as `submitGuess()`'s own `prompt` binding.
+                const prompt = round.prompt;
+                return ok({participant, prompt});
+            },
+        );
         if (validated.isErr()) return {ok: false, error: validated.error};
         const {participant, prompt} = validated.value;
 
@@ -549,7 +602,7 @@ class GameDO extends DurableObject<Env> {
             prompt,
             participantId,
             player: participant.name,
-            color: participant.color
+            color: participant.color,
         });
         return toRpcResult(ok(prompt));
     }
@@ -576,7 +629,11 @@ class GameDO extends DurableObject<Env> {
             },
         );
 
-        if (row.status === GameSessionStatus.Waiting && row.lobbyEndsAt !== null && Date.now() >= row.lobbyEndsAt) {
+        if (
+            row.status === GameSessionStatus.Waiting &&
+            row.lobbyEndsAt !== null &&
+            Date.now() >= row.lobbyEndsAt
+        ) {
             await this.beginPlaying(row.id);
             return;
         }
@@ -598,7 +655,12 @@ class GameDO extends DurableObject<Env> {
             return;
         }
 
-        const active = this.db.select().from(rounds).where(eq(rounds.status, "active")).limit(1).get();
+        const active = this.db
+            .select()
+            .from(rounds)
+            .where(eq(rounds.status, "active"))
+            .limit(1)
+            .get();
         if (!active) return; // shouldn't happen while playing, but nothing to resolve
 
         const limitMs = active.timeLimitMs ?? (await guessTimeLimitSeconds(this.env)) * 1000;
@@ -630,7 +692,10 @@ class GameDO extends DurableObject<Env> {
         this.send(pair[1], {type: GameWsEventType.State, ...this.readPublicState()});
         // Let every other connected client know the spectator/player count
         // changed — mirrors PuzzleDO's presence broadcast.
-        this.broadcast({type: WsEventType.Presence, connectedPlayers: this.ctx.getWebSockets().length});
+        this.broadcast({
+            type: WsEventType.Presence,
+            connectedPlayers: this.ctx.getWebSockets().length,
+        });
         return new Response(null, {status: 101, webSocket: pair[0]});
     }
 
@@ -659,12 +724,20 @@ class GameDO extends DurableObject<Env> {
         try {
             json = JSON.parse(message);
         } catch {
-            this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Unknown, error: "malformed message"});
+            this.send(ws, {
+                type: GameWsEventType.Error,
+                action: GameWsAction.Unknown,
+                error: "malformed message",
+            });
             return;
         }
         const parsed = GameWsClientMessageSchema.safeParse(json);
         if (!parsed.success) {
-            this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Unknown, error: "invalid message"});
+            this.send(ws, {
+                type: GameWsEventType.Error,
+                action: GameWsAction.Unknown,
+                error: "invalid message",
+            });
             return;
         }
 
@@ -681,30 +754,55 @@ class GameDO extends DurableObject<Env> {
                     ? (identity.username ?? "")
                     : (data.player?.trim().slice(0, await maxPlayerLength(this.env.FLAGS)) ?? "");
                 if (!player) {
-                    this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Join, error: "player is required"});
+                    this.send(ws, {
+                        type: GameWsEventType.Error,
+                        action: GameWsAction.Join,
+                        error: "player is required",
+                    });
                     return;
                 }
                 const outcome = fromRpcResult(
                     await this.join(identity.userId, player, identity.color, data.color ?? null),
                 );
-                this.reply(ws, GameWsAction.Join, outcome, (joined) => ({type: GameWsEventType.JoinResult, ...joined}));
+                this.reply(ws, GameWsAction.Join, outcome, (joined) => ({
+                    type: GameWsEventType.JoinResult,
+                    ...joined,
+                }));
                 return;
             }
             case GameWsClientEventType.Guess: {
                 const guess = data.guess.trim();
                 if (!guess) {
-                    this.send(ws, {type: GameWsEventType.Error, action: GameWsAction.Guess, error: "guess is required"});
+                    this.send(ws, {
+                        type: GameWsEventType.Error,
+                        action: GameWsAction.Guess,
+                        error: "guess is required",
+                    });
                     return;
                 }
                 const outcome = fromRpcResult(
-                    await this.submitGuess(data.index, data.participantId, data.token ?? null, guess, identity.userId),
+                    await this.submitGuess(
+                        data.index,
+                        data.participantId,
+                        data.token ?? null,
+                        guess,
+                        identity.userId,
+                    ),
                 );
-                this.reply(ws, GameWsAction.Guess, outcome, (result) => ({type: GameWsEventType.GuessResult, ...result}));
+                this.reply(ws, GameWsAction.Guess, outcome, (result) => ({
+                    type: GameWsEventType.GuessResult,
+                    ...result,
+                }));
                 return;
             }
             case GameWsClientEventType.Reveal: {
                 const outcome = fromRpcResult(
-                    await this.revealRound(data.index, data.participantId, data.token ?? null, identity.userId),
+                    await this.revealRound(
+                        data.index,
+                        data.participantId,
+                        data.token ?? null,
+                        identity.userId,
+                    ),
                 );
                 this.reply(ws, GameWsAction.Reveal, outcome);
                 return;
@@ -715,6 +813,20 @@ class GameDO extends DurableObject<Env> {
             }
         }
     }
+
+    async webSocketClose(): Promise<void> {
+        // -1 because this handler runs before the closing socket drops out of
+        // getWebSockets() on some runtimes; broadcasting a stale +1 count is
+        // more confusing than a same-tick undercount that self-corrects on the
+        // next presence event. Mirrors PuzzleDO's webSocketClose.
+        this.broadcast({
+            type: WsEventType.Presence,
+            connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1),
+        });
+    }
+
+    // --- alarm: drives the lobby's auto-start, then the current round's own
+    // guess-timeout -------------------------------------------------------------
 
     /** Folds a `fromRpcResult()`-rehydrated `Result` into the single reply
      * `webSocketMessage()` sends the originating socket for one action:
@@ -737,20 +849,6 @@ class GameDO extends DurableObject<Env> {
         );
     }
 
-    // --- alarm: drives the lobby's auto-start, then the current round's own
-    // guess-timeout -------------------------------------------------------------
-
-    async webSocketClose(): Promise<void> {
-        // -1 because this handler runs before the closing socket drops out of
-        // getWebSockets() on some runtimes; broadcasting a stale +1 count is
-        // more confusing than a same-tick undercount that self-corrects on the
-        // next presence event. Mirrors PuzzleDO's webSocketClose.
-        this.broadcast({
-            type: WsEventType.Presence,
-            connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1)
-        });
-    }
-
     // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
 
     // Real Drizzle migrations now, replacing the hand-rolled idempotent
@@ -768,6 +866,7 @@ class GameDO extends DurableObject<Env> {
     // not softened to tolerate a table that already exists. Any `GameDO`
     // instance that was already bootstrapped by the old raw-SQL `migrate()`
     // before this change will fail this migration (table already exists)
+
     // the next time it's touched. Accepted trade-off, not an oversight.
     private migrate = async (): Promise<void> => runMigrations(this.db, migrations);
 
@@ -784,8 +883,12 @@ class GameDO extends DurableObject<Env> {
         participantId: string,
         token: string | null,
         userId: string | null,
-    ): Result<{ name: string; color: string }, string> {
-        const row = this.db.select().from(participants).where(eq(participants.id, participantId)).get();
+    ): Result<{name: string; color: string}, string> {
+        const row = this.db
+            .select()
+            .from(participants)
+            .where(eq(participants.id, participantId))
+            .get();
         if (!row) return err("forbidden: join the game before playing");
         if (row.userId) {
             if (row.userId !== userId) return err("forbidden: not your participant id");
@@ -808,10 +911,20 @@ class GameDO extends DurableObject<Env> {
      * just trusted by `participantId` — never broadcast to anyone else, so
      * not guessable by another player anyway. */
     private broadcastTyping(index: number, participantId: string, token: string | null): void {
-        const row = this.db.select().from(participants).where(eq(participants.id, participantId)).get();
+        const row = this.db
+            .select()
+            .from(participants)
+            .where(eq(participants.id, participantId))
+            .get();
         if (!row) return;
         if (!row.userId && (!token || token !== row.token)) return;
-        this.broadcast({type: GameWsEventType.PlayerTyping, index, participantId, player: row.name, color: row.color});
+        this.broadcast({
+            type: GameWsEventType.PlayerTyping,
+            index,
+            participantId,
+            player: row.name,
+            color: row.color,
+        });
     }
 
     // --- internals -----------------------------------------------------------
@@ -884,7 +997,11 @@ class GameDO extends DurableObject<Env> {
      * `drizzle-orm/durable-sqlite` stays synchronous too (see ./db/client.ts)
      * — so the race this comment describes is still closed the same way. */
     private async resolveCurrentRound(gameId: string, index: number): Promise<void> {
-        const still = this.db.select({status: rounds.status}).from(rounds).where(eq(rounds.idx, index)).get();
+        const still = this.db
+            .select({status: rounds.status})
+            .from(rounds)
+            .where(eq(rounds.idx, index))
+            .get();
         if (still?.status !== RoundStatus.Active) return; // already resolved by the other trigger
 
         const correct = this.db
@@ -892,7 +1009,8 @@ class GameDO extends DurableObject<Env> {
             .from(guesses)
             .where(and(eq(guesses.roundIdx, index), eq(guesses.correct, 1)))
             .get()?.n;
-        const status: RoundStatus = correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
+        const status: RoundStatus =
+            correct && correct > 0 ? RoundStatus.Complete : RoundStatus.Timeout;
         this.db.update(rounds).set({status}).where(eq(rounds.idx, index)).run();
         this.broadcast({type: GameWsEventType.RoundStatus, index, status});
 
@@ -936,7 +1054,8 @@ class GameDO extends DurableObject<Env> {
             .from(rounds)
             .where(eq(rounds.status, "complete"))
             .get()?.n;
-        const gameStatus = anyComplete && anyComplete > 0 ? GameSessionStatus.Solved : GameSessionStatus.Timeout;
+        const gameStatus =
+            anyComplete && anyComplete > 0 ? GameSessionStatus.Solved : GameSessionStatus.Timeout;
         await this.finalizeGame(gameId, gameStatus);
     }
 
@@ -1039,7 +1158,9 @@ class GameDO extends DurableObject<Env> {
      * straight into a further `.andThen()` (see `startNow()`) without
      * re-fetching it. Mirrors `PuzzleDO.assertHost()`. */
     private assertHost(row: GameRow, hostToken: string): Result<GameRow, string> {
-        return hostToken && hostToken === row.hostToken ? ok(row) : err("forbidden: only the host can do that");
+        return hostToken && hostToken === row.hostToken
+            ? ok(row)
+            : err("forbidden: only the host can do that");
     }
 
     private requireGameRow(): Result<GameRow, string> {
@@ -1080,7 +1201,11 @@ class GameDO extends DurableObject<Env> {
                 error: r.error ?? undefined,
                 remainingMs:
                     r.status === RoundStatus.Active && r.startedAt !== null
-                        ? Math.max(0, (r.timeLimitMs ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) - (Date.now() - r.startedAt))
+                        ? Math.max(
+                              0,
+                              (r.timeLimitMs ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000) -
+                                  (Date.now() - r.startedAt),
+                          )
                         : null,
                 imageUrl:
                     gameRow?.origin && ROUND_VISIBLE_STATUSES.includes(r.status)
@@ -1091,7 +1216,9 @@ class GameDO extends DurableObject<Env> {
             currentRound: roundRows.find((r) => r.status === RoundStatus.Active)?.idx ?? null,
             postRoundIndex: gameRow?.postRoundIndex ?? null,
             postRoundRemainingMs:
-                gameRow?.postRoundEndsAt != null ? Math.max(0, gameRow.postRoundEndsAt - Date.now()) : null,
+                gameRow?.postRoundEndsAt != null
+                    ? Math.max(0, gameRow.postRoundEndsAt - Date.now())
+                    : null,
             lobbyRemainingMs: gameRow ? lobbyRemainingMs(gameRow.lobbyEndsAt) : null,
             connectedPlayers: this.ctx.getWebSockets().length,
             participants: participantRows.map((p) => ({id: p.id, name: p.name, color: p.color})),
@@ -1118,7 +1245,7 @@ class GameDO extends DurableObject<Env> {
     }
 }
 
-export default GameDO
+export default GameDO;
 
 /** See guessTimeLimitSeconds(): linear falloff from `maxScore` at 0 elapsed
  * (the instant a round became the current one — `started_at`, stamped by
@@ -1131,7 +1258,12 @@ export default GameDO
  * only null for a round some already-live DO instance had mid-flight when
  * the `time_limit_ms` column was added — falls back to the same default
  * `guessTimeLimitSeconds()` itself falls back to, rather than throwing. */
-function scoreForGuess(startedAt: number | null, limitMs: number | null, maxScore: number, minScore: number): number {
+function scoreForGuess(
+    startedAt: number | null,
+    limitMs: number | null,
+    maxScore: number,
+    minScore: number,
+): number {
     const elapsedMs = Date.now() - (startedAt ?? Date.now());
     const effectiveLimitMs = limitMs ?? DEFAULT_GUESS_TIME_LIMIT_SECONDS * 1000;
     const remainingMs = Math.max(0, effectiveLimitMs - elapsedMs);

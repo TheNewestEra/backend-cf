@@ -10,6 +10,7 @@ import type {AccountsRpc} from "@game-worker/shared/rpc-types";
 
 interface __BaseEnv_Env {
     DB: D1Database;
+    FLAGS: Flagship;
     ACCOUNTS: AccountsRpc;
     NOTIFICATION_DO: DurableObjectNamespace<import("./src/index").NotificationDO>;
 }
@@ -21,10 +22,8 @@ declare global {
             durableNamespaces: "NotificationDO";
         }
 
-        interface Env extends __BaseEnv_Env {
-        }
+        interface Env extends __BaseEnv_Env {}
     }
 
-    interface Env extends __BaseEnv_Env {
-    }
+    interface Env extends __BaseEnv_Env {}
 }

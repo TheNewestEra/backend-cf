@@ -5,7 +5,14 @@ import {immutableImageResponse} from "@game-worker/shared/images";
 import {err, ok, type Result} from "neverthrow";
 import type {AccountRecord} from "@game-worker/shared/rpc-types";
 import {currentUser} from "./auth.middleware";
-import {CatalogEntrySchema, CatalogScope, CatalogScopeSchema, CatalogSort, CatalogSortSchema, PlayStatusSchema,} from "./catalog.schema";
+import {
+    CatalogEntrySchema,
+    CatalogScope,
+    CatalogScopeSchema,
+    CatalogSort,
+    CatalogSortSchema,
+    PlayStatusSchema,
+} from "./catalog.schema";
 import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
 import {createDb} from "./db/client";
 
@@ -13,14 +20,18 @@ const DEFAULT_LIMIT = 24;
 const MAX_LIMIT = 60;
 const MAX_RATER_LENGTH = 40;
 
-export const browseRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const browseRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 /** `scope=friends` is the only thing GET /api/catalog can actually reject
  * — it needs a signed-in viewer to know whose friend group to restrict to,
  * so `Err` here is the sole source of the route's 401. Same pattern as
  * apps/leaderboard's `requireViewerFor`. */
-function requireViewerFor(scope: CatalogScope, user: AccountRecord | null): Result<AccountRecord | null, string> {
-    if (scope === CatalogScope.Friends && !user) return err("log in to see games created by friends");
+function requireViewerFor(
+    scope: CatalogScope,
+    user: AccountRecord | null,
+): Result<AccountRecord | null, string> {
+    if (scope === CatalogScope.Friends && !user)
+        return err("log in to see games created by friends");
     return ok(user);
 }
 
@@ -39,19 +50,28 @@ browseRoutes.openapi(
         request: {
             query: z.object({
                 kind: GameKindSchema.optional().openapi({description: "Filter to one game type"}),
-                sort: CatalogSortSchema.optional().openapi({description: `Defaults to ${CatalogSort.Recent}`}),
+                sort: CatalogSortSchema.optional().openapi({
+                    description: `Defaults to ${CatalogSort.Recent}`,
+                }),
                 playStatus: PlayStatusSchema.optional().openapi({
                     description: "Filter to what's joinable, in progress, or finished right now",
                 }),
-                scope: CatalogScopeSchema.optional().openapi({description: `Defaults to ${CatalogScope.All}`}),
-                limit: z.coerce.number().optional().openapi({description: `1-${MAX_LIMIT}, defaults to ${DEFAULT_LIMIT}`}),
+                scope: CatalogScopeSchema.optional().openapi({
+                    description: `Defaults to ${CatalogScope.All}`,
+                }),
+                limit: z.coerce
+                    .number()
+                    .optional()
+                    .openapi({description: `1-${MAX_LIMIT}, defaults to ${DEFAULT_LIMIT}`}),
                 offset: z.coerce.number().optional(),
             }),
         },
         responses: {
             200: {
                 description: "Catalog page",
-                content: {"application/json": {schema: z.object({entries: z.array(CatalogEntrySchema)})}},
+                content: {
+                    "application/json": {schema: z.object({entries: z.array(CatalogEntrySchema)})},
+                },
             },
             401: {
                 description: "scope=friends requires being logged in",
@@ -75,11 +95,12 @@ browseRoutes.openapi(
                 kind: kind ?? null,
                 sort: sort ?? CatalogSort.Recent,
                 playStatus: playStatus ?? null,
-                createdByFriendsOf: scope === CatalogScope.Friends && viewer.value ? viewer.value.id : null,
+                createdByFriendsOf:
+                    scope === CatalogScope.Friends && viewer.value ? viewer.value.id : null,
                 limit: clamp(limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT),
                 offset: Math.max(0, offset ?? 0),
             },
-            origin
+            origin,
         );
         return c.json({entries}, 200);
     },
@@ -107,7 +128,11 @@ browseRoutes.openapi(
         responses: {
             200: {
                 description: "Updated rating",
-                content: {"application/json": {schema: z.object({average: z.number(), count: z.number()})}},
+                content: {
+                    "application/json": {
+                        schema: z.object({average: z.number(), count: z.number()}),
+                    },
+                },
             },
             404: {
                 description: "No catalog entry with that id",
@@ -119,7 +144,12 @@ browseRoutes.openapi(
         const {id} = c.req.valid("param");
         const {stars, rater} = c.req.valid("json");
 
-        const result = await submitRating(createDb(c.env.DB), id, stars, rater?.trim().slice(0, MAX_RATER_LENGTH) || null);
+        const result = await submitRating(
+            createDb(c.env.DB),
+            id,
+            stars,
+            rater?.trim().slice(0, MAX_RATER_LENGTH) || null,
+        );
         if (result.isErr()) return c.json({error: result.error}, 404);
         return c.json(result.value, 200);
     },

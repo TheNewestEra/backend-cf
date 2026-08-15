@@ -9,10 +9,10 @@ import {currentUser} from "./auth.middleware";
 import {HostBodySchema, imageKeyFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
 import type {GamePublic} from "./guess.model";
-import {GamePublicSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
 import type {RoundPublic} from "./guess.schema";
+import {GamePublicSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
 
-export const guessRoutes = new OpenAPIHono<{ Bindings: Env }>();
+export const guessRoutes = new OpenAPIHono<{Bindings: Env}>();
 
 guessRoutes.openapi(
     createRoute({
@@ -38,14 +38,18 @@ guessRoutes.openapi(
                         schema: z.object({
                             theme: z.string().optional(),
                             player: z.string().optional().openapi({
-                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
-                            }),
-                            color: z.string().optional().openapi({
                                 description:
-                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
-                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
-                                    "in — an account's color is always authoritative.",
+                                    "Anonymous-host display name — ignored (and unnecessary) when logged in.",
                             }),
+                            color: z
+                                .string()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                        "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                        "in — an account's color is always authoritative.",
+                                }),
                         }),
                     },
                 },
@@ -57,7 +61,10 @@ guessRoutes.openapi(
                 description: "Generation queued; the host is already joined",
                 content: {
                     "application/json": {
-                        schema: JoinResultSchema.extend({gameId: z.string(), hostToken: z.string()}),
+                        schema: JoinResultSchema.extend({
+                            gameId: z.string(),
+                            hostToken: z.string(),
+                        }),
                     },
                 },
             },
@@ -87,7 +94,9 @@ guessRoutes.openapi(
         const hostToken = await stub.init(gameId, theme, origin);
         // The game is freshly `queued` (a JOINABLE_STATUS), so this can't
         // actually reject — see guess.model.ts's `join()`.
-        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        const joined = fromRpcResult(
+            await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
+        );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
         // `theme === null` is the only signal that will ever exist for "will
         // this game's theme end up picked rather than typed in" — capture it
@@ -116,7 +125,10 @@ guessRoutes.openapi(
         summary: "Get a game's current state",
         request: {params: z.object({id: z.string()})},
         responses: {
-            200: {description: "Game state", content: {"application/json": {schema: GamePublicSchema}}},
+            200: {
+                description: "Game state",
+                content: {"application/json": {schema: GamePublicSchema}},
+            },
         },
     }),
     async (c) => {
@@ -152,8 +164,14 @@ guessRoutes.openapi(
         },
         responses: {
             200: {description: "Started", content: {"application/json": {schema: OkSchema}}},
-            403: {description: "Missing/incorrect host token", content: {"application/json": {schema: ErrorSchema}}},
-            409: {description: "Game isn't waiting to start", content: {"application/json": {schema: ErrorSchema}}},
+            403: {
+                description: "Missing/incorrect host token",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
+            409: {
+                description: "Game isn't waiting to start",
+                content: {"application/json": {schema: ErrorSchema}},
+            },
         },
     }),
     async (c) => {
@@ -192,14 +210,18 @@ guessRoutes.openapi(
                     "application/json": {
                         schema: z.object({
                             player: z.string().optional().openapi({
-                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
-                            }),
-                            color: z.string().optional().openapi({
                                 description:
-                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
-                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
-                                    "in — an account's color is always authoritative.",
+                                    "Anonymous-host display name — ignored (and unnecessary) when logged in.",
                             }),
+                            color: z
+                                .string()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                        "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                        "in — an account's color is always authoritative.",
+                                }),
                         }),
                     },
                 },
@@ -211,7 +233,10 @@ guessRoutes.openapi(
                 description: "New game's generation queued; the host is already joined",
                 content: {
                     "application/json": {
-                        schema: JoinResultSchema.extend({gameId: z.string(), hostToken: z.string()}),
+                        schema: JoinResultSchema.extend({
+                            gameId: z.string(),
+                            hostToken: z.string(),
+                        }),
                     },
                 },
             },
@@ -234,7 +259,10 @@ guessRoutes.openapi(
         if (!player) return c.json({error: "player is required"}, 400);
 
         const source: GamePublic = await c.env.GAME_DO.getByName(sourceId).getState();
-        if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
+        if (
+            source.status !== GameSessionStatus.Solved &&
+            source.status !== GameSessionStatus.Timeout
+        ) {
             return c.json({error: "game must be finished before regenerating"}, 409);
         }
 
@@ -244,7 +272,9 @@ guessRoutes.openapi(
         const hostToken = await stub.init(gameId, source.theme, origin);
         // The game is freshly `queued` (a JOINABLE_STATUS), so this can't
         // actually reject — see guess.model.ts's `join()`.
-        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        const joined = fromRpcResult(
+            await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
+        );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(
             gameId,
@@ -255,7 +285,11 @@ guessRoutes.openapi(
             source.themeGenerated,
             "regenerate",
         );
-        await c.env.GAME_QUEUE.send({gameId, theme: source.theme, themeGenerated: source.themeGenerated} satisfies GuessQueueMessage);
+        await c.env.GAME_QUEUE.send({
+            gameId,
+            theme: source.theme,
+            themeGenerated: source.themeGenerated,
+        } satisfies GuessQueueMessage);
 
         return c.json({gameId, hostToken, ...joined.value}, 202);
     },
@@ -284,14 +318,18 @@ guessRoutes.openapi(
                     "application/json": {
                         schema: z.object({
                             player: z.string().optional().openapi({
-                                description: "Anonymous-host display name — ignored (and unnecessary) when logged in.",
-                            }),
-                            color: z.string().optional().openapi({
                                 description:
-                                    "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
-                                    "digits) or it's discarded in favor of a generated one. Ignored when logged " +
-                                    "in — an account's color is always authoritative.",
+                                    "Anonymous-host display name — ignored (and unnecessary) when logged in.",
                             }),
+                            color: z
+                                .string()
+                                .optional()
+                                .openapi({
+                                    description:
+                                        "Anonymous-host color; must look like generateColor()'s output (`#`+6 hex " +
+                                        "digits) or it's discarded in favor of a generated one. Ignored when logged " +
+                                        "in — an account's color is always authoritative.",
+                                }),
                         }),
                     },
                 },
@@ -303,7 +341,10 @@ guessRoutes.openapi(
                 description: "New game created, waiting in its lobby; the host is already joined",
                 content: {
                     "application/json": {
-                        schema: JoinResultSchema.extend({gameId: z.string(), hostToken: z.string()}),
+                        schema: JoinResultSchema.extend({
+                            gameId: z.string(),
+                            hostToken: z.string(),
+                        }),
                     },
                 },
             },
@@ -326,7 +367,10 @@ guessRoutes.openapi(
         if (!player) return c.json({error: "player is required"}, 400);
 
         const source: GamePublic = await c.env.GAME_DO.getByName(sourceId).getState();
-        if (source.status !== GameSessionStatus.Solved && source.status !== GameSessionStatus.Timeout) {
+        if (
+            source.status !== GameSessionStatus.Solved &&
+            source.status !== GameSessionStatus.Timeout
+        ) {
             return c.json({error: "game must be finished before replaying"}, 409);
         }
         // Every round's `prompt` is only exposed once it's resolved (see
@@ -348,15 +392,25 @@ guessRoutes.openapi(
         for (let index = 0; index < prompts.length; index++) {
             const sourceImage = await c.env.IMAGES.get(imageKeyFor(sourceId, index));
             if (!sourceImage) return c.json({error: "no images to replay"}, 409);
-            await c.env.IMAGES.put(imageKeyFor(gameId, index), sourceImage.body, {httpMetadata: sourceImage.httpMetadata});
+            await c.env.IMAGES.put(imageKeyFor(gameId, index), sourceImage.body, {
+                httpMetadata: sourceImage.httpMetadata,
+            });
         }
 
         const stub = c.env.GAME_DO.getByName(gameId);
         const origin = new URL(c.req.url).origin;
-        const hostToken = await stub.initFromSource(gameId, source.theme, origin, prompts as string[], source.themeGenerated);
+        const hostToken = await stub.initFromSource(
+            gameId,
+            source.theme,
+            origin,
+            prompts as string[],
+            source.themeGenerated,
+        );
         // The game is freshly `waiting` (a JOINABLE_STATUS), so this can't
         // actually reject — see guess.model.ts's `join()`.
-        const joined = fromRpcResult(await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null));
+        const joined = fromRpcResult(
+            await stub.join(user?.id ?? null, player, user?.color ?? null, body.color ?? null),
+        );
         if (joined.isErr()) return c.json({error: joined.error}, 400);
         await c.env.BROWSE.insertCatalogEntry(
             gameId,
@@ -392,7 +446,10 @@ guessRoutes.openapi(
                 // out-of-range/non-numeric index still 404s exactly like a
                 // missing image, rather than the validator's 400 — see the
                 // manual check below.
-                index: z.string().openapi({description: "0-based round index (see this game's rounds array for the valid count)"}),
+                index: z.string().openapi({
+                    description:
+                        "0-based round index (see this game's rounds array for the valid count)",
+                }),
             }),
         },
         responses: {
@@ -400,7 +457,10 @@ guessRoutes.openapi(
                 description: "Round image",
                 content: {"image/png": {schema: z.string().openapi({format: "binary"})}},
             },
-            404: {description: "No such game/round, the image hasn't generated yet, or it isn't this round's turn yet"},
+            404: {
+                description:
+                    "No such game/round, the image hasn't generated yet, or it isn't this round's turn yet",
+            },
         },
     }),
     async (c) => {

@@ -40,7 +40,10 @@ export interface AccountsRpc {
 /** Subset of AccountsRpc needed to resolve/create/destroy a session — used
  * by @game-worker/shared/session, which every non-accounts service's
  * `auth.middleware.ts` is built on. */
-export type AccountsSessionRpc = Pick<AccountsRpc, "getUserBySession" | "createSession" | "deleteSession">;
+export type AccountsSessionRpc = Pick<
+    AccountsRpc,
+    "getUserBySession" | "createSession" | "deleteSession"
+>;
 
 /** RPC surface exposed by `apps/browse`'s `CatalogService`. */
 export interface CatalogRpc {
@@ -94,7 +97,12 @@ export interface CatalogRpc {
 
 /** RPC surface exposed by `apps/leaderboard`'s `LeaderboardService`. */
 export interface LeaderboardRpc {
-    recordScore(input: { userId: string; kind: GameKind; sessionId: string; score: number }): Promise<void>;
+    recordScore(input: {
+        userId: string;
+        kind: GameKind;
+        sessionId: string;
+        score: number;
+    }): Promise<void>;
 }
 
 /** RPC surface exposed by `apps/friends`' `FriendsService`. */
@@ -105,25 +113,25 @@ export interface FriendsRpc {
 
 /** RPC surface exposed by `apps/puzzle`'s `PuzzleService`. */
 export interface PuzzleRpc {
-    getLobbyStatus(puzzleId: string): Promise<{ status: string }>;
+    getLobbyStatus(puzzleId: string): Promise<{status: string}>;
 
     joinAsUser(
         puzzleId: string,
         userId: string,
         username: string,
         color: string,
-    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>>;
+    ): Promise<RpcResult<{participantId: string; token: string | null; color: string}>>;
 }
 
 /** RPC surface exposed by `apps/guess`'s `GuessService`. */
 export interface GuessRpc {
-    getStatus(gameId: string): Promise<{ status: string }>;
+    getStatus(gameId: string): Promise<{status: string}>;
     joinAsUser(
         gameId: string,
         userId: string,
         username: string,
         color: string,
-    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>>;
+    ): Promise<RpcResult<{participantId: string; token: string | null; color: string}>>;
 }
 
 /** Input shared by every `NotificationsRpc` write below — `type` is a
@@ -158,6 +166,6 @@ export interface NotificationRecord {
 export interface NotificationsRpc {
     send(userId: string, input: NotificationInput): Promise<RpcResult<NotificationRecord>>;
     sendMany(userIds: string[], input: NotificationInput): Promise<void>;
-    push(userId: string, input: NotificationInput & { id?: string }): Promise<void>;
-    pushMany(userIds: string[], input: NotificationInput & { id?: string }): Promise<void>;
+    push(userId: string, input: NotificationInput & {id?: string}): Promise<void>;
+    pushMany(userIds: string[], input: NotificationInput & {id?: string}): Promise<void>;
 }

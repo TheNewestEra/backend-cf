@@ -14,5 +14,4 @@ const GAME_ROUTES = {
     [GameKind.Puzzle]: (id: string) => `/games/piece-puzzle/${id}`,
 } as const satisfies Record<GameKind, (id: string) => `/games/${string}/${string}`>;
 
-export const playUrlFor = (kind: GameKind, sessionId: string) =>
-    GAME_ROUTES[kind](sessionId);
+export const playUrlFor = (kind: GameKind, sessionId: string) => GAME_ROUTES[kind](sessionId);

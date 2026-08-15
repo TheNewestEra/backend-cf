@@ -51,7 +51,7 @@ export class ConflictException extends HttpException {
  * via `fromRpcResult()` first (see @game-worker/shared/rpc-result). */
 export function actionResponse(result: Result<void, string>): {
     status: 200 | 400 | 403;
-    body: { ok: true } | { error: string };
+    body: {ok: true} | {error: string};
 } {
     if (result.isOk()) return {status: 200, body: {ok: true}};
     return {status: result.error === "forbidden" ? 403 : 400, body: {error: result.error}};
@@ -67,10 +67,15 @@ export function actionResponse(result: Result<void, string>): {
  * `.error`), or — for any caller not yet ported off throwing — the same
  * `unknown` a `catch` block hands you, so this stays a safe drop-in either
  * way. */
-export function hostActionError(error: string): { status: 403 | 409; body: { error: string } };
-export function hostActionError(err: unknown): { status: 403 | 409; body: { error: string } };
-export function hostActionError(input: unknown): { status: 403 | 409; body: { error: string } } {
-    const message = typeof input === "string" ? input : input instanceof Error ? input.message : "action rejected";
+export function hostActionError(error: string): {status: 403 | 409; body: {error: string}};
+export function hostActionError(err: unknown): {status: 403 | 409; body: {error: string}};
+export function hostActionError(input: unknown): {status: 403 | 409; body: {error: string}} {
+    const message =
+        typeof input === "string"
+            ? input
+            : input instanceof Error
+              ? input.message
+              : "action rejected";
     const status = message.startsWith("forbidden") ? 403 : 409;
     return {status, body: {error: message}};
 }

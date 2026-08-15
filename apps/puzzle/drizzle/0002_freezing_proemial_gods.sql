@@ -1,1 +1,2 @@
-ALTER TABLE `puzzle` ADD `theme_generated` integer DEFAULT 0 NOT NULL;
+ALTER TABLE `puzzle`
+    ADD `theme_generated` integer DEFAULT 0 NOT NULL;

@@ -5,10 +5,14 @@ const DEFAULT_IMAGE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0" as co
 const DEFAULT_IMAGE_STEPS = 8;
 const DEFAULT_PRESET_THEMES: string[] = [];
 
-const promptModel = (flags: Flagship): Promise<string> => flags.getStringValue("prompt-model", DEFAULT_PROMPT_MODEL);
-const imageModel = (flags: Flagship): Promise<string> => flags.getStringValue("image-model", DEFAULT_IMAGE_MODEL);
-const imageSteps = (flags: Flagship): Promise<number> => flags.getNumberValue("image-steps", DEFAULT_IMAGE_STEPS);
-const presetThemes = (flags: Flagship): Promise<string[]> => flags.getObjectValue("preset-themes", DEFAULT_PRESET_THEMES);
+const promptModel = (flags: Flagship): Promise<string> =>
+    flags.getStringValue("prompt-model", DEFAULT_PROMPT_MODEL);
+const imageModel = (flags: Flagship): Promise<string> =>
+    flags.getStringValue("image-model", DEFAULT_IMAGE_MODEL);
+const imageSteps = (flags: Flagship): Promise<number> =>
+    flags.getNumberValue("image-steps", DEFAULT_IMAGE_STEPS);
+const presetThemes = (flags: Flagship): Promise<string[]> =>
+    flags.getObjectValue("preset-themes", DEFAULT_PRESET_THEMES);
 
 async function pickPresetTheme(flags: Flagship): Promise<string | null> {
     const themes = await presetThemes(flags);
@@ -54,7 +58,7 @@ export async function generateRoundPrompts(
     theme: string | null,
     roundCount: number,
 ): Promise<Result<RoundPromptsResult, string>> {
-    const resolvedTheme = theme ?? await pickPresetTheme(flags);
+    const resolvedTheme = theme ?? (await pickPresetTheme(flags));
     const themeInstruction = resolvedTheme
         ? `The theme is: "${resolvedTheme}".`
         : "Pick any fun, family-friendly theme yourself.";
@@ -112,13 +116,13 @@ export async function generateRoundPrompts(
 // `{ response: string | object, ... }`, sometimes a bare string. Normalize
 // once here rather than re-deriving this per call site.
 function unwrapResponse(result: unknown): unknown {
-    return (result as { response?: unknown } | undefined)?.response ?? result;
+    return (result as {response?: unknown} | undefined)?.response ?? result;
 }
 
 function extractThemeAndPrompts(result: unknown): Result<RoundPromptsResult, string> {
     const response = unwrapResponse(result);
     const parsed = typeof response === "string" ? JSON.parse(response) : response;
-    const obj = parsed as { theme?: unknown; prompts?: unknown } | undefined;
+    const obj = parsed as {theme?: unknown; prompts?: unknown} | undefined;
     const theme = typeof obj?.theme === "string" ? obj.theme.trim() : "";
     if (!theme) return err("model did not return a `theme` string");
     const prompts = obj?.prompts;
@@ -146,9 +150,14 @@ export interface ImagePromptResult {
  * `generateRoundPrompts`'s doc comment for why); otherwise leaves the
  * theme entirely up to the model, whose own label becomes the answer.
  */
-export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<Result<ImagePromptResult, string>> {
+export async function generateImagePrompt(
+    ai: Ai,
+    flags: Flagship,
+): Promise<Result<ImagePromptResult, string>> {
     const presetTheme = await pickPresetTheme(flags);
-    const themeInstruction = presetTheme ? ` The theme is: "${presetTheme}".` : " Invent a fun theme yourself.";
+    const themeInstruction = presetTheme
+        ? ` The theme is: "${presetTheme}".`
+        : " Invent a fun theme yourself.";
     const model = await promptModel(flags);
 
     const promptJsonSchema = {
@@ -186,13 +195,16 @@ export async function generateImagePrompt(ai: Ai, flags: Flagship): Promise<Resu
         },
     });
 
-    return extractThemeAndPrompt(result).map(({theme: modelTheme, prompt}) => ({theme: presetTheme ?? modelTheme, prompt}));
+    return extractThemeAndPrompt(result).map(({theme: modelTheme, prompt}) => ({
+        theme: presetTheme ?? modelTheme,
+        prompt,
+    }));
 }
 
 function extractThemeAndPrompt(result: unknown): Result<ImagePromptResult, string> {
     const response = unwrapResponse(result);
     const parsed = typeof response === "string" ? JSON.parse(response) : response;
-    const obj = parsed as { theme?: unknown; prompt?: unknown } | undefined;
+    const obj = parsed as {theme?: unknown; prompt?: unknown} | undefined;
     const theme = typeof obj?.theme === "string" ? obj.theme.trim() : "";
     const prompt = typeof obj?.prompt === "string" ? obj.prompt.trim() : "";
     if (!theme) return err("model did not return a `theme` string");

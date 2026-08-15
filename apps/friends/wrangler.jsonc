@@ -32,6 +32,17 @@
       "migrations_dir": "../../migrations"
     }
   ],
+  // Cloudflare Flagship — same app every other service shares (see e.g.
+  // apps/puzzle/wrangler.jsonc's fuller comment on this binding). This
+  // service has no tunable knobs of its own yet; the only flag it reads
+  // today is "openapi-routes-enabled" (see @game-worker/shared/openapi-gate),
+  // gating /openapi.json and /docs.
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
+    }
+  ],
   "services": [
     {
       "binding": "ACCOUNTS",
@@ -98,6 +109,12 @@
           "database_name": "game-worker-catalog-staging",
           "database_id": "75c2c0c7-0671-48bb-a183-6add29839f9d",
           "migrations_dir": "../../migrations"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ],
       "services": [
@@ -171,6 +188,12 @@
           "database_name": "game-worker-catalog-prod",
           "database_id": "44482ca7-ce2a-4d7a-a2f4-64e4d4825637",
           "migrations_dir": "../../migrations"
+        }
+      ],
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "cd275eff-6429-4571-a8e7-c6e2a5c8b160"
         }
       ],
       "services": [

@@ -21,7 +21,11 @@ import type {
     PuzzleStatusSchema,
     PuzzleWsMessageSchema,
 } from "./puzzle.schema";
-import {PuzzleWsClientEventType, PuzzleWsClientMessageSchema, PuzzleWsEventType} from "./puzzle.schema";
+import {
+    PuzzleWsClientEventType,
+    PuzzleWsClientMessageSchema,
+    PuzzleWsEventType,
+} from "./puzzle.schema";
 
 export type PuzzleStatus = z.infer<typeof PuzzleStatusSchema>;
 export type PuzzlePublic = z.infer<typeof PuzzlePublicSchema>;
@@ -125,7 +129,12 @@ export class PuzzleDO extends DurableObject<Env> {
         ctx.blockConcurrencyWhile(this.migrate);
     }
 
-    async init(puzzleId: string, theme: string | null, gridSize: number, timeLimitMs: number): Promise<string> {
+    async init(
+        puzzleId: string,
+        theme: string | null,
+        gridSize: number,
+        timeLimitMs: number,
+    ): Promise<string> {
         await this.ctx.storage.deleteAlarm();
         const hostToken = crypto.randomUUID();
         this.db
@@ -236,7 +245,14 @@ export class PuzzleDO extends DurableObject<Env> {
         const endsAt = lobbyEndsAt(Date.now(), await lobbyCountdownSeconds(this.env.FLAGS));
         this.db
             .update(puzzle)
-            .set({prompt, theme, themeGenerated: themeGenerated ? 1 : 0, status: GameSessionStatus.Waiting, error: null, lobbyEndsAt: endsAt})
+            .set({
+                prompt,
+                theme,
+                themeGenerated: themeGenerated ? 1 : 0,
+                status: GameSessionStatus.Waiting,
+                error: null,
+                lobbyEndsAt: endsAt,
+            })
             .run();
         await this.ctx.storage.setAlarm(endsAt);
         this.broadcast({type: PuzzleWsEventType.State, ...this.readPublicState()});
@@ -248,7 +264,11 @@ export class PuzzleDO extends DurableObject<Env> {
     async startNow(hostToken: string): Promise<RpcResult<void>> {
         const validated = this.requireRow()
             .andThen((row) => this.assertHost(row, hostToken))
-            .andThen((row) => (row.status === GameSessionStatus.Waiting ? ok(row) : err("puzzle is not waiting to start")));
+            .andThen((row) =>
+                row.status === GameSessionStatus.Waiting
+                    ? ok(row)
+                    : err("puzzle is not waiting to start"),
+            );
         if (validated.isErr()) return {ok: false, error: validated.error};
 
         const row = validated.value;
@@ -281,7 +301,7 @@ export class PuzzleDO extends DurableObject<Env> {
         playerName: string,
         userColor: string | null,
         requestedColor: string | null,
-    ): Promise<RpcResult<{ participantId: string; token: string | null; color: string }>> {
+    ): Promise<RpcResult<{participantId: string; token: string | null; color: string}>> {
         const validated = this.requireRow().andThen((row) =>
             JOINABLE_STATUSES.includes(row.status)
                 ? ok(row)
@@ -292,21 +312,29 @@ export class PuzzleDO extends DurableObject<Env> {
         const color = userId
             ? (userColor ?? generateColor())
             : requestedColor && isValidHexColor(requestedColor)
-                ? requestedColor
-                : generateColor();
+              ? requestedColor
+              : generateColor();
 
         if (userId) {
             this.db
                 .insert(participants)
-                .values({id: userId, name: playerName, userId, token: null, color, joinedAt: Date.now()})
+                .values({
+                    id: userId,
+                    name: playerName,
+                    userId,
+                    token: null,
+                    color,
+                    joinedAt: Date.now(),
+                })
                 .onConflictDoUpdate({
                     target: participants.id,
                     set: {
                         name: sql`excluded
                         .
-                        name`, color: sql`excluded
+                        name`,
+                        color: sql`excluded
                         .
-                        color`
+                        color`,
                     },
                 })
                 .run();
@@ -318,7 +346,14 @@ export class PuzzleDO extends DurableObject<Env> {
         const token = crypto.randomUUID();
         this.db
             .insert(participants)
-            .values({id: participantId, name: playerName, userId: null, token, color, joinedAt: Date.now()})
+            .values({
+                id: participantId,
+                name: playerName,
+                userId: null,
+                token,
+                color,
+                joinedAt: Date.now(),
+            })
             .run();
         this.broadcast({type: WsEventType.PlayerJoined, name: playerName, color});
         return toRpcResult(ok({participantId, token, color}));
@@ -356,23 +391,25 @@ export class PuzzleDO extends DurableObject<Env> {
         cellB: number,
         userId: string | null,
     ): Promise<RpcResult<MoveResult>> {
-        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
-            this.requireRow().andThen((row) => {
-                if (row.status !== GameSessionStatus.Playing) return err("puzzle is not in progress");
-                const cellCount = row.gridSize * row.gridSize;
-                if (
-                    !Number.isInteger(cellA) ||
-                    !Number.isInteger(cellB) ||
-                    cellA === cellB ||
-                    cellA < 0 ||
-                    cellA >= cellCount ||
-                    cellB < 0 ||
-                    cellB >= cellCount
-                ) {
-                    return err("invalid cell indices");
-                }
-                return ok({participant, row});
-            }),
+        const validated = this.requireParticipant(participantId, token, userId).andThen(
+            (participant) =>
+                this.requireRow().andThen((row) => {
+                    if (row.status !== GameSessionStatus.Playing)
+                        return err("puzzle is not in progress");
+                    const cellCount = row.gridSize * row.gridSize;
+                    if (
+                        !Number.isInteger(cellA) ||
+                        !Number.isInteger(cellB) ||
+                        cellA === cellB ||
+                        cellA < 0 ||
+                        cellA >= cellCount ||
+                        cellB < 0 ||
+                        cellB >= cellCount
+                    ) {
+                        return err("invalid cell indices");
+                    }
+                    return ok({participant, row});
+                }),
         );
         if (validated.isErr()) return {ok: false, error: validated.error};
         const {participant, row} = validated.value;
@@ -385,7 +422,9 @@ export class PuzzleDO extends DurableObject<Env> {
         // diff the whole board — a cell counts as newly placed only if it's
         // correct *now* and hasn't already banked points at any earlier
         // point in this puzzle's life (see this method's doc comment).
-        const newlyPlacedCells = [cellA, cellB].filter((cell) => board[cell] === cell && !scoredCells.has(cell));
+        const newlyPlacedCells = [cellA, cellB].filter(
+            (cell) => board[cell] === cell && !scoredCells.has(cell),
+        );
         for (const cell of newlyPlacedCells) scoredCells.add(cell);
 
         // Whoever had cellA/cellB selected (typically just the mover, whose
@@ -405,9 +444,19 @@ export class PuzzleDO extends DurableObject<Env> {
 
         const solved = board.every((tile, cell) => tile === cell);
 
-        const [maxScore, minScore] = await Promise.all([puzzleMaxScore(this.env), puzzleMinSolvedScore(this.env)]);
+        const [maxScore, minScore] = await Promise.all([
+            puzzleMaxScore(this.env),
+            puzzleMinSolvedScore(this.env),
+        ]);
         const cellCount = row.gridSize * row.gridSize;
-        const score = scoreForMove(row.startedAt, row.timeLimitMs, maxScore, minScore, newlyPlacedCells.length, cellCount);
+        const score = scoreForMove(
+            row.startedAt,
+            row.timeLimitMs,
+            maxScore,
+            minScore,
+            newlyPlacedCells.length,
+            cellCount,
+        );
 
         // Every attempt is logged (not just scoring ones) — mirrors
         // `GameDO.submitGuess()`'s `guesses` insert.
@@ -436,7 +485,7 @@ export class PuzzleDO extends DurableObject<Env> {
                     ${moves.score}
                     ),
                     0
-                    )`
+                    )`,
                 })
                 .from(moves)
                 .where(eq(moves.participantId, participantId))
@@ -449,7 +498,10 @@ export class PuzzleDO extends DurableObject<Env> {
 
         if (solved) {
             const endedAt = Date.now();
-            const remainingMs = Math.max(0, row.timeLimitMs - (endedAt - (row.startedAt ?? endedAt)));
+            const remainingMs = Math.max(
+                0,
+                row.timeLimitMs - (endedAt - (row.startedAt ?? endedAt)),
+            );
             const results = await this.finalizePuzzle(row.id, GameSessionStatus.Solved, endedAt, {
                 name: participant.name,
                 color: participant.color,
@@ -462,7 +514,9 @@ export class PuzzleDO extends DurableObject<Env> {
                 remainingMs,
                 results,
             });
-            return toRpcResult(ok({status: GameSessionStatus.Solved, board, solved: true, score, totalScore}));
+            return toRpcResult(
+                ok({status: GameSessionStatus.Solved, board, solved: true, score, totalScore}),
+            );
         }
 
         this.broadcast({
@@ -471,9 +525,11 @@ export class PuzzleDO extends DurableObject<Env> {
             cellB,
             by: participant.name,
             color: participant.color,
-            score
+            score,
         });
-        return toRpcResult(ok({status: GameSessionStatus.Playing, board, solved: false, score, totalScore}));
+        return toRpcResult(
+            ok({status: GameSessionStatus.Playing, board, solved: false, score, totalScore}),
+        );
     }
 
     /** Records and broadcasts that a player has selected/highlighted a
@@ -493,27 +549,37 @@ export class PuzzleDO extends DurableObject<Env> {
         cell: number,
         userId: string | null,
     ): Promise<RpcResult<void>> {
-        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
-            this.requireRow().andThen((row) => {
-                if (row.status !== GameSessionStatus.Playing) return err("puzzle is not in progress");
-                const cellCount = row.gridSize * row.gridSize;
-                if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount) return err("invalid cell index");
-                return ok(participant);
-            }),
+        const validated = this.requireParticipant(participantId, token, userId).andThen(
+            (participant) =>
+                this.requireRow().andThen((row) => {
+                    if (row.status !== GameSessionStatus.Playing)
+                        return err("puzzle is not in progress");
+                    const cellCount = row.gridSize * row.gridSize;
+                    if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount)
+                        return err("invalid cell index");
+                    return ok(participant);
+                }),
         );
         if (validated.isErr()) return {ok: false, error: validated.error};
         const participant = validated.value;
 
         if (participant.selectedCell !== null && participant.selectedCell !== cell) {
-            this.broadcast({type: PuzzleWsEventType.TileDeselected, cell: participant.selectedCell});
+            this.broadcast({
+                type: PuzzleWsEventType.TileDeselected,
+                cell: participant.selectedCell,
+            });
         }
 
-        this.db.update(participants).set({selectedCell: cell}).where(eq(participants.id, participantId)).run();
+        this.db
+            .update(participants)
+            .set({selectedCell: cell})
+            .where(eq(participants.id, participantId))
+            .run();
         this.broadcast({
             type: PuzzleWsEventType.TileSelected,
             cell,
             player: participant.name,
-            color: participant.color
+            color: participant.color,
         });
         return toRpcResult(ok(undefined));
     }
@@ -523,18 +589,29 @@ export class PuzzleDO extends DurableObject<Env> {
      * every other connected client drops the highlight too. A no-op if
      * nothing's currently selected, same idea as `webSocketClose()`
      * tolerating a socket that was never really tracked. */
-    async deselectTile(participantId: string, token: string | null, userId: string | null): Promise<RpcResult<void>> {
-        const validated = this.requireParticipant(participantId, token, userId).andThen((participant) =>
-            this.requireRow().andThen((row) =>
-                row.status !== GameSessionStatus.Playing ? err("puzzle is not in progress") : ok(participant),
-            ),
+    async deselectTile(
+        participantId: string,
+        token: string | null,
+        userId: string | null,
+    ): Promise<RpcResult<void>> {
+        const validated = this.requireParticipant(participantId, token, userId).andThen(
+            (participant) =>
+                this.requireRow().andThen((row) =>
+                    row.status !== GameSessionStatus.Playing
+                        ? err("puzzle is not in progress")
+                        : ok(participant),
+                ),
         );
         if (validated.isErr()) return {ok: false, error: validated.error};
         const participant = validated.value;
 
         if (participant.selectedCell === null) return toRpcResult(ok(undefined));
 
-        this.db.update(participants).set({selectedCell: null}).where(eq(participants.id, participantId)).run();
+        this.db
+            .update(participants)
+            .set({selectedCell: null})
+            .where(eq(participants.id, participantId))
+            .run();
         this.broadcast({type: PuzzleWsEventType.TileDeselected, cell: participant.selectedCell});
         return toRpcResult(ok(undefined));
     }
@@ -563,7 +640,12 @@ export class PuzzleDO extends DurableObject<Env> {
             // the last tile, not that every earlier correct placement this
             // game is wiped out. Mirrors `GameDO.alarm()`'s own guess-timeout
             // handling.
-            const results = await this.finalizePuzzle(row.id, GameSessionStatus.Timeout, Date.now(), null);
+            const results = await this.finalizePuzzle(
+                row.id,
+                GameSessionStatus.Timeout,
+                Date.now(),
+                null,
+            );
             this.broadcast({type: PuzzleWsEventType.Timeout, results});
         }
         // Any other status means the puzzle moved on (solved, errored, etc.)
@@ -583,11 +665,14 @@ export class PuzzleDO extends DurableObject<Env> {
         pair[1].serializeAttachment({
             userId: user?.id ?? null,
             username: user?.username ?? null,
-            color: user?.color ?? null
+            color: user?.color ?? null,
         } satisfies ConnectionIdentity);
         this.send(pair[1], {type: PuzzleWsEventType.State, ...this.readPublicState()});
         // Let every other connected client know the player count changed.
-        this.broadcast({type: WsEventType.Presence, connectedPlayers: this.ctx.getWebSockets().length});
+        this.broadcast({
+            type: WsEventType.Presence,
+            connectedPlayers: this.ctx.getWebSockets().length,
+        });
         return new Response(null, {status: 101, webSocket: pair[0]});
     }
 
@@ -615,12 +700,20 @@ export class PuzzleDO extends DurableObject<Env> {
         try {
             json = JSON.parse(message);
         } catch {
-            this.send(ws, {type: PuzzleWsEventType.Error, action: PuzzleWsAction.Unknown, error: "malformed message"});
+            this.send(ws, {
+                type: PuzzleWsEventType.Error,
+                action: PuzzleWsAction.Unknown,
+                error: "malformed message",
+            });
             return;
         }
         const parsed = PuzzleWsClientMessageSchema.safeParse(json);
         if (!parsed.success) {
-            this.send(ws, {type: PuzzleWsEventType.Error, action: PuzzleWsAction.Unknown, error: "invalid message"});
+            this.send(ws, {
+                type: PuzzleWsEventType.Error,
+                action: PuzzleWsAction.Unknown,
+                error: "invalid message",
+            });
             return;
         }
 
@@ -640,14 +733,17 @@ export class PuzzleDO extends DurableObject<Env> {
                     this.send(ws, {
                         type: PuzzleWsEventType.Error,
                         action: PuzzleWsAction.Join,
-                        error: "player is required"
+                        error: "player is required",
                     });
                     return;
                 }
                 const outcome = fromRpcResult(
                     await this.join(identity.userId, player, identity.color, data.color ?? null),
                 );
-                this.reply(ws, PuzzleWsAction.Join, outcome, (joined) => ({type: PuzzleWsEventType.JoinResult, ...joined}));
+                this.reply(ws, PuzzleWsAction.Join, outcome, (joined) => ({
+                    type: PuzzleWsEventType.JoinResult,
+                    ...joined,
+                }));
                 return;
             }
             case PuzzleWsClientEventType.Move: {
@@ -661,25 +757,48 @@ export class PuzzleDO extends DurableObject<Env> {
                     return;
                 }
                 const outcome = fromRpcResult(
-                    await this.swapTiles(participantId, token ?? null, cellA, cellB, identity.userId),
+                    await this.swapTiles(
+                        participantId,
+                        token ?? null,
+                        cellA,
+                        cellB,
+                        identity.userId,
+                    ),
                 );
                 this.reply(ws, PuzzleWsAction.Move, outcome);
                 return;
             }
             case PuzzleWsClientEventType.Select: {
                 const {cell, participantId, token} = data;
-                const outcome = fromRpcResult(await this.selectTile(participantId, token ?? null, cell, identity.userId));
+                const outcome = fromRpcResult(
+                    await this.selectTile(participantId, token ?? null, cell, identity.userId),
+                );
                 this.reply(ws, PuzzleWsAction.Select, outcome);
                 return;
             }
             case PuzzleWsClientEventType.Deselect: {
                 const {participantId, token} = data;
-                const outcome = fromRpcResult(await this.deselectTile(participantId, token ?? null, identity.userId));
+                const outcome = fromRpcResult(
+                    await this.deselectTile(participantId, token ?? null, identity.userId),
+                );
                 this.reply(ws, PuzzleWsAction.Deselect, outcome);
                 return;
             }
         }
     }
+
+    async webSocketClose(): Promise<void> {
+        // -1 because this handler runs before the closing socket drops out of
+        // getWebSockets() on some runtimes; broadcasting a stale +1 count is
+        // more confusing than a same-tick undercount that self-corrects on the
+        // next presence event.
+        this.broadcast({
+            type: WsEventType.Presence,
+            connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1),
+        });
+    }
+
+    // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
 
     /** Folds a `fromRpcResult()`-rehydrated `Result` into the single reply
      * `webSocketMessage()` sends the originating socket for one action:
@@ -702,19 +821,6 @@ export class PuzzleDO extends DurableObject<Env> {
         );
     }
 
-    // --- WebSocket upgrade (DOs use fetch() for this, not RPC) --------------
-
-    async webSocketClose(): Promise<void> {
-        // -1 because this handler runs before the closing socket drops out of
-        // getWebSockets() on some runtimes; broadcasting a stale +1 count is
-        // more confusing than a same-tick undercount that self-corrects on the
-        // next presence event.
-        this.broadcast({
-            type: WsEventType.Presence,
-            connectedPlayers: Math.max(0, this.ctx.getWebSockets().length - 1)
-        });
-    }
-
     // Real Drizzle migrations now, replacing the hand-rolled idempotent
     // `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE` bootstrap this used to run
     // directly against `ctx.storage.sql`. `drizzle-kit generate` (run from
@@ -732,6 +838,7 @@ export class PuzzleDO extends DurableObject<Env> {
     // not softened to tolerate a table that already exists. Any `PuzzleDO`
     // instance that was already bootstrapped by the old raw-SQL `migrate()`
     // before this change will fail this migration (table already exists)
+
     // the next time it's touched. Accepted trade-off, not an oversight.
     private migrate = async (): Promise<void> => runMigrations(this.db, migrations);
 
@@ -752,8 +859,12 @@ export class PuzzleDO extends DurableObject<Env> {
         participantId: string,
         token: string | null,
         userId: string | null,
-    ): Result<{ name: string; color: string; selectedCell: number | null }, string> {
-        const row = this.db.select().from(participants).where(eq(participants.id, participantId)).get();
+    ): Result<{name: string; color: string; selectedCell: number | null}, string> {
+        const row = this.db
+            .select()
+            .from(participants)
+            .where(eq(participants.id, participantId))
+            .get();
         if (!row) return err("forbidden: join the puzzle before playing");
         if (row.userId) {
             if (row.userId !== userId) return err("forbidden: not your participant id");
@@ -766,7 +877,11 @@ export class PuzzleDO extends DurableObject<Env> {
     // --- internals -----------------------------------------------------------
 
     /** Shared by the host's "start now" and the lobby alarm's auto-start. */
-    private async beginPlaying(puzzleId: string, gridSize: number, timeLimitMs: number): Promise<void> {
+    private async beginPlaying(
+        puzzleId: string,
+        gridSize: number,
+        timeLimitMs: number,
+    ): Promise<void> {
         const board = shuffledBoard(gridSize);
         const startedAt = Date.now();
         this.db
@@ -800,7 +915,7 @@ export class PuzzleDO extends DurableObject<Env> {
         puzzleId: string,
         status: "solved" | "timeout",
         endedAt: number,
-        solvedBy: { name: string; color: string } | null,
+        solvedBy: {name: string; color: string} | null,
     ): Promise<PuzzleResult[]> {
         await this.ctx.storage.deleteAlarm();
         this.db
@@ -829,11 +944,11 @@ export class PuzzleDO extends DurableObject<Env> {
             scorerIds.length === 0
                 ? []
                 : this.db
-                    .select({id: participants.id, userId: participants.userId})
-                    .from(participants)
-                    .where(inArray(participants.id, scorerIds))
-                    .all()
-                    .flatMap((p) => (p.userId ? [[p.id, p.userId] as const] : [])),
+                      .select({id: participants.id, userId: participants.userId})
+                      .from(participants)
+                      .where(inArray(participants.id, scorerIds))
+                      .all()
+                      .flatMap((p) => (p.userId ? [[p.id, p.userId] as const] : [])),
         );
 
         await Promise.all(
@@ -845,9 +960,14 @@ export class PuzzleDO extends DurableObject<Env> {
                         userId,
                         kind: "puzzle",
                         sessionId: puzzleId,
-                        score
+                        score,
                     }).catch((err) => {
-                        console.error("failed to record puzzle score", puzzleId, participantId, err);
+                        console.error(
+                            "failed to record puzzle score",
+                            puzzleId,
+                            participantId,
+                            err,
+                        );
                     }),
                 ];
             }),
@@ -865,7 +985,10 @@ export class PuzzleDO extends DurableObject<Env> {
      * `this.ctx.id` — the latter is the DO's internal unique id, not the
      * name it was routed by (`getByName(puzzleId)`), so it'd write the
      * wrong catalog row. */
-    private updateCatalogPlayStatus(puzzleId: string, playStatus: "joinable" | "active" | "finished"): void {
+    private updateCatalogPlayStatus(
+        puzzleId: string,
+        playStatus: "joinable" | "active" | "finished",
+    ): void {
         this.ctx.waitUntil(
             this.env.BROWSE.updatePlayStatus(puzzleId, playStatus).catch((err) => {
                 console.error("failed to update catalog play status", puzzleId, err);
@@ -877,7 +1000,9 @@ export class PuzzleDO extends DurableObject<Env> {
      * straight into a further `.andThen()` (see `startNow()`) without
      * re-fetching it. */
     private assertHost(row: PuzzleRow, hostToken: string): Result<PuzzleRow, string> {
-        return hostToken && hostToken === row.hostToken ? ok(row) : err("forbidden: only the host can do that");
+        return hostToken && hostToken === row.hostToken
+            ? ok(row)
+            : err("forbidden: only the host can do that");
     }
 
     private requireRow(): Result<PuzzleRow, string> {

@@ -1,285 +1,266 @@
 {
-  "version": "6",
-  "dialect": "sqlite",
-  "id": "8c98f604-3daf-4fb4-9588-057160e982b2",
-  "prevId": "e5b44220-5a4e-4542-badc-68b53f5a0365",
-  "tables": {
-    "catalog": {
-      "name": "catalog",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
+    "version": "6",
+    "dialect": "sqlite",
+    "id": "8c98f604-3daf-4fb4-9588-057160e982b2",
+    "prevId": "e5b44220-5a4e-4542-badc-68b53f5a0365",
+    "tables": {
+        "catalog": {
+            "name": "catalog",
+            "columns": {
+                "id": {
+                    "name": "id",
+                    "type": "text",
+                    "primaryKey": true,
+                    "notNull": true,
+                    "autoincrement": false
+                },
+                "kind": {
+                    "name": "kind",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false
+                },
+                "theme": {
+                    "name": "theme",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "theme_generated": {
+                    "name": "theme_generated",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false,
+                    "default": 0
+                },
+                "status": {
+                    "name": "status",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false,
+                    "default": "'generating'"
+                },
+                "thumbnail_key": {
+                    "name": "thumbnail_key",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "play_status": {
+                    "name": "play_status",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false,
+                    "default": "'joinable'"
+                },
+                "rating_sum": {
+                    "name": "rating_sum",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false,
+                    "default": 0
+                },
+                "rating_count": {
+                    "name": "rating_count",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false,
+                    "default": 0
+                },
+                "created_by": {
+                    "name": "created_by",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "creator_name": {
+                    "name": "creator_name",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "creator_color": {
+                    "name": "creator_color",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "replay_of": {
+                    "name": "replay_of",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "root_id": {
+                    "name": "root_id",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "created_at": {
+                    "name": "created_at",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false
+                },
+                "updated_at": {
+                    "name": "updated_at",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false
+                }
+            },
+            "indexes": {
+                "idx_catalog_created": {
+                    "name": "idx_catalog_created",
+                    "columns": ["\"created_at\" desc"],
+                    "isUnique": false
+                },
+                "idx_catalog_kind_created": {
+                    "name": "idx_catalog_kind_created",
+                    "columns": ["kind", "\"created_at\" desc"],
+                    "isUnique": false
+                },
+                "idx_catalog_play_status_created": {
+                    "name": "idx_catalog_play_status_created",
+                    "columns": ["play_status", "\"created_at\" desc"],
+                    "isUnique": false
+                },
+                "idx_catalog_created_by": {
+                    "name": "idx_catalog_created_by",
+                    "columns": ["created_by"],
+                    "isUnique": false
+                },
+                "idx_catalog_root_created": {
+                    "name": "idx_catalog_root_created",
+                    "columns": ["root_id", "\"created_at\" desc"],
+                    "isUnique": false
+                }
+            },
+            "foreignKeys": {},
+            "compositePrimaryKeys": {},
+            "uniqueConstraints": {},
+            "checkConstraints": {}
         },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "theme": {
-          "name": "theme",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "theme_generated": {
-          "name": "theme_generated",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'generating'"
-        },
-        "thumbnail_key": {
-          "name": "thumbnail_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "play_status": {
-          "name": "play_status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'joinable'"
-        },
-        "rating_sum": {
-          "name": "rating_sum",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "rating_count": {
-          "name": "rating_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "creator_name": {
-          "name": "creator_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "creator_color": {
-          "name": "creator_color",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "replay_of": {
-          "name": "replay_of",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "root_id": {
-          "name": "root_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+        "ratings": {
+            "name": "ratings",
+            "columns": {
+                "id": {
+                    "name": "id",
+                    "type": "integer",
+                    "primaryKey": true,
+                    "notNull": true,
+                    "autoincrement": true
+                },
+                "catalog_id": {
+                    "name": "catalog_id",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false
+                },
+                "rater": {
+                    "name": "rater",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": false,
+                    "autoincrement": false
+                },
+                "stars": {
+                    "name": "stars",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false
+                },
+                "created_at": {
+                    "name": "created_at",
+                    "type": "integer",
+                    "primaryKey": false,
+                    "notNull": true,
+                    "autoincrement": false
+                }
+            },
+            "indexes": {
+                "idx_ratings_catalog": {
+                    "name": "idx_ratings_catalog",
+                    "columns": ["catalog_id"],
+                    "isUnique": false
+                }
+            },
+            "foreignKeys": {
+                "ratings_catalog_id_catalog_id_fk": {
+                    "name": "ratings_catalog_id_catalog_id_fk",
+                    "tableFrom": "ratings",
+                    "tableTo": "catalog",
+                    "columnsFrom": ["catalog_id"],
+                    "columnsTo": ["id"],
+                    "onDelete": "no action",
+                    "onUpdate": "no action"
+                }
+            },
+            "compositePrimaryKeys": {},
+            "uniqueConstraints": {},
+            "checkConstraints": {
+                "stars_between_1_and_5": {
+                    "name": "stars_between_1_and_5",
+                    "value": "\"ratings\".\"stars\" BETWEEN 1 AND 5"
+                }
+            }
         }
-      },
-      "indexes": {
-        "idx_catalog_created": {
-          "name": "idx_catalog_created",
-          "columns": [
-            "\"created_at\" desc"
-          ],
-          "isUnique": false
-        },
-        "idx_catalog_kind_created": {
-          "name": "idx_catalog_kind_created",
-          "columns": [
-            "kind",
-            "\"created_at\" desc"
-          ],
-          "isUnique": false
-        },
-        "idx_catalog_play_status_created": {
-          "name": "idx_catalog_play_status_created",
-          "columns": [
-            "play_status",
-            "\"created_at\" desc"
-          ],
-          "isUnique": false
-        },
-        "idx_catalog_created_by": {
-          "name": "idx_catalog_created_by",
-          "columns": [
-            "created_by"
-          ],
-          "isUnique": false
-        },
-        "idx_catalog_root_created": {
-          "name": "idx_catalog_root_created",
-          "columns": [
-            "root_id",
-            "\"created_at\" desc"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
     },
-    "ratings": {
-      "name": "ratings",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "catalog_id": {
-          "name": "catalog_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "rater": {
-          "name": "rater",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "stars": {
-          "name": "stars",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+    "views": {},
+    "enums": {},
+    "_meta": {
+        "schemas": {},
+        "tables": {},
+        "columns": {}
+    },
+    "internal": {
+        "indexes": {
+            "idx_catalog_created": {
+                "columns": {
+                    "\"created_at\" desc": {
+                        "isExpression": true
+                    }
+                }
+            },
+            "idx_catalog_kind_created": {
+                "columns": {
+                    "\"created_at\" desc": {
+                        "isExpression": true
+                    }
+                }
+            },
+            "idx_catalog_play_status_created": {
+                "columns": {
+                    "\"created_at\" desc": {
+                        "isExpression": true
+                    }
+                }
+            },
+            "idx_catalog_root_created": {
+                "columns": {
+                    "\"created_at\" desc": {
+                        "isExpression": true
+                    }
+                }
+            }
         }
-      },
-      "indexes": {
-        "idx_ratings_catalog": {
-          "name": "idx_ratings_catalog",
-          "columns": [
-            "catalog_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "ratings_catalog_id_catalog_id_fk": {
-          "name": "ratings_catalog_id_catalog_id_fk",
-          "tableFrom": "ratings",
-          "tableTo": "catalog",
-          "columnsFrom": [
-            "catalog_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "stars_between_1_and_5": {
-          "name": "stars_between_1_and_5",
-          "value": "\"ratings\".\"stars\" BETWEEN 1 AND 5"
-        }
-      }
     }
-  },
-  "views": {},
-  "enums": {},
-  "_meta": {
-    "schemas": {},
-    "tables": {},
-    "columns": {}
-  },
-  "internal": {
-    "indexes": {
-      "idx_catalog_created": {
-        "columns": {
-          "\"created_at\" desc": {
-            "isExpression": true
-          }
-        }
-      },
-      "idx_catalog_kind_created": {
-        "columns": {
-          "\"created_at\" desc": {
-            "isExpression": true
-          }
-        }
-      },
-      "idx_catalog_play_status_created": {
-        "columns": {
-          "\"created_at\" desc": {
-            "isExpression": true
-          }
-        }
-      },
-      "idx_catalog_root_created": {
-        "columns": {
-          "\"created_at\" desc": {
-            "isExpression": true
-          }
-        }
-      }
-    }
-  }
 }

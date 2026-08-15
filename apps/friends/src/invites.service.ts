@@ -25,7 +25,16 @@ export const createInvite = (
     const id = crypto.randomUUID();
     const createdAt = Date.now();
     return query(
-        db.insert(gameInvites).values({id, kind, sessionId, inviterId, recipientId, status: "pending", createdAt, respondedAt: null}),
+        db.insert(gameInvites).values({
+            id,
+            kind,
+            sessionId,
+            inviterId,
+            recipientId,
+            status: "pending",
+            createdAt,
+            respondedAt: null,
+        }),
     ).map(() => ({id, kind, sessionId, inviterUsername, inviterColor, createdAt}));
 };
 
@@ -34,7 +43,11 @@ export const createInvite = (
  * friends.service.ts's `getFriendsPageData` for the same pattern. An
  * invite whose inviter no longer resolves (shouldn't happen) is dropped
  * rather than shown with a blank name. */
-export const listPendingInvites = (db: Db, accounts: AccountsRpc, recipientId: string): ResultAsync<InviteSummary[], string> =>
+export const listPendingInvites = (
+    db: Db,
+    accounts: AccountsRpc,
+    recipientId: string,
+): ResultAsync<InviteSummary[], string> =>
     query(
         db
             .select({
