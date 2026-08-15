@@ -118,9 +118,10 @@ export interface LeaderboardEntry {
     lastPlayedAt: number;
     /** Whether this row's user is a friend of the requesting viewer. Set by
      * `topScores` when it's given a logged-in viewer, and by `friendScores`
-     * for every row except the viewer's own (every other row there is a
-     * friend by construction). Left undefined when there's no session. */
-    isFriend?: boolean;
+     * for every row (every other row there is a friend by construction).
+     * Null for the viewer's own row — you aren't your own friend — in both
+     * cases. Left undefined when there's no session. */
+    isFriend?: boolean | null;
 }
 
 /** Builds every `LeaderboardEntry` field derivable from a `TotalRow` alone
@@ -214,7 +215,7 @@ export async function topScores(
     const results = await withUserInfo(accounts, rawResults.slice(0, pageSize));
     const entries = results.map((row, i) => {
         const entry = toEntry(row, offset + i + 1, query.kind);
-        if (viewerFriendIds) entry.isFriend = viewerFriendIds.has(row.userId);
+        if (viewerFriendIds) entry.isFriend = row.userId === viewerId ? null : viewerFriendIds.has(row.userId);
         return entry;
     });
 
@@ -248,7 +249,7 @@ export async function friendScores(
     const results = await withUserInfo(accounts, rawResults.slice(0, FRIENDS_PAGE_SIZE));
     const entries = results.map((row, i) => {
         const entry = toEntry(row, offset + i + 1, query.kind);
-        entry.isFriend = row.userId !== userId;
+        entry.isFriend = row.userId === userId ? null : true;
         return entry;
     });
 

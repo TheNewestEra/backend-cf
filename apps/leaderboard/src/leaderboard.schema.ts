@@ -30,8 +30,9 @@ export const LeaderboardEntrySchema = z
         lastPlayedAt: z.number().openapi({description: "Epoch ms of this user's most recent scoring event counted in `score`"}),
         isFriend: z
             .boolean()
+            .nullable()
             .optional()
-            .openapi({description: "Whether this row's user is a friend of the signed-in requester; true for every row under scope=friends except the viewer's own, and omitted when there's no session"}),
+            .openapi({description: "Whether this row's user is a friend of the signed-in requester; true for every row under scope=friends, null for the viewer's own row, and omitted when there's no session"}),
     })
     .openapi("LeaderboardEntry");
 
