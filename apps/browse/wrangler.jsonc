@@ -33,16 +33,20 @@
       "migrations_dir": "../../migrations"
     }
   ],
-  // Same bucket `guess`/`puzzle` write their images to (see their
-  // wrangler.jsonc). Browse never writes here — it only reads back
-  // whatever `thumbnail_key` those services recorded via
-  // `markCatalogReady`, to serve GET /api/catalog/{id}/thumbnail.
-  "r2_buckets": [
-    {
-      "binding": "IMAGES",
-      "bucket_name": "game-guess-images"
-    }
-  ],
+  // No R2 binding here — browse never reads/writes the `IMAGES` bucket
+  // `guess`/`puzzle` write to directly; it only stores the `thumbnail_key`
+  // those services record via `markCatalogReady` and turns it into a URL
+  // (see catalog.service.ts's `toPublic()`), using the custom domain
+  // connected to that bucket below (set up directly on the bucket via
+  // R2 > Settings > Custom Domains — not something wrangler.jsonc itself
+  // can configure). `CatalogEntry.thumbnailUrl` points straight at this
+  // domain, so clients fetch image bytes directly off R2/Cloudflare's edge
+  // cache rather than proxying through any Worker. Same var, same value,
+  // on every service that builds an image URL (browse/guess/puzzle) — see
+  // @game-worker/shared/images' publicImageUrl().
+  "vars": {
+    "IMAGES_PUBLIC_URL": "https://dev.images.ryanb.co.za"
+  },
   // Cloudflare Flagship — same app every other service shares (see e.g.
   // apps/puzzle/wrangler.jsonc's fuller comment on this binding). This
   // service has no tunable knobs of its own yet; the only flag it reads
@@ -89,12 +93,9 @@
           "migrations_dir": "../../migrations"
         }
       ],
-      "r2_buckets": [
-        {
-          "binding": "IMAGES",
-          "bucket_name": "game-guess-images-staging"
-        }
-      ],
+      "vars": {
+        "IMAGES_PUBLIC_URL": "https://staging.images.ryanb.co.za"
+      },
       "flagship": [
         {
           "binding": "FLAGS",
@@ -150,12 +151,9 @@
           "migrations_dir": "../../migrations"
         }
       ],
-      "r2_buckets": [
-        {
-          "binding": "IMAGES",
-          "bucket_name": "game-guess-images-prod"
-        }
-      ],
+      "vars": {
+        "IMAGES_PUBLIC_URL": "https://images.ryanb.co.za"
+      },
       "flagship": [
         {
           "binding": "FLAGS",

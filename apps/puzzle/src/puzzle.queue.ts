@@ -1,4 +1,5 @@
 import {generateImage, generateImagePrompt} from "@game-worker/shared/ai";
+import {CACHE_CONTROL_IMMUTABLE} from "@game-worker/shared/images";
 import {puzzleImageKeyFor} from "./puzzle.constants";
 
 export interface PuzzleQueueMessage {
@@ -42,7 +43,9 @@ export async function processPuzzle(message: PuzzleQueueMessage, env: Env): Prom
     const key = puzzleImageKeyFor(puzzleId);
 
     const stream = await generateImage(env.AI, env.FLAGS, prompt);
-    await env.IMAGES.put(key, stream, {httpMetadata: {contentType: "image/png"}});
+    await env.IMAGES.put(key, stream, {
+        httpMetadata: {contentType: "image/png", cacheControl: CACHE_CONTROL_IMMUTABLE},
+    });
 
     await Promise.all([
         stub.setReady(prompt, resolvedTheme, themeGenerated),

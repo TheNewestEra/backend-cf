@@ -75,6 +75,13 @@
       "bucket_name": "game-guess-images"
     }
   ],
+  // The custom domain connected to the `IMAGES` bucket above — see
+  // apps/browse/wrangler.jsonc's fuller comment on this var. `sourceImageUrl`
+  // (see puzzle.model.ts's `readPublicState()`) points straight at this
+  // domain instead of a GET /puzzles/{id}/image route on this Worker.
+  "vars": {
+    "IMAGES_PUBLIC_URL": "https://dev.images.ryanb.co.za"
+  },
   // No D1 binding here on purpose — this service has no tables of its own.
   // Catalog status and score recording go through the BROWSE/LEADERBOARD
   // RPC bindings below instead of a direct database binding.
@@ -162,6 +169,9 @@
           "bucket_name": "game-guess-images-staging"
         }
       ],
+      "vars": {
+        "IMAGES_PUBLIC_URL": "https://staging.images.ryanb.co.za"
+      },
       "services": [
         {
           "binding": "ACCOUNTS",
@@ -256,6 +266,9 @@
           "bucket_name": "game-guess-images-prod"
         }
       ],
+      "vars": {
+        "IMAGES_PUBLIC_URL": "https://images.ryanb.co.za"
+      },
       "services": [
         {
           "binding": "ACCOUNTS",

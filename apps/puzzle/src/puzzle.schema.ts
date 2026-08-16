@@ -58,6 +58,13 @@ export const PuzzlePublicSchema = z
                 "puzzle that started with none.",
         }),
         prompt: z.string().nullable(),
+        sourceImageUrl: z.string().nullable().openapi({
+            description:
+                "Direct R2 URL for the full, unsliced source image once it's generated; the board renders " +
+                "every tile from this same file via CSS background-position (see the README). Immutable/long-" +
+                "cached at that URL, since a puzzle's image never changes in place (regenerate/replay always " +
+                "target a different id). Null until generation finishes.",
+        }),
         status: PuzzleStatusSchema,
         error: z.string().optional(),
         gridSize: z.number(),

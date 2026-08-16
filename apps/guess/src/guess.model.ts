@@ -6,6 +6,7 @@ import {err, ok, type Result} from "neverthrow";
 import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
+import {publicImageUrl} from "@game-worker/shared/images";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {fromRpcResult, type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
@@ -35,7 +36,6 @@ import {
     guessMinScore,
     guessTimeLimitSeconds,
     imageKeyFor,
-    imageUrlPathFor,
     postRoundSeconds,
     roundCount,
 } from "./guess.constants";
@@ -343,22 +343,14 @@ class GameDO extends DurableObject<Env> {
      * waiting its turn. Not guessable yet and no timer runs from here:
      * `ready_at` is purely informational (when generation finished); the
      * round only starts counting down once it actually becomes the current
-     * round (see `activateRound()`, which stamps `started_at`). Returns
-     * this game's own `origin` (see the `game` table's doc comment) so the
-     * queue consumer that just wrote the image to R2 (guess.queue.ts) can
-     * prime the edge cache at the exact URL a real GET request would use,
-     * without a second round trip just to read it back — empty string
-     * means no origin was recorded (shouldn't happen for a game created
-     * through POST /games, which always sets one). */
-    async setRoundImage(index: number, imageKey: string): Promise<string> {
+     * round (see `activateRound()`, which stamps `started_at`). */
+    async setRoundImage(index: number, imageKey: string): Promise<void> {
         this.db
             .update(rounds)
             .set({imageKey, status: "ready", readyAt: Date.now(), error: null})
             .where(eq(rounds.idx, index))
             .run();
         this.broadcast({type: GameWsEventType.RoundReady, index});
-        const gameRow = this.db.select({origin: game.origin}).from(game).limit(1).get();
-        return gameRow?.origin ?? "";
     }
 
     /** Every round's image is ready — open the waiting room rather than
@@ -1246,8 +1238,8 @@ class GameDO extends DurableObject<Env> {
                           )
                         : null,
                 imageUrl:
-                    gameRow?.origin && ROUND_VISIBLE_STATUSES.includes(r.status)
-                        ? new URL(imageUrlPathFor(gameRow.id, r.idx), gameRow.origin).toString()
+                    gameRow && ROUND_VISIBLE_STATUSES.includes(r.status)
+                        ? publicImageUrl(this.env.IMAGES_PUBLIC_URL, imageKeyFor(gameRow.id, r.idx))
                         : null,
                 prompt: ROUND_RESOLVED_STATUSES.includes(r.status) ? r.prompt : null,
             })),

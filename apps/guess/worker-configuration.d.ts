@@ -13,6 +13,7 @@ interface __BaseEnv_Env {
     GAME_QUEUE: Queue;
     FLAGS: Flagship;
     AI: Ai;
+    IMAGES_PUBLIC_URL: "https://dev.images.ryanb.co.za" | "https://staging.images.ryanb.co.za" | "https://images.ryanb.co.za";
     ACCOUNTS: AccountsRpc;
     BROWSE: CatalogRpc;
     LEADERBOARD: LeaderboardRpc;
