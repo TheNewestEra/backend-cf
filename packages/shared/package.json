@@ -23,7 +23,7 @@
         "./images": "./src/images.ts"
     },
     "dependencies": {
-        "@hono/zod-openapi": "^1.5.2",
+        "@hono/zod-openapi": "^1.5.3",
         "hono": "^4.13.1",
         "neverthrow": "^8.2.0",
         "zod": "^4.4.3"
