@@ -394,8 +394,6 @@ export class PuzzleDO extends DurableObject<Env> {
         const validated = this.requireParticipant(participantId, token, userId).andThen(
             (participant) =>
                 this.requireRow().andThen((row) => {
-                    if (row.status !== GameSessionStatus.Playing)
-                        return err("puzzle is not in progress");
                     const cellCount = row.gridSize * row.gridSize;
                     if (
                         !Number.isInteger(cellA) ||
@@ -411,10 +409,36 @@ export class PuzzleDO extends DurableObject<Env> {
                     return ok({participant, row});
                 }),
         );
-        if (validated.isErr()) return {ok: false, error: validated.error};
+        if (validated.isErr()) {
+            return {ok: false, error: validated.error};
+        }
         const {participant, row} = validated.value;
 
         const board: number[] = JSON.parse(row.board);
+
+        // Not in progress (not yet started, already solved, or timed out) —
+        // rather than error, this is a no-op: report the puzzle's actual
+        // current state back with nothing earned for this attempt, same
+        // shape as a real move's result so callers don't need a separate
+        // "was this a no-op" branch.
+        if (row.status !== GameSessionStatus.Playing) {
+            const totalScore =
+                this.db
+                    .select({total: sql<number>`COALESCE(SUM(${moves.score}),0)`})
+                    .from(moves)
+                    .where(eq(moves.participantId, participantId))
+                    .get()?.total ?? 0;
+            return toRpcResult(
+                ok({
+                    status: row.status,
+                    board,
+                    solved: board.every((tile, cell) => tile === cell),
+                    score: null,
+                    totalScore,
+                }),
+            );
+        }
+
         [board[cellA], board[cellB]] = [board[cellB]!, board[cellA]!];
 
         const scoredCells = new Set<number>(JSON.parse(row.scoredCells));
@@ -481,11 +505,7 @@ export class PuzzleDO extends DurableObject<Env> {
         const totalScore =
             this.db
                 .select({
-                    total: sql<number>`COALESCE(SUM(
-                    ${moves.score}
-                    ),
-                    0
-                    )`,
+                    total: sql<number>`COALESCE(SUM(${moves.score}),0)`,
                 })
                 .from(moves)
                 .where(eq(moves.participantId, participantId))
@@ -552,16 +572,20 @@ export class PuzzleDO extends DurableObject<Env> {
         const validated = this.requireParticipant(participantId, token, userId).andThen(
             (participant) =>
                 this.requireRow().andThen((row) => {
-                    if (row.status !== GameSessionStatus.Playing)
-                        return err("puzzle is not in progress");
                     const cellCount = row.gridSize * row.gridSize;
                     if (!Number.isInteger(cell) || cell < 0 || cell >= cellCount)
                         return err("invalid cell index");
-                    return ok(participant);
+                    return ok({participant, row});
                 }),
         );
         if (validated.isErr()) return {ok: false, error: validated.error};
-        const participant = validated.value;
+        const {participant, row} = validated.value;
+
+        // Not in progress (not yet started, already solved, or timed out) —
+        // rather than error, this is a no-op: nothing to highlight once
+        // there's no more play happening, same idea as `swapTiles()`'s own
+        // no-op for this case.
+        if (row.status !== GameSessionStatus.Playing) return toRpcResult(ok(undefined));
 
         if (participant.selectedCell !== null && participant.selectedCell !== cell) {
             this.broadcast({

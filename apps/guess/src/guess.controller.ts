@@ -3,10 +3,10 @@ import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
-import {immutableImageResponse} from "@game-worker/shared/images";
+import {cachedImageResponse, primeImageCache} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUser} from "./auth.middleware";
-import {HostBodySchema, imageKeyFor} from "./guess.constants";
+import {HostBodySchema, imageKeyFor, imageUrlPathFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
 import type {GamePublic} from "./guess.model";
 import type {RoundPublic} from "./guess.schema";
@@ -397,19 +397,30 @@ guessRoutes.openapi(
         }
 
         const gameId = crypto.randomUUID();
+        const origin = new URL(c.req.url).origin;
         // Copy every round's image into the new game's own R2 keys rather
         // than spending a fresh AI call per round — mirrors POST
-        // /puzzles/{id}/replay's image copy.
+        // /puzzles/{id}/replay's image copy. Each source read is teed: one
+        // branch is spent uploading the copy, the other primes the edge
+        // cache at the new round's own image URL — see
+        // primeImageCache()'s doc comment.
         for (let index = 0; index < prompts.length; index++) {
             const sourceImage = await c.env.IMAGES.get(imageKeyFor(sourceId, index));
             if (!sourceImage) return c.json({error: "no images to replay"}, 409);
-            await c.env.IMAGES.put(imageKeyFor(gameId, index), sourceImage.body, {
+            const [uploadStream, cacheStream] = sourceImage.body.tee();
+            await c.env.IMAGES.put(imageKeyFor(gameId, index), uploadStream, {
                 httpMetadata: sourceImage.httpMetadata,
             });
+            c.executionCtx.waitUntil(
+                primeImageCache(
+                    new Request(new URL(imageUrlPathFor(gameId, index), origin)),
+                    cacheStream,
+                    sourceImage.httpMetadata?.contentType ?? "image/png",
+                ),
+            );
         }
 
         const stub = c.env.GAME_DO.getByName(gameId);
-        const origin = new URL(c.req.url).origin;
         const hostToken = await stub.initFromSource(
             gameId,
             source.theme,
@@ -479,13 +490,15 @@ guessRoutes.openapi(
         const index = Number(rawIndex);
         if (!Number.isInteger(index) || index < 0) return c.notFound();
 
-        const state = await c.env.GAME_DO.getByName(gameId).getState();
-        const round = state.rounds[index];
-        if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return c.notFound();
+        const response = await cachedImageResponse(c.req.raw, c.executionCtx, async () => {
+            const state = await c.env.GAME_DO.getByName(gameId).getState();
+            const round = state.rounds[index];
+            if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return null;
 
-        const object = await c.env.IMAGES.get(imageKeyFor(gameId, index));
-        if (!object) return c.notFound();
+            return c.env.IMAGES.get(imageKeyFor(gameId, index));
+        });
+        if (!response) return c.notFound();
 
-        return immutableImageResponse(object);
+        return response;
     },
 );

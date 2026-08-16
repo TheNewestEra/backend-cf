@@ -1,7 +1,7 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
 import {GameKindSchema} from "@game-worker/shared/game";
-import {immutableImageResponse} from "@game-worker/shared/images";
+import {cachedImageResponse} from "@game-worker/shared/images";
 import {err, ok, type Result} from "neverthrow";
 import type {AccountRecord} from "@game-worker/shared/rpc-types";
 import {currentUser} from "./auth.middleware";
@@ -177,13 +177,14 @@ browseRoutes.openapi(
     }),
     async (c) => {
         const {id} = c.req.valid("param");
-        const key = await getThumbnailKey(createDb(c.env.DB), id);
-        if (!key) return c.notFound();
+        const response = await cachedImageResponse(c.req.raw, c.executionCtx, async () => {
+            const key = await getThumbnailKey(createDb(c.env.DB), id);
+            if (!key) return null;
+            return c.env.IMAGES.get(key);
+        });
+        if (!response) return c.notFound();
 
-        const object = await c.env.IMAGES.get(key);
-        if (!object) return c.notFound();
-
-        return immutableImageResponse(object);
+        return response;
     },
 );
 

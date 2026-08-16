@@ -343,14 +343,22 @@ class GameDO extends DurableObject<Env> {
      * waiting its turn. Not guessable yet and no timer runs from here:
      * `ready_at` is purely informational (when generation finished); the
      * round only starts counting down once it actually becomes the current
-     * round (see `activateRound()`, which stamps `started_at`). */
-    async setRoundImage(index: number, imageKey: string): Promise<void> {
+     * round (see `activateRound()`, which stamps `started_at`). Returns
+     * this game's own `origin` (see the `game` table's doc comment) so the
+     * queue consumer that just wrote the image to R2 (guess.queue.ts) can
+     * prime the edge cache at the exact URL a real GET request would use,
+     * without a second round trip just to read it back — empty string
+     * means no origin was recorded (shouldn't happen for a game created
+     * through POST /games, which always sets one). */
+    async setRoundImage(index: number, imageKey: string): Promise<string> {
         this.db
             .update(rounds)
             .set({imageKey, status: "ready", readyAt: Date.now(), error: null})
             .where(eq(rounds.idx, index))
             .run();
         this.broadcast({type: GameWsEventType.RoundReady, index});
+        const gameRow = this.db.select({origin: game.origin}).from(game).limit(1).get();
+        return gameRow?.origin ?? "";
     }
 
     /** Every round's image is ready — open the waiting room rather than

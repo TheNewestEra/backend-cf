@@ -3,12 +3,13 @@ import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
-import {immutableImageResponse} from "@game-worker/shared/images";
+import {cachedImageResponse, primeImageCache} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUser} from "./auth.middleware";
 import {
     HostBodySchema,
     puzzleImageKeyFor,
+    puzzleImageUrlPathFor,
     puzzleTimeLimitMs,
     resolveGridSize,
 } from "./puzzle.constants";
@@ -410,9 +411,23 @@ puzzleRoutes.openapi(
         if (!sourceImage) {
             return c.json({error: "no image to replay"}, 409);
         }
-        await c.env.IMAGES.put(puzzleImageKeyFor(puzzleId), sourceImage.body, {
+        // Teed rather than a single read: one branch is spent uploading the
+        // copy, the other primes the edge cache at the new puzzle's own
+        // image URL — see primeImageCache()'s doc comment. Safe to warm
+        // immediately here (unlike guess's round images) since Piece
+        // Puzzle's image route has no reveal gate — the source image is
+        // servable the moment it exists in R2.
+        const [uploadStream, cacheStream] = sourceImage.body.tee();
+        await c.env.IMAGES.put(puzzleImageKeyFor(puzzleId), uploadStream, {
             httpMetadata: sourceImage.httpMetadata,
         });
+        c.executionCtx.waitUntil(
+            primeImageCache(
+                new Request(new URL(puzzleImageUrlPathFor(puzzleId), new URL(c.req.url).origin)),
+                cacheStream,
+                sourceImage.httpMetadata?.contentType ?? "image/png",
+            ),
+        );
 
         // Re-evaluate rather than reusing source.timeLimitMs: the flag may
         // have changed since the source puzzle was created, and a replay is
@@ -469,9 +484,11 @@ puzzleRoutes.openapi(
     }),
     async (c) => {
         const {id} = c.req.valid("param");
-        const object = await c.env.IMAGES.get(puzzleImageKeyFor(id));
-        if (!object) return c.notFound();
+        const response = await cachedImageResponse(c.req.raw, c.executionCtx, () =>
+            c.env.IMAGES.get(puzzleImageKeyFor(id)),
+        );
+        if (!response) return c.notFound();
 
-        return immutableImageResponse(object);
+        return response;
     },
 );

@@ -3,6 +3,14 @@ export function puzzleImageKeyFor(puzzleId: string): string {
     return `puzzles/${puzzleId}/source.png`;
 }
 
+/** Path of the image route a puzzle's source image lives at — kept in one
+ * place so a writer priming the edge cache (see puzzle.controller.ts's
+ * `/replay`) and this file's own `GET /puzzles/{id}/image` route (the
+ * reader) can't drift apart, same spirit as guess's `imageUrlPathFor()`. */
+export function puzzleImageUrlPathFor(puzzleId: string): string {
+    return `/puzzles/${puzzleId}/image`;
+}
+
 const MIN_TIME_LIMIT_SECONDS = 30;
 const MAX_TIME_LIMIT_SECONDS = 600;
 

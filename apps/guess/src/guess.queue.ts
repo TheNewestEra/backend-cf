@@ -5,7 +5,8 @@
 
 import {generateImage, generateRoundPrompts} from "@game-worker/shared/ai";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
-import {imageKeyFor} from "./guess.constants";
+import {primeImageCache} from "@game-worker/shared/images";
+import {imageKeyFor, imageUrlPathFor} from "./guess.constants";
 import {RoundStatus} from "./guess.schema";
 
 export interface GuessQueueMessage {
@@ -73,9 +74,27 @@ async function generateAndStoreImage(
     await stub.setRoundStatus(index, RoundStatus.Generating);
     try {
         const stream = await generateImage(env.AI, env.FLAGS, prompt);
+        // Teed rather than read back from R2 after the fact: one branch is
+        // spent uploading, the other primes the edge cache with the exact
+        // same bytes — see primeImageCache()'s doc comment.
+        const [uploadStream, cacheStream] = stream.tee();
         const key = imageKeyFor(gameId, index);
-        await env.IMAGES.put(key, stream, {httpMetadata: {contentType: "image/png"}});
-        await stub.setRoundImage(index, key);
+        await env.IMAGES.put(key, uploadStream, {httpMetadata: {contentType: "image/png"}});
+        // setRoundImage() only after the object actually exists in R2 (same
+        // ordering as before this change) — its return value is this game's
+        // origin, needed to build the absolute URL a real GET against this
+        // round's image route would use (see guess.model.ts's doc comment
+        // on setRoundImage()).
+        const origin = await stub.setRoundImage(index, key);
+        if (origin) {
+            await primeImageCache(
+                new Request(new URL(imageUrlPathFor(gameId, index), origin)),
+                cacheStream,
+                "image/png",
+            );
+        } else {
+            await cacheStream.cancel();
+        }
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await stub.setRoundStatus(index, RoundStatus.Error, message);
