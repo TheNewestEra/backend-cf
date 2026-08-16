@@ -71,17 +71,9 @@ export async function guessMatchThreshold(env: Env): Promise<number> {
 
 /** R2 key for a guess-game round's image. Must match the image model's
  * output format (see IMAGE_MODEL in @game-worker/shared/ai) — kept in one
- * place so the writer (queue consumer) and reader (image route) can't
- * drift apart. */
+ * place so the writer (queue consumer) and reader (GameDO.readPublicState(),
+ * which turns this into a public `imageUrl` via
+ * @game-worker/shared/images' publicImageUrl()) can't drift apart. */
 export function imageKeyFor(gameId: string, index: number): string {
     return `games/${gameId}/${index}.png`;
-}
-
-/** Path of the image route a round's `imageUrl` (see guess.schema.ts's
- * `RoundPublicSchema`) resolves against — kept in one place so
- * `GameDO.readPublicState()` (the writer) and this file's own `GET
- * /games/{id}/images/{index}` route (the reader) can't drift apart, same
- * spirit as `imageKeyFor()` above. */
-export function imageUrlPathFor(gameId: string, index: number): string {
-    return `/games/${gameId}/images/${index}`;
 }

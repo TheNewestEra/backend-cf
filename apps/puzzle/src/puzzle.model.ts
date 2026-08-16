@@ -6,6 +6,7 @@ import {err, ok, type Result} from "neverthrow";
 import {generateColor, isValidHexColor} from "@game-worker/shared/color";
 import {maxPlayerLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
+import {publicImageUrl} from "@game-worker/shared/images";
 import {lobbyCountdownSeconds, lobbyEndsAt, lobbyRemainingMs} from "@game-worker/shared/lobby";
 import {fromRpcResult, type RpcResult, toRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUserFromRequestVia} from "@game-worker/shared/session";
@@ -13,7 +14,7 @@ import {WsEventType} from "@game-worker/shared/ws-messages";
 import {createDb, type Db} from "./db/client";
 import migrations from "./db/migrations";
 import {moves, participants, puzzle} from "./db/schema";
-import {puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
+import {puzzleImageKeyFor, puzzleMaxScore, puzzleMinSolvedScore} from "./puzzle.constants";
 import type {
     MoveResultSchema,
     PuzzlePublicSchema,
@@ -1042,6 +1043,7 @@ export class PuzzleDO extends DurableObject<Env> {
                 theme: null,
                 themeGenerated: false,
                 prompt: null,
+                sourceImageUrl: null,
                 status: GameSessionStatus.Queued,
                 gridSize: 0,
                 board: [],
@@ -1109,6 +1111,14 @@ export class PuzzleDO extends DurableObject<Env> {
             theme: row.theme,
             themeGenerated: row.themeGenerated === 1,
             prompt: row.prompt,
+            // Gated on `prompt` rather than `status`: the queue consumer
+            // only ever sets `prompt` once the image is actually in R2 (see
+            // puzzle.queue.ts's processPuzzle(), which uploads before
+            // calling setReady()), so this is never null once the image
+            // genuinely exists.
+            sourceImageUrl: row.prompt
+                ? publicImageUrl(this.env.IMAGES_PUBLIC_URL, puzzleImageKeyFor(row.id))
+                : null,
             status: row.status,
             error: row.error ?? undefined,
             gridSize: row.gridSize,

@@ -71,9 +71,10 @@ export const RoundPublicSchema = z
             .nullable()
             .openapi({
                 description:
-                    "Absolute URL to this round's generated image (same bytes as GET /games/{id}/images/{index}); " +
-                    "null under the same spoiler gate as that route — not yet this round's turn, or it hasn't " +
-                    "generated yet. See ROUND_VISIBLE_STATUSES.",
+                    "Direct R2 URL to this round's generated image. Null while it isn't yet this round's turn " +
+                    "(or the image hasn't generated yet) — see ROUND_VISIBLE_STATUSES — though note this only " +
+                    "gates the field, not the underlying object: the bucket is public, so the same URL is " +
+                    "guessable from the round's index once a game's id is known.",
             }),
         prompt: z
             .string()

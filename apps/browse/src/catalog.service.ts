@@ -1,4 +1,5 @@
 import {type GameKind, playUrlFor} from "@game-worker/shared/game";
+import {publicImageUrl} from "@game-worker/shared/images";
 import type {FriendsRpc} from "@game-worker/shared/rpc-types";
 import type {D1Response} from "@cloudflare/workers-types";
 import {and, desc, eq, inArray, ne, sql} from "drizzle-orm";
@@ -93,15 +94,6 @@ export const markCatalogError = (db: Db, id: string): Promise<D1Response> =>
         .where(eq(catalog.id, id))
         .run();
 
-export const getThumbnailKey = async (db: Db, id: string): Promise<string | null> => {
-    const row = await db
-        .select({thumbnailKey: catalog.thumbnailKey})
-        .from(catalog)
-        .where(eq(catalog.id, id))
-        .get();
-    return row?.thumbnailKey ?? null;
-};
-
 export interface ListCatalogOptions {
     kind: GameKind | null;
     sort: CatalogSort;
@@ -117,7 +109,7 @@ export const listCatalog = async (
     db: Db,
     friends: FriendsRpc,
     opts: ListCatalogOptions,
-    origin: string,
+    imagesPublicUrl: string,
 ): Promise<CatalogEntry[]> => {
     const friendIdsList = opts.createdByFriendsOf
         ? await friends.getFriendIds(opts.createdByFriendsOf)
@@ -182,7 +174,7 @@ export const listCatalog = async (
         .limit(opts.limit)
         .offset(opts.offset);
 
-    return rows.map((row) => toPublic(row, origin));
+    return rows.map((row) => toPublic(row, imagesPublicUrl));
 };
 
 const roundToNearestHalf = (value: number): number => Math.round(value * 2) / 2;
@@ -237,12 +229,12 @@ type CatalogRow = Pick<
     | "createdAt"
 > & {replayCount: number; ratingSum: number; ratingCount: number};
 
-const toPublic = (row: CatalogRow, origin: string): CatalogEntry => ({
+const toPublic = (row: CatalogRow, imagesPublicUrl: string): CatalogEntry => ({
     id: row.id,
     kind: row.kind,
     theme: row.theme,
     themeGenerated: row.themeGenerated === 1,
-    thumbnailUrl: row.thumbnailKey ? new URL(`/api/catalog/${row.id}/thumbnail`, origin) : null,
+    thumbnailUrl: row.thumbnailKey ? publicImageUrl(imagesPublicUrl, row.thumbnailKey) : null,
     playUrl: playUrlFor(row.kind, row.id),
     playStatus: row.playStatus,
     averageRating: row.ratingCount > 0 ? roundToNearestHalf(row.ratingSum / row.ratingCount) : null,

@@ -3,14 +3,14 @@ import {ErrorSchema, OkSchema} from "@game-worker/shared/common.schema";
 import {maxPlayerLength, maxThemeLength} from "@game-worker/shared/game-session";
 import {GameSessionStatus} from "@game-worker/shared/game-session-status";
 import {hostActionError} from "@game-worker/shared/http-exceptions";
-import {cachedImageResponse, primeImageCache} from "@game-worker/shared/images";
+import {CACHE_CONTROL_IMMUTABLE} from "@game-worker/shared/images";
 import {fromRpcResult} from "@game-worker/shared/rpc-result";
 import {currentUser} from "./auth.middleware";
-import {HostBodySchema, imageKeyFor, imageUrlPathFor} from "./guess.constants";
+import {HostBodySchema, imageKeyFor} from "./guess.constants";
 import type {GuessQueueMessage} from "./guess.queue";
 import type {GamePublic} from "./guess.model";
 import type {RoundPublic} from "./guess.schema";
-import {GamePublicSchema, JoinResultSchema, ROUND_VISIBLE_STATUSES} from "./guess.schema";
+import {GamePublicSchema, JoinResultSchema} from "./guess.schema";
 
 export const guessRoutes = new OpenAPIHono<{Bindings: Env}>();
 
@@ -400,24 +400,16 @@ guessRoutes.openapi(
         const origin = new URL(c.req.url).origin;
         // Copy every round's image into the new game's own R2 keys rather
         // than spending a fresh AI call per round — mirrors POST
-        // /puzzles/{id}/replay's image copy. Each source read is teed: one
-        // branch is spent uploading the copy, the other primes the edge
-        // cache at the new round's own image URL — see
-        // primeImageCache()'s doc comment.
+        // /puzzles/{id}/replay's image copy.
         for (let index = 0; index < prompts.length; index++) {
             const sourceImage = await c.env.IMAGES.get(imageKeyFor(sourceId, index));
             if (!sourceImage) return c.json({error: "no images to replay"}, 409);
-            const [uploadStream, cacheStream] = sourceImage.body.tee();
-            await c.env.IMAGES.put(imageKeyFor(gameId, index), uploadStream, {
-                httpMetadata: sourceImage.httpMetadata,
+            await c.env.IMAGES.put(imageKeyFor(gameId, index), sourceImage.body, {
+                httpMetadata: {
+                    ...sourceImage.httpMetadata,
+                    cacheControl: CACHE_CONTROL_IMMUTABLE,
+                },
             });
-            c.executionCtx.waitUntil(
-                primeImageCache(
-                    new Request(new URL(imageUrlPathFor(gameId, index), origin)),
-                    cacheStream,
-                    sourceImage.httpMetadata?.contentType ?? "image/png",
-                ),
-            );
         }
 
         const stub = c.env.GAME_DO.getByName(gameId);
@@ -446,59 +438,5 @@ guessRoutes.openapi(
         await c.env.BROWSE.markCatalogReady(gameId, imageKeyFor(gameId, 0));
 
         return c.json({gameId, hostToken, ...joined.value}, 202);
-    },
-);
-
-guessRoutes.openapi(
-    createRoute({
-        method: "get",
-        path: "/games/{id}/images/{index}",
-        tags: ["Guess the Prompt"],
-        summary: "Get a round's generated image",
-        description:
-            "Raw image bytes, not JSON — the same image a round's public state points at once that round becomes " +
-            "the active one. Spoiler-gated until then: a round not yet its turn 404s even once its image exists, " +
-            "same as one that hasn't generated yet — visible again once it's the current round, and stays visible " +
-            "forever after (including once the game finishes, for post-game review). Immutable/long-cached once " +
-            "served, since a round's image never changes after it's generated.",
-        request: {
-            params: z.object({
-                id: z.string(),
-                // Kept as a plain string (not z.coerce.number()) so an
-                // out-of-range/non-numeric index still 404s exactly like a
-                // missing image, rather than the validator's 400 — see the
-                // manual check below.
-                index: z.string().openapi({
-                    description:
-                        "0-based round index (see this game's rounds array for the valid count)",
-                }),
-            }),
-        },
-        responses: {
-            200: {
-                description: "Round image",
-                content: {"image/png": {schema: z.string().openapi({format: "binary"})}},
-            },
-            404: {
-                description:
-                    "No such game/round, the image hasn't generated yet, or it isn't this round's turn yet",
-            },
-        },
-    }),
-    async (c) => {
-        const {id: gameId, index: rawIndex} = c.req.valid("param");
-        const index = Number(rawIndex);
-        if (!Number.isInteger(index) || index < 0) return c.notFound();
-
-        const response = await cachedImageResponse(c.req.raw, c.executionCtx, async () => {
-            const state = await c.env.GAME_DO.getByName(gameId).getState();
-            const round = state.rounds[index];
-            if (!round || !ROUND_VISIBLE_STATUSES.includes(round.status)) return null;
-
-            return c.env.IMAGES.get(imageKeyFor(gameId, index));
-        });
-        if (!response) return c.notFound();
-
-        return response;
     },
 );

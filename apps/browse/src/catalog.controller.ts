@@ -1,7 +1,6 @@
 import {createRoute, OpenAPIHono, z} from "@hono/zod-openapi";
 import {ErrorSchema} from "@game-worker/shared/common.schema";
 import {GameKindSchema} from "@game-worker/shared/game";
-import {cachedImageResponse} from "@game-worker/shared/images";
 import {err, ok, type Result} from "neverthrow";
 import type {AccountRecord} from "@game-worker/shared/rpc-types";
 import {currentUser} from "./auth.middleware";
@@ -13,7 +12,7 @@ import {
     CatalogSortSchema,
     PlayStatusSchema,
 } from "./catalog.schema";
-import {getThumbnailKey, listCatalog, submitRating} from "./catalog.service";
+import {listCatalog, submitRating} from "./catalog.service";
 import {createDb} from "./db/client";
 
 const DEFAULT_LIMIT = 24;
@@ -86,8 +85,6 @@ browseRoutes.openapi(
         const viewer = requireViewerFor(scope ?? CatalogScope.All, user);
         if (viewer.isErr()) return c.json({error: viewer.error}, 401);
 
-        const origin = new URL(c.req.url).origin;
-
         const entries = await listCatalog(
             createDb(c.env.DB),
             c.env.FRIENDS,
@@ -100,7 +97,7 @@ browseRoutes.openapi(
                 limit: clamp(limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT),
                 offset: Math.max(0, offset ?? 0),
             },
-            origin,
+            c.env.IMAGES_PUBLIC_URL,
         );
         return c.json({entries}, 200);
     },
@@ -152,39 +149,6 @@ browseRoutes.openapi(
         );
         if (result.isErr()) return c.json({error: result.error}, 404);
         return c.json(result.value, 200);
-    },
-);
-
-browseRoutes.openapi(
-    createRoute({
-        method: "get",
-        path: "/api/catalog/{id}/thumbnail",
-        tags: ["Browse"],
-        summary: "Get a catalog entry's thumbnail image",
-        description:
-            "Raw image bytes, not JSON — the same image a `CatalogEntry.thumbnailUrl` points at once the entry " +
-            "is `ready`. Served straight out of the `IMAGES` bucket `guess`/`puzzle` write to (this Worker only " +
-            "reads it), keyed off the `thumbnail_key` recorded via the `CatalogService` RPC. Immutable/long-" +
-            "cached once served, since an entry's thumbnail never changes in place.",
-        request: {params: z.object({id: z.string()})},
-        responses: {
-            200: {
-                description: "Thumbnail image",
-                content: {"image/png": {schema: z.string().openapi({format: "binary"})}},
-            },
-            404: {description: "No such catalog entry, or it hasn't generated a thumbnail yet"},
-        },
-    }),
-    async (c) => {
-        const {id} = c.req.valid("param");
-        const response = await cachedImageResponse(c.req.raw, c.executionCtx, async () => {
-            const key = await getThumbnailKey(createDb(c.env.DB), id);
-            if (!key) return null;
-            return c.env.IMAGES.get(key);
-        });
-        if (!response) return c.notFound();
-
-        return response;
     },
 );
 

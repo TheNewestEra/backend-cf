@@ -9,9 +9,9 @@
 import type {AccountsRpc, FriendsRpc} from "@game-worker/shared/rpc-types";
 
 interface __BaseEnv_Env {
-    IMAGES: R2Bucket;
     DB: D1Database;
     FLAGS: Flagship;
+    IMAGES_PUBLIC_URL: "https://dev.images.ryanb.co.za" | "https://staging.images.ryanb.co.za" | "https://images.ryanb.co.za";
     ACCOUNTS: AccountsRpc;
     FRIENDS: FriendsRpc;
 }
